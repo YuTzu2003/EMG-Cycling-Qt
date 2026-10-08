@@ -1,0 +1,28 @@
+[project]
+name = "delsys"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Your Name", email = "you@example.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "PyQt5>=5.15",
+    "pyqtgraph>=0.13",
+]
+
+[tool.uv]
+# PyQt5-Qt5 publishes some releases without a Windows wheel. Requiring the
+# actual deployment platform makes uv backtrack to a Windows-compatible build.
+required-environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
+
+[project.scripts]
+delsys = "delsys:main"
+
+[build-system]
+requires = ["uv_build>=0.12.9,<0.13.0"]
+build-backend = "uv_build"

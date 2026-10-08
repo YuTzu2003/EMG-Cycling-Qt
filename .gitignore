@@ -1,0 +1,19 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Vendor credentials must never be committed
+DelsysAPI.key
+DelsysAPI.lic
+
+# Captured biosignal data
+recordings/
+*.csv
+
+# Virtual environments
+.venv
+.uv-cache/
