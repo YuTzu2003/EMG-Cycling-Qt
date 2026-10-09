@@ -127,20 +127,18 @@ class TrignoWindow(QMainWindow):
         grid.addWidget(self.trainerDevices, 0, 1)
         self.scanTrainerButton = QPushButton("掃描")
         self.connectTrainerButton = QPushButton("連線", objectName="primary")
-        self.disconnectTrainerButton = QPushButton("中斷連線")
         grid.addWidget(self.scanTrainerButton, 0, 2)
         grid.addWidget(self.connectTrainerButton, 0, 3)
-        grid.addWidget(self.disconnectTrainerButton, 0, 4)
         self.trainerStatus = QLabel("藍牙服務準備中…", objectName="status")
-        grid.addWidget(self.trainerStatus, 1, 0, 1, 5)
+        grid.addWidget(self.trainerStatus, 1, 0, 1, 4)
         self.trainerTelemetryLabel = QLabel("即時騎乘資料：尚未連線", objectName="muted")
-        grid.addWidget(self.trainerTelemetryLabel, 2, 0, 1, 5)
+        grid.addWidget(self.trainerTelemetryLabel, 2, 0, 1, 4)
         layout.addWidget(connection)
         controls = QHBoxLayout()
         resistance = QFrame(objectName="panel")
         resistanceLayout = QVBoxLayout(resistance)
-        resistanceLayout.addWidget(QLabel("阻力等級（ERG）", objectName="sectionTitle"))
-        self.resistanceRangeLabel = QLabel("等級 0–30；連線後依設備範圍換算", objectName="muted")
+        resistanceLayout.addWidget(QLabel("固定阻力", objectName="sectionTitle"))
+        self.resistanceRangeLabel = QLabel("等級 0–30；連線後依設備原生阻力範圍換算", objectName="muted")
         resistanceLayout.addWidget(self.resistanceRangeLabel)
         resistanceRow = QHBoxLayout()
         self.resistanceSpin = QSpinBox()
@@ -155,17 +153,15 @@ class TrignoWindow(QMainWindow):
         resistanceRow.addWidget(self.resistanceSpin)
         resistanceRow.addWidget(self.increaseResistanceButton)
         resistanceLayout.addLayout(resistanceRow)
-        self.nativeResistanceLabel = QLabel("原生阻力設定：0（由 ERG 功率控制）", objectName="muted")
+        self.nativeResistanceLabel = QLabel("原生阻力：0（固定模式）", objectName="muted")
         resistanceLayout.addWidget(self.nativeResistanceLabel)
         controls.addWidget(resistance)
         self.resistancePanel = resistance
         self.resistanceStepLevels = 1
-        self.level30Watts = 300
         self.scanTrainerButton.clicked.connect(self.scanTrainer)
         self.connectTrainerButton.clicked.connect(self.connectTrainer)
-        self.disconnectTrainerButton.clicked.connect(self.disconnectTrainer)
-        self.decreaseResistanceButton.clicked.connect(lambda: self.adjustTargetPower(-1))
-        self.increaseResistanceButton.clicked.connect(lambda: self.adjustTargetPower(1))
+        self.decreaseResistanceButton.clicked.connect(lambda: self.adjustFixedResistance(-1))
+        self.increaseResistanceButton.clicked.connect(lambda: self.adjustFixedResistance(1))
         self.setTrainerControls(False)
         return tab
 
@@ -257,7 +253,7 @@ class TrignoWindow(QMainWindow):
             ("speed", "速度", "km/h"),
             ("cadence", "踏頻", "rpm"),
             ("power", "即時功率", "W"),
-            ("resistance", "原生阻力", "level"),
+            ("resistance", "阻力", "level"),
         ):
             card = QFrame(objectName="metricCard")
             cardLayout = QVBoxLayout(card)
@@ -265,8 +261,12 @@ class TrignoWindow(QMainWindow):
             cardLayout.setSpacing(1)
             cardLayout.addWidget(QLabel(title, objectName="metricTitle"))
             value = QLabel("--", objectName="metricValue")
-            cardLayout.addWidget(value)
-            cardLayout.addWidget(QLabel(unit, objectName="metricUnit"))
+            valueRow = QHBoxLayout()
+            valueRow.setSpacing(6)
+            valueRow.addWidget(value)
+            valueRow.addStretch()
+            valueRow.addWidget(QLabel(unit, objectName="metricUnit"))
+            cardLayout.addLayout(valueRow)
             self.bikeMetricValues[key] = value
             metrics.addWidget(card, 1)
         layout.addLayout(metrics)
@@ -357,9 +357,8 @@ class TrignoWindow(QMainWindow):
         self.trainerWorker.connected.connect(self.trainerConnected)
         self.trainerWorker.disconnected.connect(self.trainerDisconnected)
         self.trainerWorker.resistanceSet.connect(self.resistanceSet)
-        self.trainerWorker.appLevelSet.connect(self.appLevelSet)
+        self.trainerWorker.fixedResistanceSet.connect(self.fixedResistanceSet)
         self.trainerWorker.telemetryReceived.connect(self.updateTrainerTelemetry)
-        self.trainerWorker.powerSet.connect(self.targetPowerSet)
         self.trainerWorker.failed.connect(self.trainerFailed)
 
     def trainerReady(self) -> None:
@@ -368,12 +367,12 @@ class TrignoWindow(QMainWindow):
         self.trainerWorker.scan()
 
     def resistanceSet(self, value: float) -> None:
-        self.nativeResistanceLabel.setText(f"原生阻力設定：{value:g}")
+        self.nativeResistanceLabel.setText(f"原生阻力：{value:g}")
         self.setTrainerStatus(f"原生阻力已設定為 {value:g}", "connected")
 
-    def adjustTargetPower(self, direction: int) -> None:
+    def adjustFixedResistance(self, direction: int) -> None:
         self.resistanceSpin.setValue(self.resistanceSpin.value() + direction * self.resistanceStepLevels)
-        self.trainerWorker.setAppLevelValue(self.resistanceSpin.value(), self.level30Watts)
+        self.trainerWorker.setFixedResistanceLevel(self.resistanceSpin.value())
 
     def updateResistanceStep(self, step: int) -> None:
         self.resistanceStepLevels = step
@@ -381,14 +380,12 @@ class TrignoWindow(QMainWindow):
         self.decreaseResistanceButton.setText(f"− {step} 級")
         self.increaseResistanceButton.setText(f"+ {step} 級")
 
-    def appLevelSet(self, level: int, watts: float) -> None:
-        self.nativeResistanceLabel.setText(f"原生阻力設定：0（等級 {level}/30 · ERG {watts:g} W）")
-        self.setTrainerStatus(f"阻力等級 {level}/30：ERG {watts:g} W", "connected")
-
-    def targetPowerSet(self, value: float) -> None:
-        self.resistanceSpin.setValue(round(value))
-        self.nativeResistanceLabel.setText(f"原生阻力設定：0（ERG 目標 {value:g} W）")
-        self.setTrainerStatus(f"ERG 目標功率已設定為 {value:g} W", "connected")
+    def fixedResistanceSet(self, level: int, nativeResistance: float) -> None:
+        self.nativeResistanceLabel.setText(
+            f"原生阻力：{nativeResistance:g}（固定模式 · 等級 {level}/30）"
+        )
+        self.bikeMetricValues["resistance"].setText(f"{nativeResistance:g}")
+        self.setTrainerStatus(f"固定阻力等級 {level}/30：原生阻力 {nativeResistance:g}", "connected")
 
     def updateTrainerTelemetry(self, data: BikeTelemetry) -> None:
         fields: list[str] = []
@@ -450,28 +447,24 @@ class TrignoWindow(QMainWindow):
 
     def trainerConnected(self, info: dict) -> None:
         resistance: NumericRange = info["resistance"]
-        power: NumericRange = info["power"]
-        targetMinimum = round(power.minimum)
-        targetMaximum = round(power.maximum)
-        self.level30Watts = targetMaximum
+        nativeMinimum = resistance.minimum
+        nativeMaximum = resistance.maximum
         self.resistanceSpin.setRange(0, 30)
         self.resistanceSpin.setValue(0)
         self.updateResistanceStep(1)
         self.resistanceRangeLabel.setText(
-            f"設備功率：{targetMinimum}–{targetMaximum} W；第 0–30 級自動換算"
+            f"設備原生阻力：{nativeMinimum:g}–{nativeMaximum:g}；第 0–30 級自動換算"
         )
         self.setTrainerControls(True)
         self.trainerIsConnected = True
         self.setTrainerConnectionState(True)
         self.resetBikeMetrics()
+        self.bikeMetricValues["resistance"].setText(f"{info['nativeResistance']:g}")
         self.setTrainerStatus(f"已連線：{info['address']}，控制權已取得", "connected")
         if info["telemetryEnabled"]:
             self.trainerTelemetryLabel.setText("即時騎乘資料：等待踩踏…")
         else:
             self.trainerTelemetryLabel.setText("即時騎乘資料：此設備未提供 Indoor Bike Data")
-
-    def disconnectTrainer(self) -> None:
-        self.trainerWorker.disconnectDevice()
 
     def trainerDisconnected(self) -> None:
         self.setTrainerControls(False)
@@ -492,7 +485,6 @@ class TrignoWindow(QMainWindow):
     def setTrainerControls(self, connected: bool) -> None:
         self.decreaseResistanceButton.setEnabled(connected)
         self.increaseResistanceButton.setEnabled(connected)
-        self.disconnectTrainerButton.setEnabled(connected)
         self.connectTrainerButton.setEnabled(not connected)
 
     def setTrainerStatus(self, text: str, state: str) -> None:
@@ -546,8 +538,8 @@ class TrignoWindow(QMainWindow):
             QLabel#connectionIndicator { padding: 5px 8px; font-weight: 700; }
             QFrame#metricCard { background: white; border: 1px solid #dbe3ef; border-radius: 7px; }
             QLabel#metricTitle { color: #64748b; font-size: 11px; font-weight: 600; }
-            QLabel#metricValue { color: #0f172a; font-size: 23px; font-weight: 700; }
-            QLabel#metricUnit { color: #94a3b8; font-size: 10px; }
+            QLabel#metricValue { color: #0f172a; font-size: 26px; font-weight: 700; }
+            QLabel#metricUnit { color: #64748b; font-size: 13px; font-weight: 600; }
             QFrame#eventLogPanel { background: #111827; border: 1px solid #374151; border-radius: 7px; }
             QLabel#eventLogTitle { color: #f3f4f6; font-size: 13px; font-weight: 700; padding: 0 3px; }
             QPlainTextEdit#eventLog { background: transparent; color: #d1d5db; border: 0; padding: 3px; font-family: Consolas, monospace; }
