@@ -1,562 +1,428 @@
 #!/usr/bin/env python3
-"""Qt monitor for the Delsys Trigno SDK Server EMG TCP stream."""
-
 from __future__ import annotations
-
-import csv
 import sys
-import threading
-import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QThread, QTimer, pyqtSignal
-from PyQt5.QtWidgets import (
-    QApplication,
-    QCheckBox,
-    QDoubleSpinBox,
-    QFileDialog,
-    QHeaderView,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QSpinBox,
-    QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
-)
+from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QDoubleSpinBox,QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,QVBoxLayout, QWidget,)
+from delsys.sensor_mapping import SensorMapping, loadMappings, saveMappings
+from delsys.trigno import CHANNEL_COUNT, SAMPLE_RATE
+from delsys.workers import ConnectionWorker, StreamWorker
 
-from trigno_emg import TrignoClient, TrignoError, configure_console_encoding
+COLORS = ("#1684d7", "#e95f54", "#7e57c2", "#00897b", "#f39c12", "#5c6bc0", "#43a047", "#c2185b")
+MAPPING_PATH = Path(__file__).resolve().with_name("sensor_mapping.json")
 
+class MappingEditorDialog(QDialog):
+    """Edit all muscle names and abbreviations directly in the GUI."""
 
-CHANNEL_COUNT = 16
-SAMPLE_RATE = 2000.0
-RMS_WINDOW_SECONDS = 0.1
-RMS_WINDOW_SAMPLES = int(SAMPLE_RATE * RMS_WINDOW_SECONDS)
+    def __init__(self, mappings: list[SensorMapping], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("編輯感測器／肌肉對應")
+        self.resize(760, 650)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("修改後按「儲存並套用」。SDK Slot 是固定編號，無法變更。"))
+        headings = QGridLayout()
+        for column, title in enumerate(("Slot", "中文肌肉名稱", "English EMG name", "縮寫")):
+            headings.addWidget(QLabel(title, objectName="editorHeader"), 0, column)
+        layout.addLayout(headings)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        grid = QGridLayout(content)
+        grid.setColumnStretch(1, 2)
+        grid.setColumnStretch(2, 2)
+        self.edits: list[tuple[QLineEdit, QLineEdit, QLineEdit]] = []
+        for row, mapping in enumerate(mappings):
+            grid.addWidget(QLabel(f"S{mapping.slot:02d}"), row, 0)
+            chineseEdit = QLineEdit(mapping.chinese_name)
+            englishEdit = QLineEdit(mapping.english_name)
+            abbreviationEdit = QLineEdit(mapping.abbreviation)
+            grid.addWidget(chineseEdit, row, 1)
+            grid.addWidget(englishEdit, row, 2)
+            grid.addWidget(abbreviationEdit, row, 3)
+            self.edits.append((chineseEdit, englishEdit, abbreviationEdit))
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
+        buttons.button(QDialogButtonBox.Save).setText("儲存並套用")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
-
-class ConnectionWorker(QThread):
-    """Check that all SDK Server sockets can be opened without starting a stream."""
-
-    connected = pyqtSignal(str)
-    sensor_states_ready = pyqtSignal(object, object)
-    failed = pyqtSignal(str)
-
-    def __init__(self, host: str) -> None:
-        super().__init__()
-        self.host = host
-
-    def run(self) -> None:
-        try:
-            with TrignoClient(host=self.host, timeout=3.0) as client:
-                self.connected.emit(client.connect())
-                self.sensor_states_ready.emit(*client.sensor_states(CHANNEL_COUNT))
-        except (OSError, TrignoError, ValueError) as exc:
-            self.failed.emit(str(exc))
-
-
-class StreamWorker(QThread):
-    status_changed = pyqtSignal(str)
-    server_connected = pyqtSignal(str)
-    sensor_states_ready = pyqtSignal(object, object)
-    frames_ready = pyqtSignal(object)
-    stream_error = pyqtSignal(str)
-
-    def __init__(self, host: str, output_path: Path | None) -> None:
-        super().__init__()
-        self.host = host
-        self.output_path = output_path
-        self._stop_event = threading.Event()
-
-    def request_stop(self) -> None:
-        self._stop_event.set()
-
-    def run(self) -> None:
-        client = TrignoClient(host=self.host, timeout=5.0)
-        csv_file = None
-        writer = None
-        sample_index = 0
-        emit_buffer: list[tuple[float, ...]] = []
-        last_emit = time.monotonic()
-
-        try:
-            self.status_changed.emit("正在建立串流連線…")
-            with client:
-                self.server_connected.emit(client.connect())
-                self.status_changed.emit("正在讀取感測器狀態…")
-                self.sensor_states_ready.emit(*client.sensor_states(CHANNEL_COUNT))
-
-                if self.output_path:
-                    self.output_path.parent.mkdir(parents=True, exist_ok=True)
-                    csv_file = self.output_path.open("x", newline="", encoding="utf-8")
-                    writer = csv.writer(csv_file)
-                    writer.writerow(
-                        ["sample", "time_seconds"]
-                        + [f"sensor_{i}_emg" for i in range(1, CHANNEL_COUNT + 1)]
-                    )
-
-                client.start()
-                self.status_changed.emit("串流中")
-                while not self._stop_event.is_set():
-                    frames = client.read_emg_frames(CHANNEL_COUNT)
-                    if not frames:
-                        continue
-
-                    if writer:
-                        for frame in frames:
-                            writer.writerow(
-                                [sample_index, sample_index / SAMPLE_RATE, *frame]
-                            )
-                            sample_index += 1
-
-                    emit_buffer.extend(frames)
-                    now = time.monotonic()
-                    if len(emit_buffer) >= 100 or now - last_emit >= 0.05:
-                        self.frames_ready.emit(np.asarray(emit_buffer, dtype=np.float32))
-                        emit_buffer.clear()
-                        last_emit = now
-
-                if emit_buffer:
-                    self.frames_ready.emit(np.asarray(emit_buffer, dtype=np.float32))
-                client.stop()
-        except (OSError, TrignoError, ValueError) as exc:
-            self.stream_error.emit(str(exc))
-        finally:
-            if csv_file:
-                csv_file.close()
-
+    def mappings(self) -> list[SensorMapping]:
+        result = []
+        for slot, edits in enumerate(self.edits, 1):
+            chinese, english, abbreviation = (edit.text().strip() for edit in edits)
+            result.append(SensorMapping(slot, chinese or "未指定", english or "UNASSIGNED", abbreviation))
+        return result
 
 class TrignoWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Trigno EMG Monitor")
-        self.resize(1180, 780)
-        self.stream_worker: StreamWorker | None = None
-        self.test_worker: ConnectionWorker | None = None
-        self.sample_count = 0
-        self.selected_channel = 0
-        self.history = [deque(maxlen=40_000) for _ in range(CHANNEL_COUNT)]
-        self._build_ui()
-        self._set_streaming(False)
-        self._set_status("未測試", "idle")
+        self.resize(1280, 820)
+        self.streamWorker: StreamWorker | None = None
+        self.testWorker: ConnectionWorker | None = None
+        self.histories = [deque(maxlen=int(SAMPLE_RATE * 20)) for _ in range(CHANNEL_COUNT)]
+        self.mappings = loadMappings(MAPPING_PATH)
+        self.sensorChecks: list[QCheckBox] = []
+        self.sensorDetails: list[QLabel] = []
+        self.sensorIcons: list[QLabel] = []
+        self.sensorRows: list[QFrame] = []
+        self.sensorActive = [False] * CHANNEL_COUNT
+        self.sensorPaired = [False] * CHANNEL_COUNT
+        self.sensorSerials: dict[int, str] = {}
+        self.curves: dict[int, tuple[pg.PlotItem, pg.PlotDataItem]] = {}
+        self.buildUi()
+        self.setStreaming(False)
+        self.setStatus("尚未連線", "idle")
 
-    def _build_ui(self) -> None:
+    def buildUi(self) -> None:
         root = QWidget(objectName="root")
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(16, 14, 16, 16)
-        layout.setSpacing(10)
-
+        layout.setContentsMargins(20, 16, 20, 18)
+        layout.setSpacing(12)
         header = QHBoxLayout()
-        title = QLabel("Trigno EMG", objectName="title")
-        self.status_label = QLabel(objectName="status")
-        self.spec_label = QLabel("TCP 2000 Hz · float32", objectName="muted")
-        header.addWidget(title)
-        header.addWidget(self.status_label)
+        header.addWidget(QLabel("Trigno EMG", objectName="title"))
+        self.statusLabel = QLabel(objectName="status")
+        header.addWidget(self.statusLabel)
+        self.baseLabel = QLabel("Base: 尚未確認", objectName="muted")
+        header.addWidget(self.baseLabel)
         header.addStretch()
-        header.addWidget(self.spec_label)
+        header.addWidget(QLabel("Legacy EMG · 2000 Hz · float32", objectName="muted"))
         layout.addLayout(header)
-
         controls = QHBoxLayout()
-        controls.addWidget(QLabel("Server"))
-        self.host_edit = QLineEdit("127.0.0.1")
-        self.host_edit.setMaximumWidth(210)
-        self.test_button = QPushButton("測試連線")
-        self.start_button = QPushButton("開始串流", objectName="primary")
-        self.stop_button = QPushButton("停止")
-        controls.addWidget(self.host_edit)
-        controls.addWidget(self.test_button)
-        controls.addWidget(self.start_button)
-        controls.addWidget(self.stop_button)
+        controls.addWidget(QLabel("SDK Server"))
+        self.hostEdit = QLineEdit("127.0.0.1")
+        self.hostEdit.setMaximumWidth(200)
+        self.testButton = QPushButton("測試連線")
+        self.startButton = QPushButton("開始串流", objectName="primary")
+        self.stopButton = QPushButton("停止")
+        for item in (self.hostEdit, self.testButton, self.startButton, self.stopButton):
+            controls.addWidget(item)
+        controls.addSpacing(12)
+        controls.addWidget(QLabel("顯示範圍"))
+        self.windowSpin = QSpinBox()
+        self.windowSpin.setRange(1, 20)
+        self.windowSpin.setValue(5)
+        self.windowSpin.setSuffix(" 秒")
+        controls.addWidget(self.windowSpin)
+        controls.addWidget(QLabel("Y 軸 ±"))
+        self.yRangeSpin = QDoubleSpinBox()
+        self.yRangeSpin.setRange(0.05, 20)
+        self.yRangeSpin.setValue(1)
+        self.yRangeSpin.setSuffix(" mV")
+        controls.addWidget(self.yRangeSpin)
+        self.autoYCheck = QCheckBox("自動縮放")
+        controls.addWidget(self.autoYCheck)
         controls.addStretch()
+        self.sampleLabel = QLabel("0 samples", objectName="muted")
+        controls.addWidget(self.sampleLabel)
         layout.addLayout(controls)
-
         recording = QHBoxLayout()
-        self.record_check = QCheckBox("儲存 CSV")
-        self.record_check.setChecked(True)
-        self.path_edit = QLineEdit(self._default_output_path())
-        self.browse_button = QPushButton("瀏覽")
-        recording.addWidget(self.record_check)
-        recording.addWidget(self.path_edit)
-        recording.addWidget(self.browse_button)
+        self.recordCheck = QCheckBox("儲存 CSV")
+        self.recordCheck.setChecked(True)
+        self.pathEdit = QLineEdit(self.defaultOutputPath())
+        self.browseButton = QPushButton("選擇檔案")
+        for item in (self.recordCheck, self.pathEdit, self.browseButton):
+            recording.addWidget(item)
         layout.addLayout(recording)
+        body = QHBoxLayout()
+        sensorPanel = self.createSensorPanel()
+        sensorPanel.setFixedWidth(380)
+        body.addWidget(sensorPanel)
+        charts = QWidget()
+        chartLayout = QVBoxLayout(charts)
+        chartLayout.setContentsMargins(0, 0, 0, 0)
+        chartLayout.addWidget(QLabel("即時波形", objectName="sectionTitle"))
+        self.plotWidget = pg.GraphicsLayoutWidget()
+        self.plotWidget.setBackground("#ffffff")
+        chartLayout.addWidget(self.plotWidget)
+        body.addWidget(charts, 1)
+        layout.addLayout(body, 1)
+        self.testButton.clicked.connect(self.testConnection)
+        self.startButton.clicked.connect(self.startStream)
+        self.stopButton.clicked.connect(self.stopStream)
+        self.browseButton.clicked.connect(self.chooseOutput)
+        self.recordCheck.toggled.connect(self.recordToggled)
+        self.windowSpin.valueChanged.connect(self.refreshPlots)
+        self.yRangeSpin.valueChanged.connect(self.refreshPlots)
+        self.autoYCheck.toggled.connect(self.autoYToggled)
+        self.plotTimer = QTimer(self)
+        self.plotTimer.setInterval(80)
+        self.plotTimer.timeout.connect(self.refreshPlots)
+        self.plotTimer.start()
+        self.applyStyles()
+        self.rebuildPlots()
 
-        splitter = QSplitter()
-        splitter.setChildrenCollapsible(False)
-        self.table = self._create_channel_table()
-        splitter.addWidget(self.table)
+    def createSensorPanel(self) -> QWidget:
+        panel = QFrame(objectName="panel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.addWidget(QLabel("感測器與肌肉對應", objectName="sectionTitle"))
+        note = QLabel("英文名稱與縮寫可直接在此編輯，儲存後立即套用。")
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QHBoxLayout()
+        allButton, editButton = QPushButton("顯示全部啟用"), QPushButton("編輯對應")
+        for item in (allButton, editButton):
+            buttons.addWidget(item)
+        layout.addLayout(buttons)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        sensorLayout = QVBoxLayout(content)
+        sensorLayout.setContentsMargins(0, 0, 0, 0)
+        sensorLayout.setSpacing(3)
+        for index in range(CHANNEL_COUNT):
+            row = QFrame(objectName="sensorRow")
+            rowLayout = QHBoxLayout(row)
+            rowLayout.setContentsMargins(8, 5, 8, 5)
+            icon = QLabel("〽", objectName="sensorIcon")
+            icon.setFixedSize(28, 28)
+            icon.setAlignment(Qt.AlignCenter)
+            icon.setStyleSheet(self.sensorIconStyle(index))
+            check = QCheckBox()
+            check.setChecked(index < 4)
+            detail = QLabel(objectName="sensorDetail")
+            textLayout = QVBoxLayout()
+            textLayout.setSpacing(0)
+            textLayout.addWidget(check)
+            textLayout.addWidget(detail)
+            rowLayout.addWidget(icon)
+            rowLayout.addLayout(textLayout, 1)
+            sensorLayout.addWidget(row)
+            check.toggled.connect(self.rebuildPlots)
+            self.sensorChecks.append(check)
+            self.sensorDetails.append(detail)
+            self.sensorIcons.append(icon)
+            self.sensorRows.append(row)
+        sensorLayout.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+        allButton.clicked.connect(lambda: self.setChecked(range(CHANNEL_COUNT)))
+        editButton.clicked.connect(self.editMappings)
+        self.updateSensorRows()
+        return panel
 
-        chart_container = QWidget()
-        chart_layout = QVBoxLayout(chart_container)
-        chart_layout.setContentsMargins(4, 0, 0, 0)
-        chart_layout.setSpacing(5)
-        chart_controls = QHBoxLayout()
-        self.plot_title = QLabel("通道 1", objectName="plotTitle")
-        self.window_spin = QSpinBox()
-        self.window_spin.setRange(1, 20)
-        self.window_spin.setValue(5)
-        self.window_spin.setSuffix(" 秒")
-        self.y_range_spin = QDoubleSpinBox()
-        self.y_range_spin.setRange(0.05, 20.0)
-        self.y_range_spin.setDecimals(2)
-        self.y_range_spin.setSingleStep(0.25)
-        self.y_range_spin.setValue(1.0)
-        self.y_range_spin.setPrefix("± ")
-        self.y_range_spin.setSuffix(" mV")
-        self.auto_y_check = QCheckBox("自動縮放")
-        self.zoom_in_button = QPushButton("放大")
-        self.zoom_out_button = QPushButton("縮小")
-        self.counter_label = QLabel("0 samples", objectName="muted")
-        chart_controls.addWidget(self.plot_title)
-        chart_controls.addStretch()
-        chart_controls.addWidget(QLabel("時間窗"))
-        chart_controls.addWidget(self.window_spin)
-        chart_controls.addWidget(QLabel("Y 範圍"))
-        chart_controls.addWidget(self.y_range_spin)
-        chart_controls.addWidget(self.zoom_in_button)
-        chart_controls.addWidget(self.zoom_out_button)
-        chart_controls.addWidget(self.auto_y_check)
-        chart_controls.addWidget(self.counter_label)
-        chart_layout.addLayout(chart_controls)
+    def sensorIconStyle(self, index: int) -> str:
+        return f"background: {COLORS[index % len(COLORS)]}; color: white; border-radius: 5px; font-weight: bold; font-size: 16px;"
 
-        self.plots = pg.GraphicsLayoutWidget()
-        self.plots.setBackground("#ffffff")
-        self.plots.addLabel("原始 EMG", row=0, col=0, color="#374151", size="11pt")
-        self.raw_plot = self.plots.addPlot(row=1, col=0)
-        self.plots.addLabel(
-            "EMG envelope — RMS 100 ms", row=2, col=0, color="#374151", size="11pt"
-        )
-        self.envelope_plot = self.plots.addPlot(row=3, col=0)
-        self._configure_plots()
-        chart_layout.addWidget(self.plots)
-        splitter.addWidget(chart_container)
-        splitter.setSizes([300, 880])
-        layout.addWidget(splitter)
+    def setChecked(self, indices) -> None:
+        selected = set(indices)
+        for index, check in enumerate(self.sensorChecks):
+            check.setChecked(index in selected)
 
-        self._apply_styles()
-        self.test_button.clicked.connect(self.test_connection)
-        self.start_button.clicked.connect(self.start_stream)
-        self.stop_button.clicked.connect(self.stop_stream)
-        self.browse_button.clicked.connect(self.choose_output)
-        self.record_check.toggled.connect(self._record_toggled)
-        self.table.cellClicked.connect(self.select_channel)
-        self.window_spin.valueChanged.connect(self.refresh_plots)
-        self.y_range_spin.valueChanged.connect(self.refresh_plots)
-        self.auto_y_check.toggled.connect(self._auto_y_toggled)
-        self.zoom_in_button.clicked.connect(lambda: self._zoom_y_axis(0.5))
-        self.zoom_out_button.clicked.connect(lambda: self._zoom_y_axis(2.0))
-        self.plot_timer = QTimer(self)
-        self.plot_timer.setInterval(100)
-        self.plot_timer.timeout.connect(self.refresh_plots)
-        self.plot_timer.start()
+    def editMappings(self) -> None:
+        dialog = MappingEditorDialog(self.mappings, self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.mappings = dialog.mappings()
+            saveMappings(MAPPING_PATH, self.mappings)
+            self.updateSensorRows()
+            self.rebuildPlots()
 
-    def _create_channel_table(self) -> QTableWidget:
-        table = QTableWidget(CHANNEL_COUNT, 4)
-        table.setHorizontalHeaderLabels(["通道", "狀態", "目前 (mV)", "RMS 100ms"])
-        table.verticalHeader().setVisible(False)
-        table.setAlternatingRowColors(True)
-        table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table.setSelectionBehavior(QTableWidget.SelectRows)
-        table.setSelectionMode(QTableWidget.SingleSelection)
-        header = table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        for column in range(1, 4):
-            header.setSectionResizeMode(column, QHeaderView.Stretch)
-        for row in range(CHANNEL_COUNT):
-            for column, value in enumerate((str(row + 1), "未測試", "0", "0")):
-                table.setItem(row, column, QTableWidgetItem(value))
-        table.selectRow(0)
-        return table
-
-    def _configure_plots(self) -> None:
-        for plot in (self.raw_plot, self.envelope_plot):
-            plot.showGrid(x=True, y=True, alpha=0.18)
-            plot.setMenuEnabled(False)
-            plot.setMouseEnabled(x=True, y=False)
-            plot.disableAutoRange(axis="y")
-        self.raw_plot.setLabel("left", "EMG", units="mV")
-        self.raw_plot.hideAxis("bottom")
-        self.envelope_plot.setLabel("left", "RMS", units="mV")
-        self.envelope_plot.setLabel("bottom", "時間", units="s")
-        self.envelope_plot.setXLink(self.raw_plot)
-        self.raw_curve = self.raw_plot.plot(pen=pg.mkPen("#6a8cff", width=1))
-        self.raw_curve.setDownsampling(auto=True, method="peak")
-        self.raw_curve.setClipToView(True)
-        self.envelope_curve = self.envelope_plot.plot(pen=pg.mkPen("#b7795c", width=1.5))
-
-    def _apply_styles(self) -> None:
-        self.setStyleSheet(
-            """
-            QWidget#root { background: #f7f8fa; color: #202124; }
-            QLabel#title { font-size: 22px; font-weight: 700; }
-            QLabel#status { padding: 4px 10px; background: #e5e7eb; border-radius: 9px; }
-            QLabel#muted { color: #6b7280; }
-            QLabel#plotTitle { font-size: 16px; font-weight: 600; }
-            QLineEdit, QSpinBox, QDoubleSpinBox { padding: 6px; border: 1px solid #d1d5db; border-radius: 5px; background: white; }
-            QPushButton { padding: 7px 14px; border: 1px solid #cbd5e1; border-radius: 5px; background: white; }
-            QPushButton#primary { color: white; border: 0; background: #2563eb; }
-            QPushButton:disabled { color: #9ca3af; background: #e5e7eb; }
-            QTableWidget { border: 1px solid #e5e7eb; background: white; gridline-color: #eef0f2; }
-            QHeaderView::section { padding: 6px; border: 0; background: #eef2f7; font-weight: 600; }
-            """
-        )
+    def updateSensorRows(self) -> None:
+        for index, mapping in enumerate(self.mappings):
+            state = "啟用"
+            self.sensorChecks[index].setText(f"S{mapping.slot:02d} · {self.englishTitle(mapping)}")
+            serial = self.sensorSerials.get(mapping.slot, "未取得 SID")
+            self.sensorDetails[index].setText(
+                f"{mapping.chinese_name}  |  Slot {mapping.slot:02d} · {state} · SID: {serial}"
+            )
+            self.sensorRows[index].setVisible(self.sensorActive[index])
+            self.sensorRows[index].setStyleSheet("")
 
     @staticmethod
-    def _default_output_path() -> str:
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return str(Path.cwd() / "recordings" / f"emg_{stamp}.csv")
+    def englishTitle(mapping: SensorMapping) -> str:
+        side = mapping.abbreviation.rsplit("-", 1)[-1] if "-" in mapping.abbreviation else ""
+        prefix = f"{side} " if side in {"R", "L"} else ""
+        return f"{prefix}{mapping.english_name.upper()}"
 
-    def _set_status(self, text: str, state: str) -> None:
-        colors = {
-            "idle": ("#e5e7eb", "#374151"),
-            "working": ("#fef3c7", "#92400e"),
-            "connected": ("#dcfce7", "#166534"),
-            "streaming": ("#dbeafe", "#1d4ed8"),
-            "error": ("#fee2e2", "#b91c1c"),
-        }
+    def applyStyles(self) -> None:
+        self.setStyleSheet("""
+            QWidget#root { background: #f5f7fb; color: #1e293b; }
+            QLabel#title { font-size: 24px; font-weight: 700; }
+            QLabel#sectionTitle { font-size: 15px; font-weight: 700; }
+            QLabel#muted, QLabel#sensorDetail { color: #64748b; }
+            QLabel#sensorDetail { font-size: 10px; }
+            QLabel#status { padding: 5px 10px; border-radius: 10px; }
+            QFrame#panel, QFrame#sensorRow { background: white; border: 1px solid #e2e8f0; border-radius: 7px; }
+            QLineEdit, QSpinBox, QDoubleSpinBox { padding: 6px; background: white; border: 1px solid #cbd5e1; border-radius: 5px; }
+            QPushButton { padding: 7px 10px; background: white; border: 1px solid #cbd5e1; border-radius: 5px; }
+            QPushButton#primary { background: #2563eb; border: 0; color: white; font-weight: 600; }
+            QPushButton:disabled { color: #94a3b8; background: #e2e8f0; }
+            QCheckBox { font-weight: 700; }""")
+
+    @staticmethod
+    def defaultOutputPath() -> str:
+        return str(Path.cwd() / "recordings" / f"emg_{datetime.now():%Y%m%d_%H%M%S}.csv")
+
+    def setStatus(self, text: str, state: str) -> None:
+        colors = {"idle": ("#e2e8f0", "#475569"), "working": ("#fef3c7", "#92400e"), "connected": ("#dcfce7", "#166534"), "streaming": ("#dbeafe", "#1d4ed8"), "error": ("#fee2e2", "#b91c1c")}
         background, foreground = colors[state]
-        self.status_label.setText(text)
-        self.status_label.setStyleSheet(
-            f"padding: 4px 10px; background: {background}; color: {foreground}; border-radius: 9px;"
-        )
+        self.statusLabel.setText(text)
+        self.statusLabel.setStyleSheet(f"padding: 5px 10px; border-radius: 10px; background: {background}; color: {foreground};")
 
-    def _set_streaming(self, streaming: bool) -> None:
-        self.start_button.setEnabled(not streaming and self.test_worker is None)
-        self.stop_button.setEnabled(streaming)
-        self.host_edit.setEnabled(not streaming and self.test_worker is None)
-        self.test_button.setEnabled(not streaming and self.test_worker is None)
-        self.record_check.setEnabled(not streaming)
-        enabled = not streaming and self.record_check.isChecked()
-        self.path_edit.setEnabled(enabled)
-        self.browse_button.setEnabled(enabled)
+    def setStreaming(self, streaming: bool) -> None:
+        testing = self.testWorker is not None
+        self.startButton.setEnabled(not streaming and not testing)
+        self.stopButton.setEnabled(streaming)
+        self.hostEdit.setEnabled(not streaming and not testing)
+        self.testButton.setEnabled(not streaming and not testing)
+        self.recordCheck.setEnabled(not streaming)
+        self.pathEdit.setEnabled(not streaming and self.recordCheck.isChecked())
+        self.browseButton.setEnabled(not streaming and self.recordCheck.isChecked())
 
-    def _record_toggled(self, checked: bool) -> None:
-        enabled = checked and self.stream_worker is None
-        self.path_edit.setEnabled(enabled)
-        self.browse_button.setEnabled(enabled)
+    def recordToggled(self, checked: bool) -> None:
+        self.pathEdit.setEnabled(checked and self.streamWorker is None)
+        self.browseButton.setEnabled(checked and self.streamWorker is None)
 
-    def choose_output(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "選擇 CSV 儲存位置", self.path_edit.text(), "CSV (*.csv)"
-        )
+    def chooseOutput(self) -> None:
+        path, unusedFilter = QFileDialog.getSaveFileName(self, "選擇 CSV 檔案", self.pathEdit.text(), "CSV (*.csv)")
         if path:
-            self.path_edit.setText(path)
+            self.pathEdit.setText(path)
 
-    def test_connection(self) -> None:
-        host = self.host_edit.text().strip()
+    def testConnection(self) -> None:
+        host = self.hostEdit.text().strip()
         if not host:
-            QMessageBox.warning(self, "缺少位址", "請輸入 SDK Server 位址。")
+            QMessageBox.warning(self, "缺少位址", "請輸入 SDK Server IP 位址。")
             return
-        self._set_status("正在測試連線…", "working")
-        self.test_worker = ConnectionWorker(host)
-        self.test_worker.connected.connect(self._test_connected)
-        self.test_worker.sensor_states_ready.connect(self._test_sensor_states)
-        self.test_worker.failed.connect(self._connection_failed)
-        self.test_worker.finished.connect(self._test_finished)
-        self._set_streaming(False)
-        self.test_worker.start()
+        self.setStatus("正在測試連線…", "working")
+        self.testWorker = ConnectionWorker(host)
+        self.testWorker.connected.connect(lambda banner: self.statusLabel.setToolTip(banner))
+        self.testWorker.base_ready.connect(self.updateBaseSerial)
+        self.testWorker.sensor_states_ready.connect(self.updateSensorStates)
+        self.testWorker.failed.connect(self.connectionFailed)
+        self.testWorker.finished.connect(self.testFinished)
+        self.setStreaming(False)
+        self.testWorker.start()
 
-    def _test_connected(self, banner: str) -> None:
-        self._set_status("Server 已連線，讀取感測器狀態…", "connected")
-        self.status_label.setToolTip(banner)
-
-    def _test_sensor_states(self, paired: list[int], active: list[int]) -> None:
-        self._sensor_states(paired, active)
-        self._set_status(
-            f"連線成功：{len(paired)} 已配對 / {len(active)} 使用中", "connected"
-        )
-
-    def _test_finished(self) -> None:
-        worker = self.test_worker
-        self.test_worker = None
+    def testFinished(self) -> None:
+        worker, self.testWorker = self.testWorker, None
         if worker:
             worker.deleteLater()
-        self._set_streaming(False)
+        if not self.statusLabel.text().startswith("連線失敗"):
+            self.setStatus("已連線；感測器狀態已更新", "connected")
+        self.setStreaming(False)
 
-    def _connection_failed(self, message: str) -> None:
-        self._set_status(f"連線失敗：{message}", "error")
+    def connectionFailed(self, message: str) -> None:
+        self.setStatus(f"連線失敗：{message}", "error")
 
-    def start_stream(self) -> None:
-        if self.test_worker is not None:
-            return
-        host = self.host_edit.text().strip()
+    def updateBaseSerial(self, serial: str) -> None:
+        self.baseLabel.setText(f"Base: {serial}")
+
+    def updateSensorStates(self, paired: list[int], active: list[int], serials: dict[int, str]) -> None:
+        self.sensorPaired = [index + 1 in paired for index in range(CHANNEL_COUNT)]
+        self.sensorActive = [index + 1 in active for index in range(CHANNEL_COUNT)]
+        self.sensorSerials = serials
+        self.updateSensorRows()
+        self.setChecked(index for index, enabled in enumerate(self.sensorActive) if enabled)
+
+    def startStream(self) -> None:
+        host = self.hostEdit.text().strip()
         if not host:
-            QMessageBox.warning(self, "缺少位址", "請輸入 SDK Server 位址。")
+            QMessageBox.warning(self, "缺少位址", "請輸入 SDK Server IP 位址。")
             return
-        output = None
-        if self.record_check.isChecked():
-            raw_path = self.path_edit.text().strip()
-            if not raw_path:
-                QMessageBox.warning(self, "缺少檔名", "請選擇 CSV 儲存位置。")
-                return
-            output = Path(raw_path).expanduser()
-            if output.exists():
-                QMessageBox.warning(self, "檔案已存在", "請選擇新的 CSV 檔名。")
-                return
+        output = Path(self.pathEdit.text()).expanduser() if self.recordCheck.isChecked() else None
+        if output and output.exists():
+            QMessageBox.warning(self, "檔案已存在", "請指定尚不存在的 CSV 檔案，避免覆寫。")
+            return
+        for history in self.histories:
+            history.clear()
+        self.sampleLabel.setText("0 samples")
+        self.streamWorker = StreamWorker(host, output)
+        self.streamWorker.status_changed.connect(lambda text: self.setStatus(text, "streaming" if text == "串流中" else "working"))
+        self.streamWorker.connected.connect(lambda banner: self.statusLabel.setToolTip(banner))
+        self.streamWorker.base_ready.connect(self.updateBaseSerial)
+        self.streamWorker.sensor_states_ready.connect(self.updateSensorStates)
+        self.streamWorker.frames_ready.connect(self.framesReceived)
+        self.streamWorker.failed.connect(self.streamFailed)
+        self.streamWorker.finished.connect(self.streamFinished)
+        self.setStreaming(True)
+        self.streamWorker.start()
 
-        self.sample_count = 0
-        for values in self.history:
-            values.clear()
-        self._reset_sensor_states()
-        self.stream_worker = StreamWorker(host, output)
-        self.stream_worker.status_changed.connect(self._stream_status)
-        self.stream_worker.server_connected.connect(self._stream_connected)
-        self.stream_worker.sensor_states_ready.connect(self._sensor_states)
-        self.stream_worker.frames_ready.connect(self._frames_received)
-        self.stream_worker.stream_error.connect(self._stream_error)
-        self.stream_worker.finished.connect(self._stream_finished)
-        self._set_streaming(True)
-        self.stream_worker.start()
+    def stopStream(self) -> None:
+        if self.streamWorker:
+            self.setStatus("正在停止…", "working")
+            self.stopButton.setEnabled(False)
+            self.streamWorker.request_stop()
 
-    def stop_stream(self) -> None:
-        if self.stream_worker:
-            self._set_status("正在停止串流…", "working")
-            self.stop_button.setEnabled(False)
-            self.stream_worker.request_stop()
-
-    def _stream_status(self, message: str) -> None:
-        state = "streaming" if message == "串流中" else "working"
-        self._set_status(message, state)
-
-    def _stream_connected(self, banner: str) -> None:
-        self._set_status("Server 已連線，準備串流…", "connected")
-        self.status_label.setToolTip(banner)
-
-    def _reset_sensor_states(self) -> None:
-        for row in range(CHANNEL_COUNT):
-            self.table.item(row, 1).setText("查詢中")
-            self.table.item(row, 2).setText("0")
-            self.table.item(row, 3).setText("0")
-
-    def _sensor_states(self, paired: list[int], active: list[int]) -> None:
-        for row in range(CHANNEL_COUNT):
-            number = row + 1
-            state = "使用中" if number in active else "已配對" if number in paired else "未配對"
-            self.table.item(row, 1).setText(state)
-
-    def _frames_received(self, frames: np.ndarray) -> None:
+    def framesReceived(self, frames: np.ndarray) -> None:
         if frames.ndim != 2 or frames.shape[1] != CHANNEL_COUNT:
             return
-        self.sample_count += len(frames)
-        for channel in range(CHANNEL_COUNT):
-            self.history[channel].extend(frames[:, channel].tolist())
-            values = np.asarray(self.history[channel], dtype=np.float64)
-            short_window = values[-RMS_WINDOW_SAMPLES:]
-            latest = values[-1] if len(values) else 0.0
-            rms = float(np.sqrt(np.mean(short_window * short_window))) if len(short_window) else 0.0
-            self.table.item(channel, 2).setText(f"{latest * 1000:.6f}")
-            self.table.item(channel, 3).setText(f"{rms * 1000:.6f}")
-        self.counter_label.setText(f"{self.sample_count:,} samples")
+        for channel, history in enumerate(self.histories):
+            history.extend(frames[:, channel].tolist())
+        self.sampleLabel.setText(f"{len(self.histories[0]):,} samples in view")
 
-    def select_channel(self, row: int, _column: int) -> None:
-        self.selected_channel = row
-        self.plot_title.setText(f"通道 {row + 1}")
-        self.refresh_plots()
-
-    def _auto_y_toggled(self, enabled: bool) -> None:
-        self.y_range_spin.setEnabled(not enabled)
-        self.zoom_in_button.setEnabled(not enabled)
-        self.zoom_out_button.setEnabled(not enabled)
-        self.refresh_plots()
-
-    def _zoom_y_axis(self, factor: float) -> None:
-        """Expand or contract the raw EMG range while retaining a sensible limit."""
-        new_value = min(20.0, max(0.05, self.y_range_spin.value() * factor))
-        self.y_range_spin.setValue(new_value)
-
-    @staticmethod
-    def _nice_y_limit(values: np.ndarray, minimum: float) -> float:
-        """Choose a stable 1/2/5-based plotting range without outlier-driven jumps."""
-        if not len(values):
-            return minimum
-        target = max(minimum, float(np.percentile(np.abs(values), 99.5)) * 1.25)
-        exponent = 10 ** np.floor(np.log10(target))
-        normalized = target / exponent
-        multiplier = 1 if normalized <= 1 else 2 if normalized <= 2 else 5 if normalized <= 5 else 10
-        return float(multiplier * exponent)
-
-    @staticmethod
-    def _rms_envelope(values: np.ndarray) -> np.ndarray:
-        if len(values) < RMS_WINDOW_SAMPLES:
-            return np.array([], dtype=np.float32)
-        squared = values.astype(np.float64) ** 2
-        cumulative = np.concatenate(([0.0], np.cumsum(squared)))
-        return np.sqrt(
-            (cumulative[RMS_WINDOW_SAMPLES:] - cumulative[:-RMS_WINDOW_SAMPLES])
-            / RMS_WINDOW_SAMPLES
-        ).astype(np.float32)
-
-    def refresh_plots(self) -> None:
-        duration = self.window_spin.value()
-        count = int(SAMPLE_RATE * duration)
-        values = np.asarray(
-            list(self.history[self.selected_channel])[-count:], dtype=np.float32
-        ) * 1000
-        if self.auto_y_check.isChecked():
-            y_limit = min(20.0, self._nice_y_limit(values, minimum=0.05))
-            self.y_range_spin.blockSignals(True)
-            self.y_range_spin.setValue(min(20.0, y_limit))
-            self.y_range_spin.blockSignals(False)
-        else:
-            y_limit = self.y_range_spin.value()
-        self.raw_plot.setXRange(-duration, 0, padding=0)
-        self.raw_plot.setYRange(-y_limit, y_limit, padding=0)
-        if not len(values):
-            self.raw_curve.setData([], [])
-            self.envelope_curve.setData([], [])
-            return
-
-        x = (np.arange(len(values), dtype=np.float32) - len(values) + 1) / SAMPLE_RATE
-        self.raw_curve.setData(x, values)
-        envelope = self._rms_envelope(values)
-        if not len(envelope):
-            self.envelope_curve.setData([], [])
-            return
-        envelope_x = x[RMS_WINDOW_SAMPLES - 1 :]
-        envelope_limit = self._nice_y_limit(envelope, minimum=0.02)
-        self.envelope_plot.setYRange(0, envelope_limit, padding=0)
-        stride = 10  # Render a 200 Hz envelope; source data remains untouched.
-        self.envelope_curve.setData(envelope_x[::stride], envelope[::stride])
-
-    def _stream_error(self, message: str) -> None:
-        self._set_status(f"串流錯誤：{message}", "error")
+    def streamFailed(self, message: str) -> None:
+        self.setStatus(f"串流錯誤：{message}", "error")
         QMessageBox.critical(self, "Trigno 串流錯誤", message)
 
-    def _stream_finished(self) -> None:
-        worker = self.stream_worker
-        self.stream_worker = None
+    def streamFinished(self) -> None:
+        worker, self.streamWorker = self.streamWorker, None
         if worker:
             worker.deleteLater()
-        self._set_streaming(False)
-        if not self.status_label.text().startswith("串流錯誤"):
-            self._set_status("已停止", "idle")
+        self.setStreaming(False)
+        if not self.statusLabel.text().startswith("串流錯誤"):
+            self.setStatus("已停止", "idle")
+
+    def autoYToggled(self, checked: bool) -> None:
+        self.yRangeSpin.setEnabled(not checked)
+        self.refreshPlots()
+
+    def rebuildPlots(self) -> None:
+        selected = [index for index, check in enumerate(self.sensorChecks) if check.isChecked()]
+        self.plotWidget.clear()
+        self.curves.clear()
+        for row, channel in enumerate(selected):
+            mapping = self.mappings[channel]
+            plot = self.plotWidget.addPlot(row=row, col=0)
+            plot.setLabel("left", mapping.abbreviation or f"S{channel + 1:02d}", units="mV")
+            if row == len(selected) - 1:
+                plot.setLabel("bottom", "時間", units="s")
+            else:
+                plot.hideAxis("bottom")
+            plot.showGrid(x=True, y=True, alpha=0.16)
+            plot.setMenuEnabled(False)
+            plot.setMouseEnabled(x=True, y=False)
+            curve = plot.plot(pen=pg.mkPen(COLORS[channel % len(COLORS)], width=1))
+            curve.setDownsampling(auto=True, method="peak")
+            curve.setClipToView(True)
+            self.curves[channel] = (plot, curve)
+        self.refreshPlots()
+
+    def refreshPlots(self) -> None:
+        duration, count = self.windowSpin.value(), int(self.windowSpin.value() * SAMPLE_RATE)
+        for channel, (plot, curve) in self.curves.items():
+            values = np.asarray(list(self.histories[channel])[-count:], dtype=np.float32) * 1000
+            xAxis = (np.arange(len(values)) - len(values) + 1) / SAMPLE_RATE
+            limit = self.yRangeSpin.value()
+            if self.autoYCheck.isChecked() and len(values):
+                limit = max(0.05, min(20, float(np.percentile(np.abs(values), 99.5)) * 1.25))
+            plot.setXRange(-duration, 0, padding=0)
+            plot.setYRange(-limit, limit, padding=0)
+            curve.setData(xAxis, values)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self.stream_worker:
-            self.stream_worker.request_stop()
-            if not self.stream_worker.wait(6000):
+        if self.streamWorker:
+            self.streamWorker.request_stop()
+            if not self.streamWorker.wait(6000):
                 event.ignore()
-                QMessageBox.warning(self, "仍在停止", "請稍候 Server 結束連線後再關閉。")
                 return
         event.accept()
 
-
 def main() -> int:
-    configure_console_encoding()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     window = TrignoWindow()
     window.show()
     return app.exec_()
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

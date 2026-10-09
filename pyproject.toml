@@ -1,12 +1,10 @@
 [project]
-name = "delsys"
+name = "emg-cycling"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-authors = [
-    { name = "Your Name", email = "you@example.com" }
-]
-requires-python = ">=3.10"
+
+requires-python = ">=3.12"
 dependencies = [
     "numpy>=1.26",
     "PyQt5>=5.15",
@@ -14,8 +12,6 @@ dependencies = [
 ]
 
 [tool.uv]
-# PyQt5-Qt5 publishes some releases without a Windows wheel. Requiring the
-# actual deployment platform makes uv backtrack to a Windows-compatible build.
 required-environments = [
     "sys_platform == 'win32' and platform_machine == 'AMD64'",
 ]
