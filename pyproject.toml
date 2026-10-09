@@ -1,23 +1,23 @@
 [project]
 name = "emg-cycling"
 version = "0.1.0"
-description = "Add your description here"
+description = "Delsys Trigno EMG acquisition and smart-trainer control application"
 readme = "README.md"
-
 requires-python = ">=3.12"
 dependencies = [
+    "bleak>=0.22",
     "numpy>=1.26",
     "PyQt5>=5.15",
     "pyqtgraph>=0.13",
 ]
 
-[tool.uv]
-required-environments = [
-    "sys_platform == 'win32' and platform_machine == 'AMD64'",
-]
+[tool.uv.build-backend]
+module-name = "delsys"
 
 [project.scripts]
-delsys = "delsys:main"
+emg-cycling = "delsys.gui:main"
+emg-record = "delsys.cli:main"
+delsys = "delsys.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.9,<0.13.0"]
