@@ -251,6 +251,25 @@ class TrignoWindow(QMainWindow):
         self.sampleLabel = QLabel("0 samples", objectName="muted")
         controls.addWidget(self.sampleLabel)
         layout.addLayout(controls)
+        metrics = QHBoxLayout()
+        self.bikeMetricValues: dict[str, QLabel] = {}
+        for key, title, unit in (
+            ("speed", "速度", "km/h"),
+            ("cadence", "踏頻", "rpm"),
+            ("power", "即時功率", "W"),
+            ("resistance", "原生阻力", "level"),
+        ):
+            card = QFrame(objectName="metricCard")
+            cardLayout = QVBoxLayout(card)
+            cardLayout.setContentsMargins(12, 8, 12, 8)
+            cardLayout.setSpacing(1)
+            cardLayout.addWidget(QLabel(title, objectName="metricTitle"))
+            value = QLabel("--", objectName="metricValue")
+            cardLayout.addWidget(value)
+            cardLayout.addWidget(QLabel(unit, objectName="metricUnit"))
+            self.bikeMetricValues[key] = value
+            metrics.addWidget(card, 1)
+        layout.addLayout(metrics)
         recording = QHBoxLayout()
         self.recordCheck = QCheckBox("儲存 CSV")
         self.recordCheck.setChecked(True)
@@ -386,6 +405,18 @@ class TrignoWindow(QMainWindow):
         if data.resistance is not None:
             fields.append(f"原生阻力 {data.resistance:g}")
         self.trainerTelemetryLabel.setText("即時騎乘資料：" + (" · ".join(fields) or "等待踩踏…"))
+        if data.speedKph is not None:
+            self.bikeMetricValues["speed"].setText(f"{data.speedKph:.1f}")
+        if data.cadenceRpm is not None:
+            self.bikeMetricValues["cadence"].setText(f"{data.cadenceRpm:.0f}")
+        if data.powerWatts is not None:
+            self.bikeMetricValues["power"].setText(f"{data.powerWatts}")
+        if data.resistance is not None:
+            self.bikeMetricValues["resistance"].setText(f"{data.resistance:g}")
+
+    def resetBikeMetrics(self) -> None:
+        for value in self.bikeMetricValues.values():
+            value.setText("--")
 
     def scanTrainer(self) -> None:
         self.setTrainerStatus("正在掃描藍牙裝置…", "working")
@@ -432,6 +463,7 @@ class TrignoWindow(QMainWindow):
         self.setTrainerControls(True)
         self.trainerIsConnected = True
         self.setTrainerConnectionState(True)
+        self.resetBikeMetrics()
         self.setTrainerStatus(f"已連線：{info['address']}，控制權已取得", "connected")
         if info["telemetryEnabled"]:
             self.trainerTelemetryLabel.setText("即時騎乘資料：等待踩踏…")
@@ -445,6 +477,7 @@ class TrignoWindow(QMainWindow):
         self.setTrainerControls(False)
         self.trainerIsConnected = False
         self.setTrainerConnectionState(False)
+        self.resetBikeMetrics()
         self.setTrainerStatus("阻力計已中斷連線", "idle")
         self.trainerTelemetryLabel.setText("即時騎乘資料：尚未連線")
 
@@ -511,6 +544,10 @@ class TrignoWindow(QMainWindow):
             QLabel#sensorDetail { font-size: 10px; }
             QLabel#status { padding: 5px 10px; border-radius: 10px; }
             QLabel#connectionIndicator { padding: 5px 8px; font-weight: 700; }
+            QFrame#metricCard { background: white; border: 1px solid #dbe3ef; border-radius: 7px; }
+            QLabel#metricTitle { color: #64748b; font-size: 11px; font-weight: 600; }
+            QLabel#metricValue { color: #0f172a; font-size: 23px; font-weight: 700; }
+            QLabel#metricUnit { color: #94a3b8; font-size: 10px; }
             QFrame#eventLogPanel { background: #111827; border: 1px solid #374151; border-radius: 7px; }
             QLabel#eventLogTitle { color: #f3f4f6; font-size: 13px; font-weight: 700; padding: 0 3px; }
             QPlainTextEdit#eventLog { background: transparent; color: #d1d5db; border: 0; padding: 3px; font-family: Consolas, monospace; }

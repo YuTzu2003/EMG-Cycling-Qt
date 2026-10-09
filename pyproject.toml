@@ -11,6 +11,11 @@ dependencies = [
     "pyqtgraph>=0.13",
 ]
 
+[tool.uv]
+required-environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
+
 [tool.uv.build-backend]
 module-name = "delsys"
 
