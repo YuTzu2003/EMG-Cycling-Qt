@@ -1,5 +1,0 @@
-timestamp,power_w,cadence_rpm,balance_percent,balance_reference,left_power_w,right_power_w,raw_hex
-1791553534.8151972,50,,54.0,left,27.0,23.0,2f 60 32 00 6c 55 f9 fd 49 ea f8 a4 7a 32 26
-1791553535.7759287,50,,54.0,left,27.0,23.0,2f 60 32 00 6c 55 f9 fd 49 ea f8 a4 7a 32 26
-1791553536.7958796,46,40.9873248832555,54.0,left,24.84,21.16,2f 60 2e 00 6c ac fa fe 49 c5 fe 98 92 2e 2e
-1791553537.8756056,51,42.99510146955913,53.0,left,27.03,23.97,2f 60 33 00 6a 16 fc ff 49 5a 04 98 88 2a 2c
