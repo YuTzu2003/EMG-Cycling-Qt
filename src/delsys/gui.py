@@ -13,12 +13,7 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget,)
 from delsys.collection import CollectionInfoRecorder, SubjectInfo, infoOutputPath
 from delsys.emg.body_map import BodyMapPanel
-from delsys.emg.sensor_mapping import (
-    SensorMapping,
-    duplicateMappingSlots,
-    loadMappings,
-    saveMappings,
-)
+from delsys.emg.sensor_mapping import (SensorMapping,duplicateMappingSlots,loadMappings,saveMappings,)
 from delsys.emg.trigno import CHANNEL_COUNT, SAMPLE_RATE
 from delsys.emg.workers import ConnectionWorker, StreamWorker
 from delsys.resistance.recording import TrainerCsvRecorder, trainerOutputPath
@@ -150,6 +145,10 @@ class TrignoWindow(QMainWindow):
         self.trainerOutput: Path | None = None
         self.commandedNativeResistance: float | None = None
         self.currentSampleRate = SAMPLE_RATE
+        self.lastTrainerDistanceMeters: int | None = None
+        self.collectionDistanceBaselineMeters: int | None = None
+        self.collectionDistanceMeters: int | None = None
+        self.distanceSessionActive = False
         self.buildUi()
         self.connectTrainerSignals()
         self.trainerWorker.start()
@@ -505,6 +504,8 @@ class TrignoWindow(QMainWindow):
         self.setTrainerStatus(f"固定阻力等級 {level}/30：原生阻力 {nativeResistance:g}", "connected")
 
     def updateTrainerTelemetry(self, data: BikeTelemetry) -> None:
+        if data.distanceMeters is not None:
+            self.lastTrainerDistanceMeters = data.distanceMeters
         fields: list[str] = []
         if data.speedKph is not None:
             fields.append(f"速度 {data.speedKph:.1f} km/h")
@@ -525,16 +526,20 @@ class TrignoWindow(QMainWindow):
             self.bikeMetricValues["cadence"].setText(f"{data.cadenceRpm:.0f}")
         if data.powerWatts is not None:
             self.bikeMetricValues["power"].setText(f"{data.powerWatts}")
-        if data.distanceMeters is not None:
+        sessionDistanceMeters = self.sessionDistanceMeters(data.distanceMeters)
+        if sessionDistanceMeters is not None:
             self.bikeMetricValues["distance"].setText(
-                f"{data.distanceMeters / 1000:.2f}"
+                f"{sessionDistanceMeters / 1000:.2f}"
             )
         if data.resistance is not None:
             self.bikeMetricValues["resistance"].setText(f"{data.resistance:g}")
         if self.trainerRecorder:
             try:
                 self.trainerRecorder.append(
-                    data, self.resistanceSpin.value(), self.commandedNativeResistance
+                    data,
+                    self.resistanceSpin.value(),
+                    self.commandedNativeResistance,
+                    sessionDistanceMeters,
                 )
             except OSError as exc:
                 self.appendLog(f"阻力計 CSV 輸出失敗：{exc}")
@@ -544,6 +549,26 @@ class TrignoWindow(QMainWindow):
     def resetBikeMetrics(self) -> None:
         for value in self.bikeMetricValues.values():
             value.setText("--")
+
+    def beginCollectionDistance(self) -> None:
+        """Start a new distance counter for the current EMG collection."""
+        self.collectionDistanceBaselineMeters = self.lastTrainerDistanceMeters
+        self.collectionDistanceMeters = 0
+        self.distanceSessionActive = True
+        self.bikeMetricValues["distance"].setText("0.00")
+
+    def sessionDistanceMeters(self, totalDistanceMeters: int | None) -> int | None:
+        if totalDistanceMeters is None:
+            return self.collectionDistanceMeters
+        if not self.distanceSessionActive:
+            return totalDistanceMeters
+        if self.collectionDistanceBaselineMeters is None:
+            self.collectionDistanceBaselineMeters = totalDistanceMeters
+        self.collectionDistanceMeters = max(
+            0,
+            totalDistanceMeters - self.collectionDistanceBaselineMeters,
+        )
+        return self.collectionDistanceMeters
 
     def scanTrainer(self) -> None:
         self.setTrainerStatus("正在掃描藍牙裝置…", "working")
@@ -898,6 +923,7 @@ class TrignoWindow(QMainWindow):
             self.startCountdown()
 
     def beginTrainerRecording(self) -> None:
+        self.beginCollectionDistance()
         if self.trainerOutput is None:
             self.appendLog("阻力計未連線；本次不輸出阻力計 CSV")
             return
@@ -912,6 +938,7 @@ class TrignoWindow(QMainWindow):
 
     def closeTrainerRecording(self) -> None:
         if self.trainerRecorder is None:
+            self.distanceSessionActive = False
             return
         recorder, self.trainerRecorder = self.trainerRecorder, None
         try:
@@ -921,26 +948,32 @@ class TrignoWindow(QMainWindow):
             return
         self.appendLog(f"阻力計 CSV 已輸出 {recorder.rows} 筆 telemetry")
         if self.infoRecorder:
-            self.infoRecorder.append("Resistance summary", [
-                f"Telemetry rows: {recorder.rows}",
-                f"Collection elapsed seconds: {elapsed:.6f}",
+            frequency = recorder.rows / elapsed if elapsed > 0 else 0.0
+            self.infoRecorder.append("阻力計資料", [
+                f"阻力計資料列數：{recorder.rows}",
+                f"阻力計資料抓取頻率（平均）：{frequency:.3f} Hz",
+                f"阻力計收集時間：{elapsed:.6f} 秒",
+                f"本次騎乘距離：{self.collectionDistanceMeters or 0} m",
             ])
+        self.distanceSessionActive = False
 
     def collectionMetadataReady(self, metadata: dict) -> None:
         if self.infoRecorder is None:
             return
         lines = [
-            f"Base serial: {metadata['base_serial']}",
-            f"EMG sample rate Hz: {metadata['sample_rate_hz']:.6f}",
-            f"Samples per frame: {metadata['samples_per_frame']}",
-            f"Frame interval seconds: {metadata['frame_interval_seconds']:.6f}",
-            "Active sensor mapping:",
+            f"基站序號：{metadata['base_serial']}",
+            f"EMG 資料抓取頻率：{metadata['sample_rate_hz']:.6f} Hz",
+            f"每個封包樣本數：{metadata['samples_per_frame']}",
+            f"封包間隔：{metadata['frame_interval_seconds']:.6f} 秒",
+            "EMG 測試部位：",
         ]
         lines.extend(
-            "  S{slot:02d} | {sid} | {chinese_name} | {english_name} | {abbreviation}".format(**channel)
+            "  S{slot:02d}：{chinese_name}（{english_name}） | SID：{sid}".format(
+                **channel
+            )
             for channel in metadata["channels"]
         )
-        self.infoRecorder.append("EMG acquisition", lines)
+        self.infoRecorder.append("EMG 資料", lines)
 
     def configuredDurationSeconds(self) -> int:
         return self.durationMinutesSpin.value() * 60 + self.durationSecondsSpin.value()
@@ -1000,10 +1033,10 @@ class TrignoWindow(QMainWindow):
         output = self.collectionOutput.name if self.collectionOutput else "CSV"
         self.appendLog(f"EMG | 量測完成：{samples:,} samples，SDK 頻率 {sampleRate:.3f} Hz，已輸出 {output}")
         if self.infoRecorder:
-            self.infoRecorder.append("EMG summary", [
-                f"Samples: {samples}",
-                f"Collection elapsed seconds: {elapsed:.6f}",
-                f"Data duration seconds: {samples / sampleRate:.6f}" if sampleRate else "Data duration seconds: 0",
+            self.infoRecorder.append("EMG 測試摘要", [
+                f"EMG 樣本數：{samples}",
+                f"EMG 收集時間：{elapsed:.6f} 秒",
+                f"EMG 資料時間長度：{samples / sampleRate:.6f} 秒" if sampleRate else "EMG 資料時間長度：0 秒",
             ])
 
     def streamFailed(self, message: str) -> None:

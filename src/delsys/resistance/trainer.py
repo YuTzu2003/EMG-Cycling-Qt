@@ -1,14 +1,13 @@
 from __future__ import annotations
 import asyncio
 import struct
+import time
 from dataclasses import dataclass, replace
 from PyQt5.QtCore import QThread, pyqtSignal
-
 try:
     from bleak import BleakClient, BleakScanner
 except ImportError:
     BleakClient = BleakScanner = None
-
 
 FTMS_SERVICE = "00001826-0000-1000-8000-00805f9b34fb"
 CONTROL_POINT = "00002ad9-0000-1000-8000-00805f9b34fb"
@@ -102,6 +101,9 @@ class FtmsTrainer:
         self.telemetryCallback = None
         self.latestTelemetry = BikeTelemetry()
         self.crankState: tuple[int, int] | None = None
+        self._deviceDistanceAvailable = False
+        self._estimatedDistanceMeters: float | None = None
+        self._lastTelemetryAt: float | None = None
 
     def requireBleak(self) -> None:
         if BleakClient is None or BleakScanner is None:
@@ -160,6 +162,22 @@ class FtmsTrainer:
         await self.send(b"\x07")
 
     def emitTelemetry(self, update: BikeTelemetry) -> None:
+        now = time.monotonic()
+        speedKph = update.speedKph
+        if speedKph is None:
+            speedKph = self.latestTelemetry.speedKph
+
+        if update.distanceMeters is not None:
+            self._deviceDistanceAvailable = True
+            self._estimatedDistanceMeters = float(update.distanceMeters)
+        elif not self._deviceDistanceAvailable and speedKph is not None:
+            if self._estimatedDistanceMeters is None:
+                self._estimatedDistanceMeters = 0.0
+            elif self._lastTelemetryAt is not None:
+                elapsedSeconds = max(0.0, now - self._lastTelemetryAt)
+                self._estimatedDistanceMeters += speedKph / 3.6 * elapsedSeconds
+            update = replace(update,distanceMeters=round(self._estimatedDistanceMeters),)
+        self._lastTelemetryAt = now
         values = {name: value for name, value in vars(update).items() if value is not None}
         self.latestTelemetry = replace(self.latestTelemetry, **values)
         if self.telemetryCallback is not None:

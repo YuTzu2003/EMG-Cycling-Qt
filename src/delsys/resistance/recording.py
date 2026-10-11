@@ -26,6 +26,7 @@ class TrainerCsvRecorder:
         "power_watts",
         "heart_rate_bpm",
         "distance_meters",
+        "session_distance_meters",
         "energy_kcal",
         "trainer_elapsed_seconds",
     )
@@ -44,7 +45,13 @@ class TrainerCsvRecorder:
         self._startedAt = time.monotonic()
         self._writer.writerow(self.header)
 
-    def append(self,data: BikeTelemetry,appResistanceLevel: int,commandedResistance: float | None,) -> None:
+    def append(
+        self,
+        data: BikeTelemetry,
+        appResistanceLevel: int,
+        commandedResistance: float | None,
+        sessionDistanceMeters: int | None,
+    ) -> None:
         if self._writer is None or self._file is None:
             return
         self._writer.writerow(
@@ -58,6 +65,7 @@ class TrainerCsvRecorder:
                 data.powerWatts,
                 data.heartRate,
                 data.distanceMeters,
+                sessionDistanceMeters,
                 data.energyKcal,
                 data.elapsedSeconds,
             )
