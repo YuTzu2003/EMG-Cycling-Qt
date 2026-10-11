@@ -12,11 +12,12 @@ from PyQt5.QtWidgets import (
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,
     QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget,)
 
-from delsys.sensor_mapping import SensorMapping, loadMappings, saveMappings
-from delsys.recording import CollectionInfoRecorder, SubjectInfo, TrainerCsvRecorder, infoOutputPath, trainerOutputPath
-from delsys.trainer import BikeTelemetry, NumericRange, TrainerWorker
-from delsys.trigno import CHANNEL_COUNT, SAMPLE_RATE
-from delsys.workers import ConnectionWorker, StreamWorker
+from delsys.collection import CollectionInfoRecorder, SubjectInfo, infoOutputPath
+from delsys.emg.sensor_mapping import SensorMapping, loadMappings, saveMappings
+from delsys.emg.trigno import CHANNEL_COUNT, SAMPLE_RATE
+from delsys.emg.workers import ConnectionWorker, StreamWorker
+from delsys.resistance.trainer import BikeTelemetry, NumericRange, TrainerWorker
+from delsys.resistance.recording import TrainerCsvRecorder, trainerOutputPath
 
 COLORS = ("#1684d7", "#e95f54", "#7e57c2", "#00897b", "#f39c12", "#5c6bc0", "#43a047", "#c2185b")
 MAPPING_PATH = Path(__file__).resolve().parents[2] / "sensor_mapping.json"
@@ -184,14 +185,12 @@ class TrignoWindow(QMainWindow):
         subjectLayout.addWidget(QLabel("測試者資訊", objectName="sectionTitle"))
         subjectRow = QHBoxLayout()
         subjectRow.setSpacing(10)
-        subjectRow.addWidget(QLabel("病人 ID"))
+        subjectRow.addWidget(QLabel("ID"))
         self.patientIdEdit = QLineEdit()
-        self.patientIdEdit.setPlaceholderText("例如 P-001")
         self.patientIdEdit.setFixedWidth(180)
         subjectRow.addWidget(self.patientIdEdit)
         subjectRow.addWidget(QLabel("姓名"))
         self.patientNameEdit = QLineEdit()
-        self.patientNameEdit.setPlaceholderText("測試者姓名")
         self.patientNameEdit.setFixedWidth(180)
         subjectRow.addWidget(self.patientNameEdit)
         subjectRow.addWidget(QLabel("性別"))
@@ -731,7 +730,7 @@ class TrignoWindow(QMainWindow):
         self.emgRateLabel.setText("EMG 頻率：正在向 SDK 查詢…")
         for history in self.histories:
             history.clear()
-        self.streamWorker = StreamWorker(host, output, self.mappings, self.collectionSubject)
+        self.streamWorker = StreamWorker(host, output, self.mappings)
         self.streamWorker.status_changed.connect(self.streamStatusChanged)
         self.streamWorker.connected.connect(lambda banner: self.emgStatus.setToolTip(banner))
         self.streamWorker.base_ready.connect(lambda serial: self.baseLabel.setText(f"Base: {serial}"))
@@ -762,9 +761,7 @@ class TrignoWindow(QMainWindow):
             self.appendLog("阻力計未連線；本次不輸出阻力計 CSV")
             return
         try:
-            self.trainerRecorder = TrainerCsvRecorder(
-                self.trainerOutput, self.collectionOutput, self.collectionSubject
-            )
+            self.trainerRecorder = TrainerCsvRecorder(self.trainerOutput)
             self.trainerRecorder.start()
             self.appendLog(f"阻力計 CSV 開始輸出：{self.trainerOutput.name}")
         except OSError as exc:

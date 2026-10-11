@@ -1,13 +1,10 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 import argparse
 import csv
 import sys
-import time
 from pathlib import Path
-from delsys.recording import SubjectInfo, writeCsvPreamble, writeCsvSummary
-from delsys.sensor_mapping import loadProjectMappings
-from delsys.trigno import CHANNEL_COUNT, TrignoClient, TrignoError
+from delsys.emg.sensor_mapping import loadProjectMappings
+from delsys.emg.trigno import CHANNEL_COUNT, TrignoClient, TrignoError
 
 def configure_console_encoding() -> None:
     """Keep Traditional Chinese status text readable in Windows terminals."""
@@ -47,24 +44,19 @@ def main() -> int:
             print(f"啟用 slot: {active or '無'}")
             activeIndices = [slot - 1 for slot in active]
             writer = csv.writer(output)
-            sampleRate, samplesPerFrame, frameInterval = client.emg_frame_config()
-            writeCsvPreamble(
-                writer,
-                baseSerial=client.base_serial(),
-                sampleRate=sampleRate,
-                samplesPerFrame=samplesPerFrame,
-                frameIntervalSeconds=frameInterval,
-                activeSlots=active,
-                serials=client.sensor_serials(active),
-                mappings=loadProjectMappings(),
-                subject=SubjectInfo(),
-            )
-            started = time.monotonic()
+            sampleRate, _, _ = client.emg_frame_config()
+            mappings = loadProjectMappings()
+            writer.writerow(["time_seconds", "muscle_name", "sample"])
             client.start()
-            count = client.capture(args.duration, sampleRate, args.channels, writer, activeIndices)
+            target, count = round(args.duration * sampleRate), 0
+            while count < target:
+                for frame in client.read_emg_frames(args.channels):
+                    if count >= target:
+                        break
+                    for index in activeIndices:
+                        writer.writerow([count / sampleRate, mappings[index].chinese_name, frame[index]])
+                    count += 1
             client.stop()
-            elapsed = time.monotonic() - started
-            writeCsvSummary(writer, samples=count, elapsedSeconds=elapsed, sampleRate=sampleRate)
         print(f"已輸出 {count} samples（SDK EMG 頻率 {sampleRate:.3f} Hz）至 {args.output.resolve()}")
         return 0
     except (FileExistsError, OSError, TrignoError) as exc:

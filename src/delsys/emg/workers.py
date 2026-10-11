@@ -5,7 +5,6 @@ import time
 from pathlib import Path
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
-from .recording import SubjectInfo
 from .sensor_mapping import SensorMapping
 from .trigno import CHANNEL_COUNT, TrignoClient, TrignoError
 
@@ -40,15 +39,9 @@ class StreamWorker(QThread):
     collection_completed = pyqtSignal(int, float, float)
     failed = pyqtSignal(str)
 
-    def __init__(
-        self,
-        host: str,
-        output_path: Path,
-        mappings: list[SensorMapping],
-        subject: SubjectInfo,
-    ) -> None:
+    def __init__(self,host: str,output_path: Path,mappings: list[SensorMapping],) -> None:
         super().__init__()
-        self.host, self.output_path, self.mappings, self.subject = host, output_path, mappings, subject
+        self.host, self.output_path, self.mappings = host, output_path, mappings
         self._stop_event = threading.Event()
 
     def request_stop(self) -> None:

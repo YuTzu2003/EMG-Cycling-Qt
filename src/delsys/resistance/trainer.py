@@ -30,7 +30,6 @@ class NumericRange:
         steps = round((value - self.minimum) / self.increment)
         return self.minimum + steps * self.increment
 
-
 @dataclass(frozen=True)
 class BikeTelemetry:
     speedKph: float | None = None
@@ -42,9 +41,7 @@ class BikeTelemetry:
     energyKcal: int | None = None
     elapsedSeconds: int | None = None
 
-
 def parseIndoorBikeData(data: bytearray) -> BikeTelemetry:
-    """Parse the standard FTMS Indoor Bike Data (0x2AD2) notification."""
     if len(data) < 2:
         raise ValueError("Indoor Bike Data 封包長度不足。")
 
@@ -107,7 +104,6 @@ class FtmsTrainer:
         self.crankState: tuple[int, int] | None = None
 
     def requireBleak(self) -> None:
-        """Confirm that the Bluetooth dependency is available before connecting."""
         if BleakClient is None or BleakScanner is None:
             raise RuntimeError("缺少 bleak 藍牙套件。請在專案資料夾執行 uv sync 後重新開啟程式。")
 
@@ -164,9 +160,7 @@ class FtmsTrainer:
         await self.send(b"\x07")
 
     def emitTelemetry(self, update: BikeTelemetry) -> None:
-        values = {
-            name: value for name, value in vars(update).items() if value is not None
-        }
+        values = {name: value for name, value in vars(update).items() if value is not None}
         self.latestTelemetry = replace(self.latestTelemetry, **values)
         if self.telemetryCallback is not None:
             self.telemetryCallback(self.latestTelemetry)
@@ -252,9 +246,7 @@ class FtmsTrainer:
             raise ValueError("強度必須介於 0 到 30。")
         supported = await self.powerRange()
         if not supported.minimum <= level30Watts <= supported.maximum:
-            raise ValueError(
-                f"第 30 級目標功率需介於 {supported.minimum:g} 到 {supported.maximum:g} W。"
-            )
+            raise ValueError(f"第 30 級目標功率需介於 {supported.minimum:g} 到 {supported.maximum:g} W。")
         target = supported.minimum + (level30Watts - supported.minimum) * level / 30
         actual = supported.align(target)
         await self.send(struct.pack("<Bh", 0x05, round(actual)))

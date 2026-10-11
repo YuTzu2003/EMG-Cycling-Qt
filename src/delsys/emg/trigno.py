@@ -9,7 +9,6 @@ MESSAGE_END = b"\r\n\r\n"
 class TrignoError(RuntimeError):
     """The SDK Server could not complete a protocol operation."""
 
-
 class TrignoClient:
     def __init__(self, host: str = "127.0.0.1", timeout: float = 5.0) -> None:
         self.host, self.timeout = host, timeout
@@ -85,12 +84,6 @@ class TrignoClient:
         return self.command("BASE SERIAL?")
 
     def emg_frame_config(self) -> tuple[float, int, float]:
-        """Return the SDK's current EMG rate, samples/frame and frame interval.
-
-        The SDK can change the EMG port rate according to sensor mode and its
-        backwards-compatibility setting.  Do not infer it from wall-clock time:
-        TCP delivery is buffered and does not define the sensor sampling clock.
-        """
         try:
             frame_interval = float(self.command("FRAME INTERVAL?"))
             samples_per_frame = int(self.command("MAX SAMPLES EMG?"))
@@ -133,19 +126,6 @@ class TrignoClient:
         frames = [unpack(self._emg_buffer[offset : offset + frame_size]) for offset in range(0, consumed, frame_size)]
         del self._emg_buffer[:consumed]
         return frames
-
-    def capture(self,duration: float,sample_rate: float,channel_count: int,writer,active_indices: list[int],) -> int:
-        target, count = round(duration * sample_rate), 0
-        while count < target:
-            for frame in self.read_emg_frames(channel_count):
-                if count >= target:
-                    break
-                writer.writerow(
-                    [count, count / sample_rate]
-                    + [frame[index] for index in active_indices]
-                )
-                count += 1
-        return count
 
     def close(self) -> None:
         for sock in (self.aux_socket, self.emg_socket, self.command_socket):
