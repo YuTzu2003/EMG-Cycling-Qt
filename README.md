@@ -2,8 +2,14 @@
 
 ```powershell
 uv sync
-uv run python delsys_gui.py
+uv run python main.py
 ```
+
+## 互動式肌群圖
+
+「收集資料」頁面提供人體正面／背面切換，並依 `sensor_mapping.json` 在左右腿標示感測器位置。點選肌群可顯示或隱藏對應的即時 EMG 波形；感測器清單的勾選狀態也會同步到人體圖。
+
+人體圖使用的 GitHub 參考專案、實際整合方式與授權資訊記錄於 `GITHUB_REFERENCES.txt`。
 
 開始前請在 Trigno SDK Server 中配對並啟用感測器，並確認 Command/EMG/AUX TCP 埠 `50040`、`50041`、`50042` 可連線。
 
