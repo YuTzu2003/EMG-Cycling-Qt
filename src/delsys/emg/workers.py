@@ -4,15 +4,15 @@ import threading
 import time
 from pathlib import Path
 import numpy as np
-from PyQt5.QtCore import QThread, pyqtSignal
+from PySide6.QtCore import QThread, Signal
 from .sensor_mapping import SensorMapping, csvColumnNames
 from .trigno import CHANNEL_COUNT, TrignoClient, TrignoError
 
 class ConnectionWorker(QThread):
-    connected = pyqtSignal(str)
-    base_ready = pyqtSignal(str)
-    sensor_states_ready = pyqtSignal(object, object, object)
-    failed = pyqtSignal(str)
+    connected = Signal(str)
+    base_ready = Signal(str)
+    sensor_states_ready = Signal(object, object, object)
+    failed = Signal(str)
 
     def __init__(self, host: str) -> None:
         super().__init__()
@@ -29,15 +29,15 @@ class ConnectionWorker(QThread):
             self.failed.emit(str(exc))
 
 class StreamWorker(QThread):
-    status_changed = pyqtSignal(str)
-    connected = pyqtSignal(str)
-    base_ready = pyqtSignal(str)
-    sensor_states_ready = pyqtSignal(object, object, object)
-    frames_ready = pyqtSignal(object)
-    sample_rate_ready = pyqtSignal(float, int, float)
-    collection_metadata_ready = pyqtSignal(object)
-    collection_completed = pyqtSignal(int, float, float)
-    failed = pyqtSignal(str)
+    status_changed = Signal(str)
+    connected = Signal(str)
+    base_ready = Signal(str)
+    sensor_states_ready = Signal(object, object, object)
+    frames_ready = Signal(object)
+    sample_rate_ready = Signal(float, int, float)
+    collection_metadata_ready = Signal(object)
+    collection_completed = Signal(int, float, float)
+    failed = Signal(str)
 
     def __init__(self,host: str,output_path: Path,mappings: list[SensorMapping],) -> None:
         super().__init__()

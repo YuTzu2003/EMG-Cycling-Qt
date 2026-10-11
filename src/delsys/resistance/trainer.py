@@ -3,7 +3,7 @@ import asyncio
 import struct
 import time
 from dataclasses import dataclass, replace
-from PyQt5.QtCore import QThread, pyqtSignal
+from PySide6.QtCore import QThread, Signal
 try:
     from bleak import BleakClient, BleakScanner
 except ImportError:
@@ -287,14 +287,14 @@ class FtmsTrainer:
 
 
 class TrainerWorker(QThread):
-    ready = pyqtSignal()
-    scanReady = pyqtSignal(object)
-    connected = pyqtSignal(object)
-    disconnected = pyqtSignal()
-    resistanceSet = pyqtSignal(float)
-    fixedResistanceSet = pyqtSignal(int, float)
-    telemetryReceived = pyqtSignal(object)
-    failed = pyqtSignal(str)
+    ready = Signal()
+    scanReady = Signal(object)
+    connected = Signal(object)
+    disconnected = Signal()
+    resistanceSet = Signal(float)
+    fixedResistanceSet = Signal(int, float)
+    telemetryReceived = Signal(object)
+    failed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
