@@ -1,7 +1,7 @@
 from __future__ import annotations
 import asyncio
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from PyQt5.QtCore import QThread, pyqtSignal
 
 try:
@@ -15,6 +15,8 @@ CONTROL_POINT = "00002ad9-0000-1000-8000-00805f9b34fb"
 RESISTANCE_RANGE = "00002ad6-0000-1000-8000-00805f9b34fb"
 POWER_RANGE = "00002ad8-0000-1000-8000-00805f9b34fb"
 INDOOR_BIKE_DATA = "00002ad2-0000-1000-8000-00805f9b34fb"
+CYCLING_POWER_MEASUREMENT = "00002a63-0000-1000-8000-00805f9b34fb"
+CSC_MEASUREMENT = "00002a5b-0000-1000-8000-00805f9b34fb"
 RESPONSE_CODE = 0x80
 SUCCESS = 0x01
 
@@ -101,6 +103,8 @@ class FtmsTrainer:
         self.notificationsActive = False
         self.bikeNotificationsActive = False
         self.telemetryCallback = None
+        self.latestTelemetry = BikeTelemetry()
+        self.crankState: tuple[int, int] | None = None
 
     def requireBleak(self) -> None:
         """Confirm that the Bluetooth dependency is available before connecting."""
@@ -112,7 +116,7 @@ class FtmsTrainer:
         device = await BleakScanner.find_device_by_address(self.address, timeout=self.timeout)
         if device is None:
             raise RuntimeError(f"找不到阻力計 {self.address}。請喚醒設備後再試。")
-        self.client = BleakClient(device, timeout=self.timeout, services=[FTMS_SERVICE], winrt={"use_cached_services": False},)
+        self.client = BleakClient(device, timeout=self.timeout, winrt={"use_cached_services": False})
         await self.client.connect()
 
     async def disconnect(self) -> None:
@@ -159,16 +163,71 @@ class FtmsTrainer:
         await self.send(b"\x00")
         await self.send(b"\x07")
 
-    def indoorBikeNotification(self, sender: int, data: bytearray) -> None:
+    def emitTelemetry(self, update: BikeTelemetry) -> None:
+        values = {
+            name: value for name, value in vars(update).items() if value is not None
+        }
+        self.latestTelemetry = replace(self.latestTelemetry, **values)
         if self.telemetryCallback is not None:
-            self.telemetryCallback(parseIndoorBikeData(data))
+            self.telemetryCallback(self.latestTelemetry)
+
+    def cadenceFromCrank(self, revolutions: int, eventTime: int) -> float | None:
+        previous = self.crankState
+        self.crankState = (revolutions, eventTime)
+        if previous is None:
+            return None
+        previousRevolutions, previousTime = previous
+        elapsed = (eventTime - previousTime) & 0xFFFF
+        turns = (revolutions - previousRevolutions) & 0xFFFF
+        if elapsed == 0:
+            return None
+        return turns * 60 * 1024 / elapsed
+
+    def indoorBikeNotification(self, sender: int, data: bytearray) -> None:
+        self.emitTelemetry(parseIndoorBikeData(data))
+
+    def cyclingPowerNotification(self, sender: int, data: bytearray) -> None:
+        if len(data) < 4:
+            return
+        flags, power = struct.unpack_from("<Hh", data)
+        offset = 4
+        if flags & 0x0001:
+            offset += 1
+        if flags & 0x0004:
+            offset += 2
+        if flags & 0x0010:
+            offset += 6
+        cadence = None
+        if flags & 0x0020 and offset + 4 <= len(data):
+            revolutions, eventTime = struct.unpack_from("<HH", data, offset)
+            cadence = self.cadenceFromCrank(revolutions, eventTime)
+        self.emitTelemetry(BikeTelemetry(powerWatts=power, cadenceRpm=cadence))
+
+    def cscNotification(self, sender: int, data: bytearray) -> None:
+        if not data:
+            return
+        flags = data[0]
+        offset = 1 + (6 if flags & 0x01 else 0)
+        if flags & 0x02 and offset + 4 <= len(data):
+            revolutions, eventTime = struct.unpack_from("<HH", data, offset)
+            self.emitTelemetry(BikeTelemetry(cadenceRpm=self.cadenceFromCrank(revolutions, eventTime)))
 
     async def startTelemetry(self) -> bool:
-        if self.client is None or self.client.services.get_characteristic(INDOOR_BIKE_DATA) is None:
+        if self.client is None:
             return False
         if not self.bikeNotificationsActive:
-            await self.client.start_notify(INDOOR_BIKE_DATA, self.indoorBikeNotification)
+            notifications = (
+                (INDOOR_BIKE_DATA, self.indoorBikeNotification),
+                (CYCLING_POWER_MEASUREMENT, self.cyclingPowerNotification),
+                (CSC_MEASUREMENT, self.cscNotification),
+            )
+            subscribed = False
+            for uuid, callback in notifications:
+                if self.client.services.get_characteristic(uuid) is not None:
+                    await self.client.start_notify(uuid, callback)
+                    subscribed = True
             self.bikeNotificationsActive = True
+            return subscribed
         return True
 
     async def setResistance(self, level: float) -> float:
@@ -178,6 +237,14 @@ class FtmsTrainer:
         actual = supported.align(level)
         await self.send(struct.pack("<Bh", 0x04, round(actual * 10)))
         return actual
+
+    async def setFixedResistanceLevel(self, level: int) -> float:
+        """Map the interface's 0–30 level to the trainer's fixed native resistance."""
+        if not 0 <= level <= 30:
+            raise ValueError("固定阻力等級必須介於 0 到 30。")
+        supported = await self.resistanceRange()
+        target = supported.minimum + (supported.maximum - supported.minimum) * level / 30
+        return await self.setResistance(supported.align(target))
 
     async def setAppLevel(self, level: int, level30Watts: float) -> float:
         """Map a user-friendly 0–30 level to a reproducible ERG power target."""
@@ -208,8 +275,7 @@ class TrainerWorker(QThread):
     connected = pyqtSignal(object)
     disconnected = pyqtSignal()
     resistanceSet = pyqtSignal(float)
-    powerSet = pyqtSignal(float)
-    appLevelSet = pyqtSignal(int, float)
+    fixedResistanceSet = pyqtSignal(int, float)
     telemetryReceived = pyqtSignal(object)
     failed = pyqtSignal(str)
 
@@ -268,6 +334,7 @@ class TrainerWorker(QThread):
             "address": address,
             "resistance": resistance,
             "power": power,
+            "nativeResistance": resistance.minimum,
             "telemetryEnabled": telemetryEnabled,
         }
 
@@ -280,21 +347,15 @@ class TrainerWorker(QThread):
             return
         self.submit(self.trainer.setResistance(value), self.resistanceSet.emit)
 
-    def setAppLevelValue(self, level: int, level30Watts: float) -> None:
+    def setFixedResistanceLevel(self, level: int) -> None:
         if self.trainer is None:
             self.failed.emit("請先連線阻力計。")
             return
 
         def complete(actual: float) -> None:
-            self.appLevelSet.emit(level, actual)
+            self.fixedResistanceSet.emit(level, actual)
 
-        self.submit(self.trainer.setAppLevel(level, level30Watts), complete)
-
-    def setPowerValue(self, value: float) -> None:
-        if self.trainer is None:
-            self.failed.emit("請先連線阻力計。")
-            return
-        self.submit(self.trainer.setPower(value), self.powerSet.emit)
+        self.submit(self.trainer.setFixedResistanceLevel(level), complete)
 
     async def disconnectTrainer(self) -> None:
         if self.trainer:

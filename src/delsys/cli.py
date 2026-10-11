@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
-"""Command-line recorder for the Delsys Trigno SDK Server."""
-
 from __future__ import annotations
-
 import argparse
 import csv
 import sys
 from pathlib import Path
-
 from delsys.sensor_mapping import csvColumns, loadProjectMappings
 from delsys.trigno import CHANNEL_COUNT, SAMPLE_RATE, TrignoClient, TrignoError
-
 
 def configure_console_encoding() -> None:
     """Keep Traditional Chinese status text readable in Windows terminals."""
@@ -26,7 +21,6 @@ def positive_float(value: str) -> float:
         raise argparse.ArgumentTypeError("必須大於 0")
     return number
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="錄製 Trigno SDK Server 的 EMG 資料")
     parser.add_argument("--host", default="127.0.0.1", help="SDK Server IP 位址")
@@ -35,7 +29,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--channels", type=int, default=CHANNEL_COUNT)
     parser.add_argument("--output", type=Path, default=Path("emg_data.csv"))
     return parser.parse_args()
-
 
 def main() -> int:
     configure_console_encoding()
@@ -61,7 +54,6 @@ def main() -> int:
     except (FileExistsError, OSError, TrignoError) as exc:
         print(f"錯誤：{exc}", file=sys.stderr)
         return 1
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
