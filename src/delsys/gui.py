@@ -5,22 +5,67 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QTimer, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,
     QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget,)
-
 from delsys.collection import CollectionInfoRecorder, SubjectInfo, infoOutputPath
-from delsys.emg.sensor_mapping import SensorMapping, loadMappings, saveMappings
+from delsys.emg.body_map import BodyMapPanel
+from delsys.emg.sensor_mapping import (
+    SensorMapping,
+    duplicateMappingSlots,
+    loadMappings,
+    saveMappings,
+)
 from delsys.emg.trigno import CHANNEL_COUNT, SAMPLE_RATE
 from delsys.emg.workers import ConnectionWorker, StreamWorker
-from delsys.resistance.trainer import BikeTelemetry, NumericRange, TrainerWorker
 from delsys.resistance.recording import TrainerCsvRecorder, trainerOutputPath
+from delsys.resistance.trainer import BikeTelemetry, NumericRange, TrainerWorker
 
 COLORS = ("#1684d7", "#e95f54", "#7e57c2", "#00897b", "#f39c12", "#5c6bc0", "#43a047", "#c2185b")
 MAPPING_PATH = Path(__file__).resolve().parents[2] / "sensor_mapping.json"
+
+
+class SensorLegendToggle(QWidget):
+    toggled = pyqtSignal(bool)
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._checked = False
+        self.setCursor(Qt.PointingHandCursor)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
+        self.title = QLabel(objectName="sensorLegendTitle")
+        self.english = QLabel(objectName="sensorLegendEnglish")
+        for label in (self.title, self.english):
+            label.setAttribute(Qt.WA_TransparentForMouseEvents)
+            label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addWidget(self.title)
+        layout.addWidget(self.english)
+
+    def setLabels(self, title: str, english: str) -> None:
+        self.title.setText(title)
+        self.english.setText(english)
+
+    def isChecked(self) -> bool:
+        return self._checked
+
+    def setChecked(self, checked: bool) -> None:
+        checked = bool(checked)
+        if checked == self._checked:
+            return
+        self._checked = checked
+        self.toggled.emit(checked)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self.setChecked(not self._checked)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
 
 class MappingEditorDialog(QDialog):
     def __init__( self, mappings: list[SensorMapping], active_slots: set[int], parent: QWidget | None = None) -> None:
@@ -61,20 +106,35 @@ class MappingEditorDialog(QDialog):
             SensorMapping(slot, chinese.text().strip() or "未指定", english.text().strip() or "UNASSIGNED", abbreviation.text().strip())
             for slot, (chinese, english, abbreviation) in enumerate(self.edits, 1) ]
 
+    def accept(self) -> None:
+        duplicates = duplicateMappingSlots(self.mappings())
+        if duplicates:
+            conflicts = "\n".join(
+                f"{muscle.title()} ({side.upper() or '?' }): "
+                + ", ".join(f"S{slot:02d}" for slot in slots)
+                for (muscle, side), slots in duplicates.items()
+            )
+            QMessageBox.warning(
+                self,
+                "重複肌肉對應",
+                "同一側的同一肌肉只能對應一個感測器：\n" + conflicts,
+            )
+            return
+        super().accept()
+
 
 class TrignoWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("EMG Cycling Monitor")
-        self.resize(1320, 860)
+        self.resize(1500, 920)
         self.streamWorker: StreamWorker | None = None
         self.testWorker: ConnectionWorker | None = None
         self.trainerWorker = TrainerWorker()
         self.trainerIsConnected = False
         self.histories = [deque(maxlen=int(SAMPLE_RATE * 20)) for _ in range(CHANNEL_COUNT)]
         self.mappings = loadMappings(MAPPING_PATH)
-        self.sensorChecks: list[QCheckBox] = []
-        self.sensorDetails: list[QLabel] = []
+        self.sensorChecks: list[SensorLegendToggle] = []
         self.sensorIcons: list[QLabel] = []
         self.sensorRows: list[QFrame] = []
         self.sensorActive = [False] * CHANNEL_COUNT
@@ -301,13 +361,16 @@ class TrignoWindow(QMainWindow):
         layout.addLayout(recording)
         body = QHBoxLayout()
         panel = self.createSensorPanel()
-        panel.setFixedWidth(380)
-        body.addWidget(panel)
+        self.bodyMap = BodyMapPanel(COLORS)
+        self.bodyMap.setFixedWidth(590)
+        self.bodyMap.setLegendWidget(panel)
+        self.bodyMap.slotToggled.connect(self.toggleSensorFromBodyMap)
+        body.addWidget(self.bodyMap)
         charts = QWidget()
         chartLayout = QVBoxLayout(charts)
         chartLayout.setContentsMargins(0, 0, 0, 0)
         chartHeader = QHBoxLayout()
-        chartHeader.addWidget(QLabel("即時波形（固定顯示 10 秒）", objectName="sectionTitle"))
+        chartHeader.addWidget(QLabel("即時波形", objectName="sectionTitle"))
         chartHeader.addStretch()
         chartLayout.addLayout(chartHeader)
         self.plotWidget = pg.GraphicsLayoutWidget()
@@ -330,50 +393,67 @@ class TrignoWindow(QMainWindow):
         self.durationMinutesSpin.valueChanged.connect(self.resetCountdownDisplay)
         self.durationSecondsSpin.valueChanged.connect(self.resetCountdownDisplay)
         self.applyStyles()
+        self.syncMuscleMap()
         self.rebuildPlots()
         return tab
 
     def createSensorPanel(self) -> QWidget:
-        panel = QFrame(objectName="panel")
+        panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.addWidget(QLabel("啟用感測器與肌肉對應", objectName="sectionTitle"))
-        edit = QPushButton("編輯肌肉對應")
-        layout.addWidget(edit)
+        layout.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet(
+            "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: 0; }"
+        )
         content = QWidget()
+        content.setStyleSheet("background: transparent;")
         items = QVBoxLayout(content)
         items.setContentsMargins(0, 0, 0, 0)
         for index in range(CHANNEL_COUNT):
             row = QFrame(objectName="sensorRow")
             rowLayout = QHBoxLayout(row)
             rowLayout.setContentsMargins(8, 6, 8, 6)
+            rowLayout.setSpacing(3)
             icon = QLabel("〽", objectName="sensorIcon")
             icon.setFixedSize(28, 28)
             icon.setAlignment(Qt.AlignCenter)
             icon.setStyleSheet(f"background: {COLORS[index % len(COLORS)]}; color: white; border-radius: 5px; font-weight: bold; font-size: 16px;")
-            check = QCheckBox()
-            check.setChecked(index < 4)
-            detail = QLabel(objectName="sensorDetail")
-            textLayout = QVBoxLayout()
-            textLayout.setSpacing(0)
-            textLayout.addWidget(check)
-            textLayout.addWidget(detail)
-            rowLayout.addWidget(icon)
-            rowLayout.addLayout(textLayout, 1)
+            check = SensorLegendToggle()
+            check.setChecked(False)
+            rowLayout.addWidget(icon, 0, Qt.AlignTop)
+            rowLayout.addWidget(check, 1)
             items.addWidget(row)
-            check.toggled.connect(self.rebuildPlots)
+            check.toggled.connect(self.sensorSelectionChanged)
             self.sensorChecks.append(check)
-            self.sensorDetails.append(detail)
             self.sensorIcons.append(icon)
             self.sensorRows.append(row)
         items.addStretch()
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
-        edit.clicked.connect(self.editMappings)
         self.updateSensorRows()
         return panel
+
+    def sensorSelectionChanged(self) -> None:
+        self.rebuildPlots()
+        self.updateSensorRows()
+
+    def toggleSensorFromBodyMap(self, slot: int) -> None:
+        if 1 <= slot <= len(self.sensorChecks):
+            check = self.sensorChecks[slot - 1]
+            check.setChecked(not check.isChecked())
+
+    def syncMuscleMap(self) -> None:
+        if not hasattr(self, "bodyMap"):
+            return
+        selected = {
+            index + 1 for index, check in enumerate(self.sensorChecks) if check.isChecked()
+        }
+        active = {
+            index + 1 for index, isActive in enumerate(self.sensorActive) if isActive
+        }
+        self.bodyMap.setMappings(self.mappings, selected, active)
 
     def connectTrainerSignals(self) -> None:
         self.trainerWorker.ready.connect(self.trainerReady)
@@ -542,37 +622,42 @@ class TrignoWindow(QMainWindow):
             self.mappings = dialog.mappings()
             saveMappings(MAPPING_PATH, self.mappings)
             self.updateSensorRows()
+            self.syncMuscleMap()
             self.rebuildPlots()
 
     def updateSensorRows(self) -> None:
         for index, mapping in enumerate(self.mappings):
-            serial = self.sensorSerials.get(mapping.slot, "未取得 SID")
             side = mapping.abbreviation.rsplit("-", 1)[-1] if "-" in mapping.abbreviation else ""
             title = f"{side} {mapping.english_name.upper()}" if side in {"R", "L"} else mapping.english_name.upper()
-            self.sensorChecks[index].setText(f"S{mapping.slot:02d} · {title}")
-            self.sensorDetails[index].setText(f"{mapping.chinese_name} | Slot {mapping.slot:02d} · 啟用 · SID: {serial}")
-            tooltip = (
-                f"S{mapping.slot:02d} · {mapping.chinese_name}\n"
-                f"{mapping.english_name}\n"
-                f"SID：{serial}\n"
-                "勾選後顯示此感測器的即時波形。"
+            detected = self.sensorActive[index]
+            self.sensorChecks[index].setLabels(
+                f"S{mapping.slot:02d} · {mapping.chinese_name}", mapping.english_name
             )
+            serial = self.sensorSerials.get(mapping.slot, "未取得 SID")
+            tooltip = f"S{mapping.slot:02d} · {title}\nSID：{serial}"
             self.sensorRows[index].setToolTip(tooltip)
             self.sensorIcons[index].setToolTip(tooltip)
             self.sensorChecks[index].setToolTip(tooltip)
-            self.sensorDetails[index].setToolTip(tooltip)
-            self.sensorRows[index].setVisible(self.sensorActive[index])
+            self.sensorRows[index].setVisible(True)
+            self.sensorRows[index].setStyleSheet(
+                "QFrame#sensorRow { background: #f0fdf4; border: 1px solid #16a34a; }"
+                if detected
+                else ""
+            )
         if hasattr(self, "activeSlotsLabel"):
             active_text = ", ".join(f"S{index + 1:02d}" for index, active in enumerate(self.sensorActive) if active)
             self.activeSlotsLabel.setText(f"目前啟用感測器：{active_text or '無'}")
+        self.syncMuscleMap()
 
     def applyStyles(self) -> None:
         self.setStyleSheet("""
-            QWidget#root { background: #f5f7fb; color: #1e293b; }
+            QWidget#root { background: #eef3f8; color: #1e293b; }
             QLabel#title { font-size: 24px; font-weight: 700; }
             QLabel#sectionTitle { font-size: 15px; font-weight: 700; }
-            QLabel#muted, QLabel#sensorDetail { color: #64748b; }
-            QLabel#sensorDetail { font-size: 10px; }
+            QLabel#muted { color: #64748b; }
+            QLabel#sensorLegendTitle { color: #1e293b; font-size: 12px; font-weight: 400; }
+            QLabel#sensorLegendEnglish { color: #6b6b6b; font-size: 11px; font-weight: 400; }
+            QLabel#bodyCaption { color: #64748b; font-size: 10px; }
             QLabel#status { padding: 5px 10px; border-radius: 10px; }
             QLabel#connectionIndicator { padding: 5px 8px; font-weight: 700; }
             QLabel#countdown { min-width: 90px; font-size: 13px; color: #64748b; }
@@ -583,12 +668,15 @@ class TrignoWindow(QMainWindow):
             QFrame#eventLogPanel { background: #111827; border: 1px solid #374151; border-radius: 7px; }
             QLabel#eventLogTitle { color: #f3f4f6; font-size: 13px; font-weight: 700; padding: 0 3px; }
             QPlainTextEdit#eventLog { background: transparent; color: #d1d5db; border: 0; padding: 3px; font-family: Consolas, monospace; }
-            QFrame#panel, QFrame#sensorRow { background: white; border: 1px solid #e2e8f0; border-radius: 7px; }
+            QFrame#panel { background: #f8fafc; border: 1px solid #dbe3ef; border-radius: 7px; }
+            QFrame#sensorRow { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 7px; }
             QLineEdit, QSpinBox, QComboBox { padding: 6px; background: white; border: 1px solid #cbd5e1; border-radius: 5px; }
             QComboBox QAbstractItemView { background: white; color: #1e293b; selection-background-color: #dbeafe; selection-color: #0f172a; outline: 0; }
             QComboBox QAbstractItemView::item { min-height: 24px; color: #1e293b; background: white; }
             QComboBox QAbstractItemView::item:hover, QComboBox QAbstractItemView::item:selected { color: #0f172a; background: #dbeafe; }
             QPushButton { padding: 7px 10px; background: white; border: 1px solid #cbd5e1; border-radius: 5px; }
+            QPushButton#bodyViewButton { padding: 5px 12px; border-radius: 0; }
+            QPushButton#bodyViewButton:checked { background: #2563eb; color: white; border-color: #2563eb; font-weight: 700; }
             QPushButton#primary { background: #2563eb; border: 0; color: white; font-weight: 600; }
             QPushButton#record { background: #dc2626; border: 0; color: white; font-weight: 600; }
             QPushButton:disabled { color: #94a3b8; background: #e2e8f0; }
@@ -603,6 +691,39 @@ class TrignoWindow(QMainWindow):
             name=self.patientNameEdit.text().strip(),
             gender=self.genderCombo.currentText(),
         )
+
+    def collectionSetupIsValid(self) -> bool:
+        subject = self.subjectInfo()
+        missing = []
+        if not subject.patientId:
+            missing.append("病人 ID")
+        if not subject.name:
+            missing.append("姓名")
+        if missing:
+            QMessageBox.warning(
+                self,
+                "缺少病人資訊",
+                "開始收集前請填寫：" + "、".join(missing),
+            )
+            self.tabs.setCurrentWidget(self.settingsTab)
+            (self.patientIdEdit if not subject.patientId else self.patientNameEdit).setFocus()
+            return False
+
+        duplicates = duplicateMappingSlots(self.mappings)
+        if duplicates:
+            conflicts = "\n".join(
+                f"{muscle.title()} ({side.upper() or '?' }): "
+                + ", ".join(f"S{slot:02d}" for slot in slots)
+                for (muscle, side), slots in duplicates.items()
+            )
+            QMessageBox.warning(
+                self,
+                "重複肌肉對應",
+                "請先修正感測器對應，再開始收集：\n" + conflicts,
+            )
+            self.tabs.setCurrentWidget(self.settingsTab)
+            return False
+        return True
 
     def outputPathForCollection(self, directory: Path) -> Path:
         """Generate a collision-free, patient-ID based EMG file name."""
@@ -699,6 +820,8 @@ class TrignoWindow(QMainWindow):
         host = self.hostEdit.text().strip()
         if not host:
             QMessageBox.warning(self, "缺少位址", "請輸入 SDK Server IP 位址。")
+            return
+        if not self.collectionSetupIsValid():
             return
         directoryText = self.pathEdit.text().strip()
         if not directoryText:

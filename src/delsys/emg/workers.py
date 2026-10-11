@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
-from .sensor_mapping import SensorMapping
+from .sensor_mapping import SensorMapping, csvColumnNames
 from .trigno import CHANNEL_COUNT, TrignoClient, TrignoError
 
 class ConnectionWorker(QThread):
@@ -64,6 +64,7 @@ class StreamWorker(QThread):
                 serials = client.sensor_serials(active)
                 self.sensor_states_ready.emit(active, active, serials)
                 activeIndices = [slot - 1 for slot in active]
+                activeMappings = [self.mappings[index] for index in activeIndices]
                 self.collection_metadata_ready.emit({
                     "base_serial": baseSerial,
                     "sample_rate_hz": sampleRate,
@@ -84,7 +85,7 @@ class StreamWorker(QThread):
                 csv_file = self.output_path.open("x", newline="", encoding="utf-8-sig")
                 output_opened = True
                 writer = csv.writer(csv_file)
-                writer.writerow(["time_seconds", "muscle_name", "sample"])
+                writer.writerow(["time_seconds", *csvColumnNames(activeMappings)])
                 client.start()
                 collectionStarted = time.monotonic()
                 self.status_changed.emit("串流中")
@@ -95,8 +96,7 @@ class StreamWorker(QThread):
                     frames = client.read_emg_frames()
                     for frame in frames:
                         timeSeconds = sampleIndex / sampleRate
-                        for index in activeIndices:
-                            writer.writerow([timeSeconds, self.mappings[index].chinese_name, frame[index]])
+                        writer.writerow([timeSeconds, *(frame[index] for index in activeIndices)])
                         sampleIndex += 1
                     buffer.extend(frames)
                     if buffer and (len(buffer) >= 100 or time.monotonic() - last_emit >= 0.05):

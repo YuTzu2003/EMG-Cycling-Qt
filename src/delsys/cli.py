@@ -3,7 +3,7 @@ import argparse
 import csv
 import sys
 from pathlib import Path
-from delsys.emg.sensor_mapping import loadProjectMappings
+from delsys.emg.sensor_mapping import csvColumnNames, loadProjectMappings
 from delsys.emg.trigno import CHANNEL_COUNT, TrignoClient, TrignoError
 
 def configure_console_encoding() -> None:
@@ -46,15 +46,15 @@ def main() -> int:
             writer = csv.writer(output)
             sampleRate, _, _ = client.emg_frame_config()
             mappings = loadProjectMappings()
-            writer.writerow(["time_seconds", "muscle_name", "sample"])
+            activeMappings = [mappings[index] for index in activeIndices]
+            writer.writerow(["time_seconds", *csvColumnNames(activeMappings)])
             client.start()
             target, count = round(args.duration * sampleRate), 0
             while count < target:
                 for frame in client.read_emg_frames(args.channels):
                     if count >= target:
                         break
-                    for index in activeIndices:
-                        writer.writerow([count / sampleRate, mappings[index].chinese_name, frame[index]])
+                    writer.writerow([count / sampleRate, *(frame[index] for index in activeIndices)])
                     count += 1
             client.stop()
         print(f"已輸出 {count} samples（SDK EMG 頻率 {sampleRate:.3f} Hz）至 {args.output.resolve()}")
