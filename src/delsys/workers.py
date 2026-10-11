@@ -5,8 +5,9 @@ import time
 from pathlib import Path
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
-from .sensor_mapping import csvColumns, loadProjectMappings
-from .trigno import CHANNEL_COUNT, SAMPLE_RATE, TrignoClient, TrignoError
+from .recording import SubjectInfo
+from .sensor_mapping import SensorMapping
+from .trigno import CHANNEL_COUNT, TrignoClient, TrignoError
 
 class ConnectionWorker(QThread):
     connected = pyqtSignal(str)
@@ -34,11 +35,20 @@ class StreamWorker(QThread):
     base_ready = pyqtSignal(str)
     sensor_states_ready = pyqtSignal(object, object, object)
     frames_ready = pyqtSignal(object)
+    sample_rate_ready = pyqtSignal(float, int, float)
+    collection_metadata_ready = pyqtSignal(object)
+    collection_completed = pyqtSignal(int, float, float)
     failed = pyqtSignal(str)
 
-    def __init__(self, host: str, output_path: Path | None) -> None:
+    def __init__(
+        self,
+        host: str,
+        output_path: Path,
+        mappings: list[SensorMapping],
+        subject: SubjectInfo,
+    ) -> None:
         super().__init__()
-        self.host, self.output_path = host, output_path
+        self.host, self.output_path, self.mappings, self.subject = host, output_path, mappings, subject
         self._stop_event = threading.Event()
 
     def request_stop(self) -> None:
@@ -46,36 +56,55 @@ class StreamWorker(QThread):
 
     def run(self) -> None:
         csv_file = None
+        output_opened = False
         try:
             with TrignoClient(self.host) as client:
                 self.status_changed.emit("正在連線…")
                 self.connected.emit(client.connect())
-                self.base_ready.emit(client.base_serial())
-                # Start data collection before status discovery.  The EMG socket
-                # buffers the initial frames while the short control queries run.
-                client.start()
-                self.status_changed.emit("串流中")
+                baseSerial = client.base_serial()
+                self.base_ready.emit(baseSerial)
+                sampleRate, samplesPerFrame, frameInterval = client.emg_frame_config()
+                self.sample_rate_ready.emit(sampleRate, samplesPerFrame, frameInterval)
                 active = client.active_sensors()
-                self.sensor_states_ready.emit(active, active, client.sensor_serials(active))
+                if not active:
+                    raise TrignoError("找不到啟用中的 EMG 感測器，請先在 Trigno Control Utility 啟用感測器。")
+                serials = client.sensor_serials(active)
+                self.sensor_states_ready.emit(active, active, serials)
                 activeIndices = [slot - 1 for slot in active]
-                writer, sample_index = None, 0
-                if self.output_path:
-                    self.output_path.parent.mkdir(parents=True, exist_ok=True)
-                    csv_file = self.output_path.open("x", newline="", encoding="utf-8")
-                    writer = csv.writer(csv_file)
-                    allColumns = csvColumns(loadProjectMappings())
-                    writer.writerow(["sample", "time_seconds"] + [allColumns[index] for index in activeIndices])
+                self.collection_metadata_ready.emit({
+                    "base_serial": baseSerial,
+                    "sample_rate_hz": sampleRate,
+                    "samples_per_frame": samplesPerFrame,
+                    "frame_interval_seconds": frameInterval,
+                    "channels": [
+                        {
+                            "slot": slot,
+                            "sid": serials.get(slot, "Unknown SID"),
+                            "chinese_name": self.mappings[slot - 1].chinese_name,
+                            "english_name": self.mappings[slot - 1].english_name,
+                            "abbreviation": self.mappings[slot - 1].abbreviation,
+                        }
+                        for slot in active
+                    ],
+                })
+                self.output_path.parent.mkdir(parents=True, exist_ok=True)
+                csv_file = self.output_path.open("x", newline="", encoding="utf-8-sig")
+                output_opened = True
+                writer = csv.writer(csv_file)
+                writer.writerow(["time_seconds", "muscle_name", "sample"])
+                client.start()
+                collectionStarted = time.monotonic()
+                self.status_changed.emit("串流中")
+                sampleIndex = 0
                 buffer: list[tuple[float, ...]] = []
                 last_emit = time.monotonic()
                 while not self._stop_event.is_set():
                     frames = client.read_emg_frames()
-                    if writer:
-                        for frame in frames:
-                            writer.writerow(
-                                [sample_index, sample_index / SAMPLE_RATE]
-                                + [frame[index] for index in activeIndices]
-                            )
-                            sample_index += 1
+                    for frame in frames:
+                        timeSeconds = sampleIndex / sampleRate
+                        for index in activeIndices:
+                            writer.writerow([timeSeconds, self.mappings[index].chinese_name, frame[index]])
+                        sampleIndex += 1
                     buffer.extend(frames)
                     if buffer and (len(buffer) >= 100 or time.monotonic() - last_emit >= 0.05):
                         self.frames_ready.emit(np.asarray(buffer, dtype=np.float32))
@@ -84,8 +113,13 @@ class StreamWorker(QThread):
                 if buffer:
                     self.frames_ready.emit(np.asarray(buffer, dtype=np.float32))
                 client.stop()
+                elapsedSeconds = time.monotonic() - collectionStarted
+                self.collection_completed.emit(sampleIndex, elapsedSeconds, sampleRate)
         except (OSError, TrignoError, ValueError, FileExistsError) as exc:
-            self.failed.emit(str(exc))
+            message = str(exc)
+            if not output_opened and isinstance(exc, (OSError, FileExistsError)):
+                message = f"CSV 輸出失敗：{message}"
+            self.failed.emit(message)
         finally:
             if csv_file:
                 csv_file.close()

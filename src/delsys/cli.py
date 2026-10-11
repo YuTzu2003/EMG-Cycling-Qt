@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+import time
 from pathlib import Path
-from delsys.sensor_mapping import csvColumns, loadProjectMappings
-from delsys.trigno import CHANNEL_COUNT, SAMPLE_RATE, TrignoClient, TrignoError
+from delsys.recording import SubjectInfo, writeCsvPreamble, writeCsvSummary
+from delsys.sensor_mapping import loadProjectMappings
+from delsys.trigno import CHANNEL_COUNT, TrignoClient, TrignoError
 
 def configure_console_encoding() -> None:
     """Keep Traditional Chinese status text readable in Windows terminals."""
@@ -25,7 +27,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="錄製 Trigno SDK Server 的 EMG 資料")
     parser.add_argument("--host", default="127.0.0.1", help="SDK Server IP 位址")
     parser.add_argument("--duration", type=positive_float, default=5.0, help="錄製秒數")
-    parser.add_argument("--sample-rate", type=positive_float, default=SAMPLE_RATE)
     parser.add_argument("--channels", type=int, default=CHANNEL_COUNT)
     parser.add_argument("--output", type=Path, default=Path("emg_data.csv"))
     return parser.parse_args()
@@ -38,18 +39,33 @@ def main() -> int:
         return 2
     try:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        with TrignoClient(host=args.host) as client, args.output.open("x", newline="", encoding="utf-8") as output:
+        with TrignoClient(host=args.host) as client, args.output.open("x", newline="", encoding="utf-8-sig") as output:
             print(f"Server: {client.connect()}")
             active = client.active_sensors(args.channels)
+            if not active:
+                raise TrignoError("找不到啟用中的 EMG 感測器，請先在 Trigno Control Utility 啟用感測器。")
             print(f"啟用 slot: {active or '無'}")
             activeIndices = [slot - 1 for slot in active]
             writer = csv.writer(output)
-            allColumns = csvColumns(loadProjectMappings())[:args.channels]
-            writer.writerow(["sample", "time_seconds"] + [allColumns[index] for index in activeIndices])
+            sampleRate, samplesPerFrame, frameInterval = client.emg_frame_config()
+            writeCsvPreamble(
+                writer,
+                baseSerial=client.base_serial(),
+                sampleRate=sampleRate,
+                samplesPerFrame=samplesPerFrame,
+                frameIntervalSeconds=frameInterval,
+                activeSlots=active,
+                serials=client.sensor_serials(active),
+                mappings=loadProjectMappings(),
+                subject=SubjectInfo(),
+            )
+            started = time.monotonic()
             client.start()
-            count = client.capture(args.duration, args.sample_rate, args.channels, writer, activeIndices)
+            count = client.capture(args.duration, sampleRate, args.channels, writer, activeIndices)
             client.stop()
-        print(f"已錄製 {count} 筆資料至 {args.output.resolve()}")
+            elapsed = time.monotonic() - started
+            writeCsvSummary(writer, samples=count, elapsedSeconds=elapsed, sampleRate=sampleRate)
+        print(f"已輸出 {count} samples（SDK EMG 頻率 {sampleRate:.3f} Hz）至 {args.output.resolve()}")
         return 0
     except (FileExistsError, OSError, TrignoError) as exc:
         print(f"錯誤：{exc}", file=sys.stderr)

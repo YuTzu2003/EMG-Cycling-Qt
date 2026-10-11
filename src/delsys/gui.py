@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 import sys
 from collections import deque
@@ -14,6 +13,7 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget,)
 
 from delsys.sensor_mapping import SensorMapping, loadMappings, saveMappings
+from delsys.recording import CollectionInfoRecorder, SubjectInfo, TrainerCsvRecorder, infoOutputPath, trainerOutputPath
 from delsys.trainer import BikeTelemetry, NumericRange, TrainerWorker
 from delsys.trigno import CHANNEL_COUNT, SAMPLE_RATE
 from delsys.workers import ConnectionWorker, StreamWorker
@@ -79,6 +79,16 @@ class TrignoWindow(QMainWindow):
         self.sensorActive = [False] * CHANNEL_COUNT
         self.sensorSerials: dict[int, str] = {}
         self.curves: dict[int, tuple[pg.PlotItem, pg.PlotDataItem]] = {}
+        self.collectionSummary: tuple[int, float, float] | None = None
+        self.collectionError: str | None = None
+        self.collectionOutput: Path | None = None
+        self.collectionSubject = SubjectInfo()
+        self.infoRecorder: CollectionInfoRecorder | None = None
+        self.infoOutput: Path | None = None
+        self.trainerRecorder: TrainerCsvRecorder | None = None
+        self.trainerOutput: Path | None = None
+        self.commandedNativeResistance: float | None = None
+        self.currentSampleRate = SAMPLE_RATE
         self.buildUi()
         self.connectTrainerSignals()
         self.trainerWorker.start()
@@ -130,7 +140,15 @@ class TrignoWindow(QMainWindow):
         self.trainerTelemetryLabel = QLabel("即時騎乘資料：尚未連線", objectName="muted")
         grid.addWidget(self.trainerTelemetryLabel, 2, 0, 1, 4)
         layout.addWidget(connection)
-        controls = QHBoxLayout()
+
+        self.scanTrainerButton.clicked.connect(self.scanTrainer)
+        self.connectTrainerButton.clicked.connect(self.connectTrainer)
+        return tab
+
+    def createResistanceTab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
         resistance = QFrame(objectName="panel")
         resistanceLayout = QVBoxLayout(resistance)
         resistanceLayout.addWidget(QLabel("固定阻力", objectName="sectionTitle"))
@@ -151,28 +169,40 @@ class TrignoWindow(QMainWindow):
         resistanceLayout.addLayout(resistanceRow)
         self.nativeResistanceLabel = QLabel("原生阻力：0（固定模式）", objectName="muted")
         resistanceLayout.addWidget(self.nativeResistanceLabel)
-        controls.addWidget(resistance)
-        self.resistancePanel = resistance
+        layout.addWidget(resistance)
         self.resistanceStepLevels = 1
-        self.scanTrainerButton.clicked.connect(self.scanTrainer)
-        self.connectTrainerButton.clicked.connect(self.connectTrainer)
         self.decreaseResistanceButton.clicked.connect(lambda: self.adjustFixedResistance(-1))
         self.increaseResistanceButton.clicked.connect(lambda: self.adjustFixedResistance(1))
         self.setTrainerControls(False)
         return tab
 
-    def createResistanceTab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(0, 0, 0, 0)
-        panels = QHBoxLayout()
-        panels.addWidget(self.resistancePanel, 1)
-        layout.addLayout(panels)
-        return tab
-
     def createSettingsTab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        subjectSetup = QFrame(objectName="panel")
+        subjectLayout = QVBoxLayout(subjectSetup)
+        subjectLayout.addWidget(QLabel("測試者資訊", objectName="sectionTitle"))
+        subjectRow = QHBoxLayout()
+        subjectRow.setSpacing(10)
+        subjectRow.addWidget(QLabel("病人 ID"))
+        self.patientIdEdit = QLineEdit()
+        self.patientIdEdit.setPlaceholderText("例如 P-001")
+        self.patientIdEdit.setFixedWidth(180)
+        subjectRow.addWidget(self.patientIdEdit)
+        subjectRow.addWidget(QLabel("姓名"))
+        self.patientNameEdit = QLineEdit()
+        self.patientNameEdit.setPlaceholderText("測試者姓名")
+        self.patientNameEdit.setFixedWidth(180)
+        subjectRow.addWidget(self.patientNameEdit)
+        subjectRow.addWidget(QLabel("性別"))
+        self.genderCombo = QComboBox()
+        self.genderCombo.addItems(("女性", "男性"))
+        self.genderCombo.setCurrentIndex(0)
+        self.genderCombo.setFixedWidth(100)
+        subjectRow.addWidget(self.genderCombo)
+        subjectRow.addStretch()
+        subjectLayout.addLayout(subjectRow)
+        layout.addWidget(subjectSetup)
         emgSetup = QFrame(objectName="panel")
         emgLayout = QVBoxLayout(emgSetup)
         emgLayout.addWidget(QLabel("Delsys EMG", objectName="sectionTitle"))
@@ -213,7 +243,10 @@ class TrignoWindow(QMainWindow):
         statusRow.addWidget(self.emgStatus)
         statusRow.addWidget(self.baseLabel)
         statusRow.addStretch()
-        statusRow.addWidget(QLabel("Legacy EMG · 2000 Hz · float32", objectName="muted"))
+        self.emgRateLabel = QLabel(
+            "EMG 頻率：等待 SDK 查詢", objectName="muted"
+        )
+        statusRow.addWidget(self.emgRateLabel)
         self.emgStatus.hide()
         self.baseLabel.hide()
         controls = QHBoxLayout()
@@ -258,10 +291,12 @@ class TrignoWindow(QMainWindow):
             metrics.addWidget(card, 1)
         layout.addLayout(metrics)
         recording = QHBoxLayout()
-        self.recordCheck = QCheckBox("儲存 CSV")
+        self.recordCheck = QCheckBox("測量完成後輸出 CSV")
         self.recordCheck.setChecked(True)
-        self.pathEdit = QLineEdit(self.defaultOutputPath())
-        self.browseButton = QPushButton("選擇檔案")
+        self.recordCheck.setEnabled(False)
+        self.pathEdit = QLineEdit(self.defaultOutputDirectory())
+        self.pathEdit.setPlaceholderText("選擇收集檔案的輸出資料夾")
+        self.browseButton = QPushButton("選擇資料夾")
         for widget in (self.recordCheck, self.pathEdit, self.browseButton):
             recording.addWidget(widget)
         layout.addLayout(recording)
@@ -285,7 +320,6 @@ class TrignoWindow(QMainWindow):
         self.startButton.clicked.connect(self.startStream)
         self.stopButton.clicked.connect(self.stopStream)
         self.browseButton.clicked.connect(self.chooseOutput)
-        self.recordCheck.toggled.connect(self.recordToggled)
         self.plotTimer = QTimer(self)
         self.plotTimer.setInterval(80)
         self.plotTimer.timeout.connect(self.refreshPlots)
@@ -357,6 +391,7 @@ class TrignoWindow(QMainWindow):
         self.trainerWorker.scan()
 
     def resistanceSet(self, value: float) -> None:
+        self.commandedNativeResistance = value
         self.nativeResistanceLabel.setText(f"原生阻力：{value:g}")
         self.setTrainerStatus(f"原生阻力已設定為 {value:g}", "connected")
 
@@ -371,6 +406,7 @@ class TrignoWindow(QMainWindow):
         self.increaseResistanceButton.setText(f"+ {step} 級")
 
     def fixedResistanceSet(self, level: int, nativeResistance: float) -> None:
+        self.commandedNativeResistance = nativeResistance
         self.nativeResistanceLabel.setText(f"原生阻力：{nativeResistance:g}（固定模式 · 等級 {level}/30）")
         self.bikeMetricValues["resistance"].setText(f"{nativeResistance:g}")
         self.setTrainerStatus(f"固定阻力等級 {level}/30：原生阻力 {nativeResistance:g}", "connected")
@@ -398,6 +434,15 @@ class TrignoWindow(QMainWindow):
             self.bikeMetricValues["power"].setText(f"{data.powerWatts}")
         if data.resistance is not None:
             self.bikeMetricValues["resistance"].setText(f"{data.resistance:g}")
+        if self.trainerRecorder:
+            try:
+                self.trainerRecorder.append(
+                    data, self.resistanceSpin.value(), self.commandedNativeResistance
+                )
+            except OSError as exc:
+                self.appendLog(f"阻力計 CSV 輸出失敗：{exc}")
+                self.trainerRecorder.close()
+                self.trainerRecorder = None
 
     def resetBikeMetrics(self) -> None:
         for value in self.bikeMetricValues.values():
@@ -443,6 +488,7 @@ class TrignoWindow(QMainWindow):
         self.resistanceRangeLabel.setText(f"設備原生阻力：{nativeMinimum:g}–{nativeMaximum:g}；第 0–30 級自動換算")
         self.setTrainerControls(True)
         self.trainerIsConnected = True
+        self.commandedNativeResistance = info["nativeResistance"]
         self.setTrainerConnectionState(True)
         self.resetBikeMetrics()
         self.bikeMetricValues["resistance"].setText(f"{info['nativeResistance']:g}")
@@ -506,6 +552,16 @@ class TrignoWindow(QMainWindow):
             title = f"{side} {mapping.english_name.upper()}" if side in {"R", "L"} else mapping.english_name.upper()
             self.sensorChecks[index].setText(f"S{mapping.slot:02d} · {title}")
             self.sensorDetails[index].setText(f"{mapping.chinese_name} | Slot {mapping.slot:02d} · 啟用 · SID: {serial}")
+            tooltip = (
+                f"S{mapping.slot:02d} · {mapping.chinese_name}\n"
+                f"{mapping.english_name}\n"
+                f"SID：{serial}\n"
+                "勾選後顯示此感測器的即時波形。"
+            )
+            self.sensorRows[index].setToolTip(tooltip)
+            self.sensorIcons[index].setToolTip(tooltip)
+            self.sensorChecks[index].setToolTip(tooltip)
+            self.sensorDetails[index].setToolTip(tooltip)
             self.sensorRows[index].setVisible(self.sensorActive[index])
         if hasattr(self, "activeSlotsLabel"):
             active_text = ", ".join(f"S{index + 1:02d}" for index, active in enumerate(self.sensorActive) if active)
@@ -530,14 +586,39 @@ class TrignoWindow(QMainWindow):
             QPlainTextEdit#eventLog { background: transparent; color: #d1d5db; border: 0; padding: 3px; font-family: Consolas, monospace; }
             QFrame#panel, QFrame#sensorRow { background: white; border: 1px solid #e2e8f0; border-radius: 7px; }
             QLineEdit, QSpinBox, QComboBox { padding: 6px; background: white; border: 1px solid #cbd5e1; border-radius: 5px; }
+            QComboBox QAbstractItemView { background: white; color: #1e293b; selection-background-color: #dbeafe; selection-color: #0f172a; outline: 0; }
+            QComboBox QAbstractItemView::item { min-height: 24px; color: #1e293b; background: white; }
+            QComboBox QAbstractItemView::item:hover, QComboBox QAbstractItemView::item:selected { color: #0f172a; background: #dbeafe; }
             QPushButton { padding: 7px 10px; background: white; border: 1px solid #cbd5e1; border-radius: 5px; }
             QPushButton#primary { background: #2563eb; border: 0; color: white; font-weight: 600; }
             QPushButton#record { background: #dc2626; border: 0; color: white; font-weight: 600; }
             QPushButton:disabled { color: #94a3b8; background: #e2e8f0; }
             QCheckBox { font-weight: 700; }""")
 
-    def defaultOutputPath(self) -> str:
-        return str(Path.cwd() / "recordings" / f"emg_{datetime.now():%Y%m%d_%H%M%S}.csv")
+    def defaultOutputDirectory(self) -> str:
+        return str(Path.cwd() / "recordings")
+
+    def subjectInfo(self) -> SubjectInfo:
+        return SubjectInfo(
+            patientId=self.patientIdEdit.text().strip(),
+            name=self.patientNameEdit.text().strip(),
+            gender=self.genderCombo.currentText(),
+        )
+
+    def outputPathForCollection(self, directory: Path) -> Path:
+        """Generate a collision-free, patient-ID based EMG file name."""
+        patientId = self.subjectInfo().patientId
+        invalid = '\\/:*?"<>|'
+        safeId = "".join(character for character in patientId if character not in invalid).strip()
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        candidate = directory / f"{safeId}_EMG_{timestamp}.csv"
+        suffix = 2
+        while candidate.exists() or infoOutputPath(candidate).exists() or (
+            self.trainerIsConnected and trainerOutputPath(candidate).exists()
+        ):
+            candidate = directory / f"{safeId}_EMG_{timestamp}_{suffix:02d}.csv"
+            suffix += 1
+        return candidate
 
     def setStatusLabel(self, label: QLabel, text: str, state: str) -> None:
         colors = {"idle": ("#e2e8f0", "#475569"), "working": ("#fef3c7", "#92400e"), "connected": ("#dcfce7", "#166534"), "streaming": ("#dbeafe", "#1d4ed8"), "error": ("#fee2e2", "#b91c1c")}
@@ -559,25 +640,31 @@ class TrignoWindow(QMainWindow):
         self.stopButton.setEnabled(streaming)
         self.hostEdit.setEnabled(not streaming and not testing)
         self.testButton.setEnabled(not streaming and not testing)
-        self.recordCheck.setEnabled(not streaming)
+        self.recordCheck.setEnabled(False)
         self.durationMinutesSpin.setEnabled(not streaming)
         self.durationSecondsSpin.setEnabled(not streaming)
         self.pathEdit.setEnabled(not streaming and self.recordCheck.isChecked())
         self.browseButton.setEnabled(not streaming and self.recordCheck.isChecked())
 
-    def recordToggled(self, checked: bool) -> None:
-        self.pathEdit.setEnabled(checked and self.streamWorker is None)
-        self.browseButton.setEnabled(checked and self.streamWorker is None)
-
     def chooseOutput(self) -> None:
-        path, unused = QFileDialog.getSaveFileName(self, "選擇 CSV 檔案", self.pathEdit.text(), "CSV (*.csv)")
-        if path:
-            self.pathEdit.setText(path)
+        directory = QFileDialog.getExistingDirectory(self, "選擇 CSV 輸出資料夾", self.pathEdit.text())
+        if directory:
+            self.pathEdit.setText(directory)
 
     def testConnection(self) -> None:
         host = self.hostEdit.text().strip()
         if not host:
             QMessageBox.warning(self, "缺少位址", "請輸入 SDK Server IP 位址。")
+            return
+        if not self.patientIdEdit.text().strip():
+            QMessageBox.warning(self, "缺少病人 ID", "請先在設定頁填寫病人 ID，再開始收集。")
+            self.tabs.setCurrentWidget(self.settingsTab)
+            self.patientIdEdit.setFocus()
+            return
+        if not self.patientIdEdit.text().strip():
+            QMessageBox.warning(self, "缺少病人 ID", "請先在設定頁填寫病人 ID，再開始收集。")
+            self.tabs.setCurrentWidget(self.settingsTab)
+            self.patientIdEdit.setFocus()
             return
         self.setEmgStatus("正在測試連線…", "working")
         self.testWorker = ConnectionWorker(host)
@@ -614,29 +701,108 @@ class TrignoWindow(QMainWindow):
         if not host:
             QMessageBox.warning(self, "缺少位址", "請輸入 SDK Server IP 位址。")
             return
-        output = Path(self.pathEdit.text()).expanduser() if self.recordCheck.isChecked() else None
-        if output and output.exists():
-            QMessageBox.warning(self, "檔案已存在", "請指定尚不存在的 CSV 檔案，避免覆寫。")
+        directoryText = self.pathEdit.text().strip()
+        if not directoryText:
+            QMessageBox.warning(self, "缺少輸出資料夾", "請選擇 CSV 輸出資料夾。")
             return
+        directory = Path(directoryText).expanduser()
+        if directory.exists() and not directory.is_dir():
+            QMessageBox.warning(self, "輸出位置無效", "請選擇資料夾，而不是檔案。")
+            return
+        output = self.outputPathForCollection(directory)
+        trainerOutput = trainerOutputPath(output)
+        infoOutput = infoOutputPath(output)
+        self.collectionSummary = None
+        self.collectionError = None
+        self.collectionOutput = output
+        self.collectionSubject = self.subjectInfo()
+        self.infoOutput = infoOutput
+        self.trainerRecorder = None
+        self.trainerOutput = trainerOutput if self.trainerIsConnected else None
+        self.infoRecorder = CollectionInfoRecorder(
+            infoOutput, self.collectionSubject, output, self.trainerOutput
+        )
+        try:
+            self.infoRecorder.start()
+        except OSError as exc:
+            self.infoRecorder = None
+            QMessageBox.critical(self, "資訊檔輸出錯誤", str(exc))
+            return
+        self.emgRateLabel.setText("EMG 頻率：正在向 SDK 查詢…")
         for history in self.histories:
             history.clear()
-        self.streamWorker = StreamWorker(host, output)
-        self.streamWorker.status_changed.connect(lambda text: self.setEmgStatus(text, "streaming" if text == "串流中" else "working"))
+        self.streamWorker = StreamWorker(host, output, self.mappings, self.collectionSubject)
+        self.streamWorker.status_changed.connect(self.streamStatusChanged)
         self.streamWorker.connected.connect(lambda banner: self.emgStatus.setToolTip(banner))
         self.streamWorker.base_ready.connect(lambda serial: self.baseLabel.setText(f"Base: {serial}"))
         self.streamWorker.sensor_states_ready.connect(self.updateSensorStates)
+        self.streamWorker.sample_rate_ready.connect(self.emgRateReady)
+        self.streamWorker.collection_metadata_ready.connect(self.collectionMetadataReady)
         self.streamWorker.frames_ready.connect(self.framesReceived)
-        self.streamWorker.failed.connect(lambda message: QMessageBox.critical(self, "Trigno 串流錯誤", message))
+        self.streamWorker.collection_completed.connect(self.collectionCompleted)
+        self.streamWorker.failed.connect(self.streamFailed)
         self.streamWorker.finished.connect(self.streamFinished)
         self.setStreaming(True)
         self.streamWorker.start()
-        self.startCountdown()
 
     def stopStream(self) -> None:
         if self.streamWorker:
             self.setEmgStatus("正在停止…", "working")
             self.stopButton.setEnabled(False)
             self.streamWorker.request_stop()
+
+    def streamStatusChanged(self, text: str) -> None:
+        self.setEmgStatus(text, "streaming" if text == "串流中" else "working")
+        if text == "串流中":
+            self.beginTrainerRecording()
+            self.startCountdown()
+
+    def beginTrainerRecording(self) -> None:
+        if self.trainerOutput is None:
+            self.appendLog("阻力計未連線；本次不輸出阻力計 CSV")
+            return
+        try:
+            self.trainerRecorder = TrainerCsvRecorder(
+                self.trainerOutput, self.collectionOutput, self.collectionSubject
+            )
+            self.trainerRecorder.start()
+            self.appendLog(f"阻力計 CSV 開始輸出：{self.trainerOutput.name}")
+        except OSError as exc:
+            self.trainerRecorder = None
+            self.appendLog(f"阻力計 CSV 輸出失敗：{exc}")
+            QMessageBox.warning(self, "阻力計 CSV 輸出錯誤", str(exc))
+
+    def closeTrainerRecording(self) -> None:
+        if self.trainerRecorder is None:
+            return
+        recorder, self.trainerRecorder = self.trainerRecorder, None
+        try:
+            elapsed = recorder.close()
+        except OSError as exc:
+            self.appendLog(f"阻力計 CSV 結束寫入失敗：{exc}")
+            return
+        self.appendLog(f"阻力計 CSV 已輸出 {recorder.rows} 筆 telemetry")
+        if self.infoRecorder:
+            self.infoRecorder.append("Resistance summary", [
+                f"Telemetry rows: {recorder.rows}",
+                f"Collection elapsed seconds: {elapsed:.6f}",
+            ])
+
+    def collectionMetadataReady(self, metadata: dict) -> None:
+        if self.infoRecorder is None:
+            return
+        lines = [
+            f"Base serial: {metadata['base_serial']}",
+            f"EMG sample rate Hz: {metadata['sample_rate_hz']:.6f}",
+            f"Samples per frame: {metadata['samples_per_frame']}",
+            f"Frame interval seconds: {metadata['frame_interval_seconds']:.6f}",
+            "Active sensor mapping:",
+        ]
+        lines.extend(
+            "  S{slot:02d} | {sid} | {chinese_name} | {english_name} | {abbreviation}".format(**channel)
+            for channel in metadata["channels"]
+        )
+        self.infoRecorder.append("EMG acquisition", lines)
 
     def configuredDurationSeconds(self) -> int:
         return self.durationMinutesSpin.value() * 60 + self.durationSecondsSpin.value()
@@ -675,22 +841,65 @@ class TrignoWindow(QMainWindow):
     def framesReceived(self, frames: np.ndarray) -> None:
         if frames.ndim != 2 or frames.shape[1] != CHANNEL_COUNT:
             return
-        for channel, history in enumerate(self.histories):
-            history.extend(frames[:, channel].tolist())
-        self.sampleLabel.setText(f"{len(self.histories[0]):,} samples in view")
+        activeChannels = [channel for channel, active in enumerate(self.sensorActive) if active]
+        if not activeChannels:
+            return
+        for channel in activeChannels:
+            self.histories[channel].extend(frames[:, channel].tolist())
+        self.sampleLabel.setText(f"{len(self.histories[activeChannels[0]]):,} samples in view")
+
+    def emgRateReady(self, sampleRate: float, samplesPerFrame: int, frameInterval: float) -> None:
+        self.currentSampleRate = sampleRate
+        self.emgRateLabel.setText(
+            f"EMG SDK 頻率：{sampleRate:.3f} Hz · {samplesPerFrame} samples/frame"
+        )
+
+    def collectionCompleted(self, samples: int, elapsed: float, sampleRate: float) -> None:
+        self.collectionSummary = (samples, elapsed, sampleRate)
+        self.emgRateLabel.setText(
+            f"EMG SDK 頻率：{sampleRate:.3f} Hz · {samples:,} samples"
+        )
+        output = self.collectionOutput.name if self.collectionOutput else "CSV"
+        self.appendLog(f"EMG | 量測完成：{samples:,} samples，SDK 頻率 {sampleRate:.3f} Hz，已輸出 {output}")
+        if self.infoRecorder:
+            self.infoRecorder.append("EMG summary", [
+                f"Samples: {samples}",
+                f"Collection elapsed seconds: {elapsed:.6f}",
+                f"Data duration seconds: {samples / sampleRate:.6f}" if sampleRate else "Data duration seconds: 0",
+            ])
+
+    def streamFailed(self, message: str) -> None:
+        self.collectionError = message
+        title = "CSV 輸出錯誤" if message.startswith("CSV 輸出失敗：") else "Trigno 串流錯誤"
+        self.setEmgStatus(message, "error")
+        QMessageBox.critical(self, title, message)
 
     def streamFinished(self) -> None:
         worker, self.streamWorker = self.streamWorker, None
         if worker:
             worker.deleteLater()
         self.countdownTimer.stop()
+        self.closeTrainerRecording()
         self.setStreaming(False)
+        if self.collectionError:
+            return
+        if self.collectionSummary:
+            samples, elapsed, sampleRate = self.collectionSummary
+            output = self.collectionOutput.name if self.collectionOutput else "CSV"
+            self.setEmgStatus(
+                f"量測完成：{samples:,} samples · {sampleRate:.3f} Hz · 已輸出 {output}",
+                "connected",
+            )
+            return
         self.setEmgStatus("已停止", "idle")
 
     def rebuildPlots(self) -> None:
         if not hasattr(self, "plotWidget"):
             return
-        selected = [index for index, check in enumerate(self.sensorChecks) if check.isChecked()]
+        selected = [
+            index for index, check in enumerate(self.sensorChecks)
+            if check.isChecked() and self.sensorActive[index]
+        ]
         self.plotWidget.clear()
         self.curves.clear()
         for row, channel in enumerate(selected):
@@ -712,10 +921,10 @@ class TrignoWindow(QMainWindow):
     def refreshPlots(self) -> None:
         if not hasattr(self, "plotWidget"):
             return
-        duration, count = 10, int(10 * SAMPLE_RATE)
+        duration, count = 10, int(10 * self.currentSampleRate)
         for channel, (plot, curve) in self.curves.items():
             values = np.asarray(list(self.histories[channel])[-count:], dtype=np.float32) * 1000
-            xAxis = (np.arange(len(values)) - len(values) + 1) / SAMPLE_RATE
+            xAxis = (np.arange(len(values)) - len(values) + 1) / self.currentSampleRate
             limit = 1.0
             if len(values):
                 limit = max(0.05, min(20, float(np.percentile(np.abs(values), 99.5)) * 1.25))

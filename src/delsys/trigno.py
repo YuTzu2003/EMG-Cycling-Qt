@@ -84,6 +84,22 @@ class TrignoClient:
     def base_serial(self) -> str:
         return self.command("BASE SERIAL?")
 
+    def emg_frame_config(self) -> tuple[float, int, float]:
+        """Return the SDK's current EMG rate, samples/frame and frame interval.
+
+        The SDK can change the EMG port rate according to sensor mode and its
+        backwards-compatibility setting.  Do not infer it from wall-clock time:
+        TCP delivery is buffered and does not define the sensor sampling clock.
+        """
+        try:
+            frame_interval = float(self.command("FRAME INTERVAL?"))
+            samples_per_frame = int(self.command("MAX SAMPLES EMG?"))
+        except ValueError as exc:
+            raise TrignoError("無法解析 SDK 的 EMG frame 設定") from exc
+        if frame_interval <= 0 or samples_per_frame <= 0:
+            raise TrignoError("SDK 回傳無效的 EMG frame 設定")
+        return samples_per_frame / frame_interval, samples_per_frame, frame_interval
+
     def start(self) -> None:
         response = self.command("START")
         if response.upper() != "OK":
