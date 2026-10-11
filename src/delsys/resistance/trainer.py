@@ -104,6 +104,7 @@ class FtmsTrainer:
         self._deviceDistanceAvailable = False
         self._estimatedDistanceMeters: float | None = None
         self._lastTelemetryAt: float | None = None
+        self.disconnectedCallback = None
 
     def requireBleak(self) -> None:
         if BleakClient is None or BleakScanner is None:
@@ -114,8 +115,14 @@ class FtmsTrainer:
         device = await BleakScanner.find_device_by_address(self.address, timeout=self.timeout)
         if device is None:
             raise RuntimeError(f"找不到阻力計 {self.address}。請喚醒設備後再試。")
-        self.client = BleakClient(device, timeout=self.timeout, winrt={"use_cached_services": False})
+        self.client = BleakClient(device,timeout=self.timeout,winrt={"use_cached_services": False},disconnected_callback=self._handleDisconnected,)
         await self.client.connect()
+
+    def _handleDisconnected(self, _client) -> None:
+        self.notificationsActive = False
+        self.bikeNotificationsActive = False
+        if self.disconnectedCallback is not None:
+            self.disconnectedCallback()
 
     async def disconnect(self) -> None:
         if self.client and self.client.is_connected:
@@ -333,6 +340,7 @@ class TrainerWorker(QThread):
 
     async def connectTrainer(self, address: str) -> dict:
         self.trainer = FtmsTrainer(address)
+        self.trainer.disconnectedCallback = self.disconnected.emit
         await self.trainer.connect()
         await self.trainer.acquireControl()
         resistance = await self.trainer.resistanceRange()

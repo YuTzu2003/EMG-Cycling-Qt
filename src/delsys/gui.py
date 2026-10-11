@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QSettings, QTimer, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
@@ -18,6 +18,9 @@ from delsys.emg.trigno import CHANNEL_COUNT, SAMPLE_RATE
 from delsys.emg.workers import ConnectionWorker, StreamWorker
 from delsys.resistance.recording import TrainerCsvRecorder, trainerOutputPath
 from delsys.resistance.trainer import BikeTelemetry, NumericRange, TrainerWorker
+from delsys.pedal.recording import PedalCsvRecorder, pedalOutputPath
+from delsys.pedal.worker import PedalWorker
+from delsys.pedal.fit_export import exportPedalFit
 
 COLORS = ("#1684d7", "#e95f54", "#7e57c2", "#00897b", "#f39c12", "#5c6bc0", "#43a047", "#c2185b")
 MAPPING_PATH = Path(__file__).resolve().parents[2] / "sensor_mapping.json"
@@ -127,6 +130,11 @@ class TrignoWindow(QMainWindow):
         self.testWorker: ConnectionWorker | None = None
         self.trainerWorker = TrainerWorker()
         self.trainerIsConnected = False
+        self.pedalWorker = PedalWorker()
+        self.pedalIsConnected = False
+        self.settings = QSettings("Delsys", "EMG Cycling Monitor")
+        self.savedPedalAddress = str(self.settings.value("pedal/address", ""))
+        self.pedalScanInProgress = False
         self.histories = [deque(maxlen=int(SAMPLE_RATE * 20)) for _ in range(CHANNEL_COUNT)]
         self.mappings = loadMappings(MAPPING_PATH)
         self.sensorChecks: list[SensorLegendToggle] = []
@@ -143,6 +151,9 @@ class TrignoWindow(QMainWindow):
         self.infoOutput: Path | None = None
         self.trainerRecorder: TrainerCsvRecorder | None = None
         self.trainerOutput: Path | None = None
+        self.pedalRecorder: PedalCsvRecorder | None = None
+        self.pedalOutput: Path | None = None
+        self.bikeOnlySession = False
         self.commandedNativeResistance: float | None = None
         self.currentSampleRate = SAMPLE_RATE
         self.lastTrainerDistanceMeters: int | None = None
@@ -152,9 +163,22 @@ class TrignoWindow(QMainWindow):
         self.buildUi()
         self.connectTrainerSignals()
         self.trainerWorker.start()
+        self.connectPedalSignals()
+        self.pedalWorker.start()
+        self.connectionStateTimer = QTimer(self)
+        self.connectionStateTimer.setInterval(2000)
+        self.connectionStateTimer.timeout.connect(self.refreshConnectionStates)
+        self.connectionStateTimer.start()
+        self.pedalAutoConnectTimer = QTimer(self)
+        self.pedalAutoConnectTimer.setInterval(8000)
+        self.pedalAutoConnectTimer.timeout.connect(self.autoConnectPedal)
+        if self.savedPedalAddress:
+            self.pedalAutoConnectTimer.start()
+            QTimer.singleShot(1000, self.autoConnectPedal)
         self.setStreaming(False)
         self.setEmgStatus("尚未連線", "idle")
         self.setTrainerConnectionState(False)
+        self.setPedalConnectionState(False)
         self.setEmgConnectionState(False)
 
     def buildUi(self) -> None:
@@ -166,8 +190,10 @@ class TrignoWindow(QMainWindow):
         header.addWidget(QLabel("EMG Cycling Monitor", objectName="title"))
         header.addStretch()
         self.trainerConnectionLabel = QLabel(objectName="connectionIndicator")
+        self.pedalConnectionLabel = QLabel(objectName="connectionIndicator")
         self.emgConnectionLabel = QLabel(objectName="connectionIndicator")
         header.addWidget(self.trainerConnectionLabel)
+        header.addWidget(self.pedalConnectionLabel)
         header.addWidget(self.emgConnectionLabel)
         outer.addLayout(header)
         self.tabs = QTabWidget()
@@ -200,6 +226,9 @@ class TrignoWindow(QMainWindow):
         self.trainerTelemetryLabel = QLabel("即時騎乘資料：尚未連線", objectName="muted")
         grid.addWidget(self.trainerTelemetryLabel, 2, 0, 1, 4)
         layout.addWidget(connection)
+        # Both cycling devices are configured in one Bluetooth section. They
+        # remain separate connections because they are separate BLE peripherals.
+        layout.addWidget(self.createPedalPanel())
 
         self.scanTrainerButton.clicked.connect(self.scanTrainer)
         self.connectTrainerButton.clicked.connect(self.connectTrainer)
@@ -261,6 +290,18 @@ class TrignoWindow(QMainWindow):
         subjectRow.addStretch()
         subjectLayout.addLayout(subjectRow)
         layout.addWidget(subjectSetup)
+        testDevices = QFrame(objectName="panel")
+        testDevicesLayout = QHBoxLayout(testDevices)
+        testDevicesLayout.addWidget(QLabel("本次測試設備", objectName="sectionTitle"))
+        self.useEmgCheck = QCheckBox("EMG")
+        self.useTrainerCheck = QCheckBox("阻力計")
+        self.usePedalCheck = QCheckBox("踏板")
+        # Keep the existing all-device workflow as the default.
+        for check in (self.useEmgCheck, self.useTrainerCheck, self.usePedalCheck):
+            check.setChecked(True)
+            testDevicesLayout.addWidget(check)
+        testDevicesLayout.addStretch()
+        layout.addWidget(testDevices)
         emgSetup = QFrame(objectName="panel")
         emgLayout = QVBoxLayout(emgSetup)
         emgLayout.addWidget(QLabel("Delsys EMG", objectName="sectionTitle"))
@@ -291,6 +332,26 @@ class TrignoWindow(QMainWindow):
         eventLogLayout.addWidget(self.eventLog)
         layout.addWidget(eventLogPanel)
         return tab
+
+    def createPedalPanel(self) -> QWidget:
+        panel = QFrame(objectName="panel")
+        layout = QGridLayout(panel)
+        layout.addWidget(QLabel("踏板功率計", objectName="sectionTitle"), 0, 0)
+        self.pedalDevices = QComboBox()
+        self.pedalDevices.setEditable(True)
+        self.pedalDevices.setPlaceholderText("掃描所有藍牙裝置，或輸入 Bluetooth MAC 位址")
+        layout.addWidget(self.pedalDevices, 0, 1)
+        self.scanPedalButton = QPushButton("掃描藍牙")
+        self.connectPedalButton = QPushButton("連線", objectName="primary")
+        layout.addWidget(self.scanPedalButton, 0, 2)
+        layout.addWidget(self.connectPedalButton, 0, 3)
+        self.pedalStatus = QLabel("踏板：尚未連線", objectName="status")
+        self.pedalTelemetryLabel = QLabel("踏板資料：等待連線", objectName="muted")
+        layout.addWidget(self.pedalStatus, 1, 0, 1, 4)
+        layout.addWidget(self.pedalTelemetryLabel, 2, 0, 1, 4)
+        self.scanPedalButton.clicked.connect(self.scanPedal)
+        self.connectPedalButton.clicked.connect(self.connectPedal)
+        return panel
 
     def createCollectionTab(self) -> QWidget:
         tab = QWidget()
@@ -362,6 +423,22 @@ class TrignoWindow(QMainWindow):
         self.bikeMetricValues["distance"] = distanceValue
         metrics.insertWidget(0, distanceCard, 1)
         layout.addLayout(metrics)
+        pedalMetrics = QHBoxLayout()
+        self.pedalMetricValues: dict[str, QLabel] = {}
+        for key, title, unit in (("left", "踏板左功率平衡", "%"), ("right", "踏板右功率平衡", "%")):
+            card = QFrame(objectName="metricCard")
+            cardLayout = QVBoxLayout(card)
+            cardLayout.setContentsMargins(12, 8, 12, 8)
+            cardLayout.addWidget(QLabel(title, objectName="metricTitle"))
+            value = QLabel("--", objectName="metricValue")
+            row = QHBoxLayout()
+            row.addWidget(value)
+            row.addStretch()
+            row.addWidget(QLabel(unit, objectName="metricUnit"))
+            cardLayout.addLayout(row)
+            self.pedalMetricValues[key] = value
+            pedalMetrics.addWidget(card, 1)
+        layout.addLayout(pedalMetrics)
         recording = QHBoxLayout()
         self.recordCheck = QCheckBox("測量完成後輸出 CSV")
         self.recordCheck.setChecked(True)
@@ -478,6 +555,145 @@ class TrignoWindow(QMainWindow):
         self.trainerWorker.telemetryReceived.connect(self.updateTrainerTelemetry)
         self.trainerWorker.failed.connect(self.trainerFailed)
 
+    def connectPedalSignals(self) -> None:
+        self.pedalWorker.ready.connect(self.pedalReady)
+        self.pedalWorker.devicesFound.connect(self.showPedalDevices)
+        self.pedalWorker.connected.connect(self.pedalConnected)
+        self.pedalWorker.disconnected.connect(self.pedalDisconnected)
+        self.pedalWorker.dataReceived.connect(self.updatePedalTelemetry)
+        self.pedalWorker.failed.connect(self.pedalFailed)
+
+    def pedalReady(self) -> None:
+        """Run the same initial Bluetooth discovery as the trainer."""
+        self.scanPedal()
+
+    def scanPedal(self) -> None:
+        if self.pedalScanInProgress:
+            return
+        self.pedalScanInProgress = True
+        self.setPedalStatus("正在掃描藍牙裝置…", "working")
+        self.scanPedalButton.setEnabled(False)
+        self.pedalWorker.scan()
+        QTimer.singleShot(7000, self.finishPedalScan)
+
+    def finishPedalScan(self) -> None:
+        self.pedalScanInProgress = False
+        self.scanPedalButton.setEnabled(True)
+
+    def autoConnectPedal(self) -> None:
+        """Reconnect silently once a remembered pedal wakes and advertises."""
+        if not self.pedalIsConnected and self.savedPedalAddress and not self.pedalScanInProgress:
+            self.scanPedal()
+
+    def showPedalDevices(self, devices: list[tuple[str, str]]) -> None:
+        self.finishPedalScan()
+        self.pedalDevices.clear()
+        # P715's left pedal is the Bluetooth master.  A name ending in "R"
+        # identifies the right pedal, which should not be selected on its own.
+        devices.sort(key=lambda device: (device[1].strip().upper().endswith(" R"), device[1]))
+        p715Devices = [name for _address, name in devices if name.upper().startswith("P715")]
+        onlyRightPedal = bool(p715Devices) and all(name.strip().upper().endswith(" R") for name in p715Devices)
+        for address, name in devices:
+            self.pedalDevices.addItem(f"{name} · {address}", address)
+        remembered = next((index for index, (address, _name) in enumerate(devices) if address == self.savedPedalAddress), None)
+        if remembered is not None and not self.pedalIsConnected:
+            self.pedalDevices.setCurrentIndex(remembered)
+            self.setPedalStatus("已找到記憶的踏板，正在自動連線…", "working")
+            self.connectPedal()
+            return
+        if onlyRightPedal:
+            self.setPedalStatus("只找到右踏板（R）；請喚醒左踏板，並選擇沒有 R 的裝置", "working")
+        else:
+            self.setPedalStatus(
+                f"找到 {len(devices)} 個藍牙裝置，請選擇沒有 R 的踏板連線" if devices else "找不到藍牙裝置；請確認踏板已喚醒",
+                "idle",
+            )
+
+    def pedalAddress(self) -> str:
+        address = self.pedalDevices.currentData()
+        return str(address) if address else self.pedalDevices.currentText().strip().rsplit("·", 1)[-1].strip()
+
+    def connectPedal(self) -> None:
+        address = self.pedalAddress()
+        if not address:
+            QMessageBox.warning(self, "缺少踏板位址", "請先掃描藍牙裝置或輸入 Bluetooth MAC 位址。")
+            return
+        name = self.pedalDevices.currentText().rsplit("·", 1)[0].strip().upper()
+        if name.startswith("P715") and name.endswith(" R"):
+            QMessageBox.warning(self, "請選左踏板", "請選擇不帶 R 的踏板（左側主踏板）。右踏板會由左踏板自動連線。")
+            return
+        self.setPedalStatus("正在連線踏板…", "working")
+        self.connectPedalButton.setEnabled(False)
+        self.pedalWorker.connectDevice(address)
+
+    def pedalConnected(self, address: str) -> None:
+        self.pedalIsConnected = True
+        self.savedPedalAddress = address
+        self.settings.setValue("pedal/address", address)
+        self.pedalAutoConnectTimer.start()
+        self.setPedalConnectionState(True)
+        self.setPedalStatus(f"踏板已連線：{address}", "connected")
+        self.pedalTelemetryLabel.setText("踏板資料：等待踩踏…")
+
+    def pedalDisconnected(self) -> None:
+        self.pedalIsConnected = False
+        self.setPedalConnectionState(False)
+        self.connectPedalButton.setEnabled(True)
+        if self.savedPedalAddress:
+            self.pedalAutoConnectTimer.start()
+        self.setPedalStatus("踏板已中斷", "idle")
+
+    def pedalFailed(self, message: str) -> None:
+        self.pedalIsConnected = False
+        self.setPedalConnectionState(False)
+        self.connectPedalButton.setEnabled(True)
+        self.setPedalStatus(f"踏板錯誤：{message}", "error")
+
+    def setPedalStatus(self, text: str, state: str) -> None:
+        self.setStatusLabel(self.pedalStatus, text, state)
+        self.appendLog(f"踏板 | {text}")
+
+    def setPedalConnectionState(self, connected: bool) -> None:
+        self.setConnectionIndicator(self.pedalConnectionLabel, "踏板", connected)
+        if connected and hasattr(self, "pedalTelemetryLabel"):
+            self.pedalTelemetryLabel.setToolTip("踏板已連線")
+
+    def refreshConnectionStates(self) -> None:
+        """Catch silent BLE link loss even when no telemetry is arriving."""
+        trainer = self.trainerWorker.trainer
+        trainerConnected = bool(trainer and trainer.client and trainer.client.is_connected)
+        if self.trainerIsConnected and not trainerConnected:
+            self.trainerDisconnected()
+        pedal = self.pedalWorker.client
+        pedalConnected = bool(pedal and pedal.is_connected)
+        if self.pedalIsConnected and not pedalConnected:
+            self.pedalDisconnected()
+        # An EMG SDK connection exists only while StreamWorker is running.
+        self.setEmgConnectionState(bool(self.streamWorker and self.streamWorker.isRunning()))
+
+    def updatePedalTelemetry(self, data: dict) -> None:
+        power, cadence, left = data["power_w"], data["cadence_rpm"], data["left_balance_percent"]
+        # Power and cadence are shared cycling metrics; P715 takes precedence
+        # when it is connected, while the trainer remains the speed/distance source.
+        self.bikeMetricValues["power"].setText(f"{power:.0f}")
+        if cadence is not None:
+            self.bikeMetricValues["cadence"].setText(f"{cadence:.0f}")
+        if left is not None:
+            self.pedalMetricValues["left"].setText(f"{left:.1f}")
+            self.pedalMetricValues["right"].setText(f"{100 - left:.1f}")
+        fields = [f"功率 {power} W"]
+        if cadence is not None:
+            fields.append(f"踏頻 {cadence:.1f} rpm")
+        if left is not None:
+            fields.append(f"左右 {left:.1f}% / {100-left:.1f}%")
+        self.pedalTelemetryLabel.setText("踏板資料：" + " · ".join(fields))
+        if self.pedalRecorder:
+            try:
+                self.pedalRecorder.append(data)
+            except OSError as exc:
+                self.appendLog(f"踏板 CSV 寫入失敗：{exc}")
+                self.closePedalRecording()
+
     def trainerReady(self) -> None:
         self.setTrainerStatus("藍牙服務已就緒，正在自動掃描…", "working")
         self.trainerWorker.scan()
@@ -522,9 +738,9 @@ class TrignoWindow(QMainWindow):
         self.trainerTelemetryLabel.setText("即時騎乘資料：" + (" · ".join(fields) or "等待踩踏…"))
         if data.speedKph is not None:
             self.bikeMetricValues["speed"].setText(f"{data.speedKph:.1f}")
-        if data.cadenceRpm is not None:
+        if data.cadenceRpm is not None and not self.pedalIsConnected:
             self.bikeMetricValues["cadence"].setText(f"{data.cadenceRpm:.0f}")
-        if data.powerWatts is not None:
+        if data.powerWatts is not None and not self.pedalIsConnected:
             self.bikeMetricValues["power"].setText(f"{data.powerWatts}")
         sessionDistanceMeters = self.sessionDistanceMeters(data.distanceMeters)
         if sessionDistanceMeters is not None:
@@ -777,7 +993,9 @@ class TrignoWindow(QMainWindow):
         candidate = directory / f"{safeId}_EMG_{timestamp}.csv"
         suffix = 2
         while candidate.exists() or infoOutputPath(candidate).exists() or (
-            self.trainerIsConnected and trainerOutputPath(candidate).exists()
+            self.useTrainerCheck.isChecked() and self.trainerIsConnected and trainerOutputPath(candidate).exists()
+        ) or (
+            self.usePedalCheck.isChecked() and self.pedalIsConnected and pedalOutputPath(candidate).exists()
         ):
             candidate = directory / f"{safeId}_EMG_{timestamp}_{suffix:02d}.csv"
             suffix += 1
@@ -808,6 +1026,8 @@ class TrignoWindow(QMainWindow):
         self.durationSecondsSpin.setEnabled(not streaming)
         self.pathEdit.setEnabled(not streaming and self.recordCheck.isChecked())
         self.browseButton.setEnabled(not streaming and self.recordCheck.isChecked())
+        for check in (self.useEmgCheck, self.useTrainerCheck, self.usePedalCheck):
+            check.setEnabled(not streaming)
 
     def chooseOutput(self) -> None:
         directory = QFileDialog.getExistingDirectory(self, "選擇 CSV 輸出資料夾", self.pathEdit.text())
@@ -860,6 +1080,19 @@ class TrignoWindow(QMainWindow):
             check.setChecked(self.sensorActive[index])
 
     def startStream(self) -> None:
+        if not any((self.useEmgCheck.isChecked(), self.useTrainerCheck.isChecked(), self.usePedalCheck.isChecked())):
+            QMessageBox.warning(self, "尚未選擇設備", "請在第一頁至少勾選一個本次要測試的設備。")
+            self.tabs.setCurrentWidget(self.settingsTab)
+            return
+        if not self.useEmgCheck.isChecked():
+            self.startBikeOnlySession()
+            return
+        if self.useTrainerCheck.isChecked() and not self.trainerIsConnected:
+            QMessageBox.warning(self, "阻力計未連線", "請先連線阻力計，或取消勾選阻力計。")
+            return
+        if self.usePedalCheck.isChecked() and not self.pedalIsConnected:
+            QMessageBox.warning(self, "踏板未連線", "請先連線踏板，或取消勾選踏板。")
+            return
         host = self.hostEdit.text().strip()
         if not host:
             QMessageBox.warning(self, "缺少位址", "請輸入 SDK Server IP 位址。")
@@ -883,7 +1116,9 @@ class TrignoWindow(QMainWindow):
         self.collectionSubject = self.subjectInfo()
         self.infoOutput = infoOutput
         self.trainerRecorder = None
-        self.trainerOutput = trainerOutput if self.trainerIsConnected else None
+        self.trainerOutput = trainerOutput if self.useTrainerCheck.isChecked() and self.trainerIsConnected else None
+        self.pedalRecorder = None
+        self.pedalOutput = pedalOutputPath(output) if self.usePedalCheck.isChecked() and self.pedalIsConnected else None
         self.infoRecorder = CollectionInfoRecorder(
             infoOutput, self.collectionSubject, output, self.trainerOutput
         )
@@ -910,16 +1145,67 @@ class TrignoWindow(QMainWindow):
         self.setStreaming(True)
         self.streamWorker.start()
 
+    def startBikeOnlySession(self) -> None:
+        """Record selected trainer/pedal data without starting the EMG SDK."""
+        if not self.collectionSetupIsValid():
+            return
+        if self.useTrainerCheck.isChecked() and not self.trainerIsConnected:
+            QMessageBox.warning(self, "阻力計未連線", "請先連線阻力計，或取消勾選阻力計。")
+            return
+        if self.usePedalCheck.isChecked() and not self.pedalIsConnected:
+            QMessageBox.warning(self, "踏板未連線", "請先連線踏板，或取消勾選踏板。")
+            return
+        directoryText = self.pathEdit.text().strip()
+        if not directoryText:
+            QMessageBox.warning(self, "缺少輸出位置", "請選擇 CSV 輸出資料夾。")
+            return
+        directory = Path(directoryText).expanduser()
+        if directory.exists() and not directory.is_dir():
+            QMessageBox.warning(self, "輸出位置無效", "請選擇資料夾，而不是檔案。")
+            return
+        output = self.outputPathForCollection(directory)
+        self.collectionOutput = output
+        self.collectionSubject = self.subjectInfo()
+        self.trainerOutput = trainerOutputPath(output) if self.useTrainerCheck.isChecked() else None
+        self.pedalOutput = pedalOutputPath(output) if self.usePedalCheck.isChecked() else None
+        self.infoRecorder = CollectionInfoRecorder(
+            infoOutputPath(output), self.collectionSubject, output, self.trainerOutput
+        )
+        try:
+            self.infoRecorder.start()
+        except OSError as exc:
+            self.infoRecorder = None
+            QMessageBox.critical(self, "資料檔建立失敗", str(exc))
+            return
+        self.bikeOnlySession = True
+        self.beginTrainerRecording()
+        self.beginPedalRecording()
+        self.setStreaming(True)
+        self.setEmgStatus("僅收集騎乘裝置資料", "streaming")
+        self.startCountdown()
+
     def stopStream(self) -> None:
+        if self.bikeOnlySession:
+            self.finishBikeOnlySession()
+            return
         if self.streamWorker:
             self.setEmgStatus("正在停止…", "working")
             self.stopButton.setEnabled(False)
             self.streamWorker.request_stop()
 
+    def finishBikeOnlySession(self) -> None:
+        self.countdownTimer.stop()
+        self.closeTrainerRecording()
+        self.closePedalRecording()
+        self.bikeOnlySession = False
+        self.setStreaming(False)
+        self.setEmgStatus("騎乘裝置資料收集完成", "connected")
+
     def streamStatusChanged(self, text: str) -> None:
         self.setEmgStatus(text, "streaming" if text == "串流中" else "working")
         if text == "串流中":
             self.beginTrainerRecording()
+            self.beginPedalRecording()
             self.startCountdown()
 
     def beginTrainerRecording(self) -> None:
@@ -956,6 +1242,39 @@ class TrignoWindow(QMainWindow):
                 f"本次騎乘距離：{self.collectionDistanceMeters or 0} m",
             ])
         self.distanceSessionActive = False
+
+    def beginPedalRecording(self) -> None:
+        if self.pedalOutput is None:
+            self.appendLog("踏板未連線，本次不輸出踏板 CSV")
+            return
+        try:
+            self.pedalRecorder = PedalCsvRecorder(self.pedalOutput)
+            self.pedalRecorder.start()
+            self.appendLog(f"踏板 CSV 開始輸出：{self.pedalOutput.name}")
+        except OSError as exc:
+            self.pedalRecorder = None
+            self.appendLog(f"踏板 CSV 建立失敗：{exc}")
+            QMessageBox.warning(self, "踏板 CSV 建立失敗", str(exc))
+
+    def closePedalRecording(self) -> None:
+        if self.pedalRecorder is None:
+            return
+        recorder, self.pedalRecorder = self.pedalRecorder, None
+        elapsed = recorder.close()
+        self.appendLog(f"踏板 CSV 已完成：{recorder.rows} 筆資料")
+        if recorder.records:
+            try:
+                fitPath = exportPedalFit(recorder.records, recorder.outputPath.with_suffix(".fit"))
+                self.appendLog(f"踏板 FIT 已完成：{fitPath.name}")
+            except Exception as exc:
+                self.appendLog(f"踏板 FIT 輸出失敗：{exc}")
+        if self.infoRecorder:
+            frequency = recorder.rows / elapsed if elapsed else 0.0
+            self.infoRecorder.append("踏板資料", [
+                f"踏板資料檔：{recorder.outputPath.name}",
+                f"踏板封包數：{recorder.rows}",
+                f"踏板平均頻率：{frequency:.3f} Hz",
+            ])
 
     def collectionMetadataReady(self, metadata: dict) -> None:
         if self.infoRecorder is None:
@@ -1051,6 +1370,7 @@ class TrignoWindow(QMainWindow):
             worker.deleteLater()
         self.countdownTimer.stop()
         self.closeTrainerRecording()
+        self.closePedalRecording()
         self.setStreaming(False)
         if self.collectionError:
             return
@@ -1107,8 +1427,12 @@ class TrignoWindow(QMainWindow):
         if self.streamWorker:
             self.streamWorker.request_stop()
             self.streamWorker.wait(6000)
+        if self.bikeOnlySession:
+            self.finishBikeOnlySession()
         self.trainerWorker.stopWorker()
         self.trainerWorker.wait(6000)
+        self.pedalWorker.stopWorker()
+        self.pedalWorker.wait(6000)
         event.accept()
 
 def main() -> int:

@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "bleak>=0.22",
+    "fit-tool>=0.9.16",
     "numpy>=1.26",
     "PyQt5>=5.15",
     "pyqtgraph>=0.13",

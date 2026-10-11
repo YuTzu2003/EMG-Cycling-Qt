@@ -8,7 +8,7 @@ import time
 from bleak import BleakClient, BleakScanner
 from PySide6.QtCore import QThread, Signal
 
-from p715_protocol import (
+from examples.p715_protocol import (
     ADVANCED_DATA_STREAM,
     ADVANCED_NOTIFY_CHARACTERISTICS,
     CYCLING_POWER_FEATURE,

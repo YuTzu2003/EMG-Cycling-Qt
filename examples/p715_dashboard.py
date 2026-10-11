@@ -385,7 +385,7 @@ class RecordWorker(QThread):
 # Bluetooth code lives in dedicated modules.  The aliases keep the public
 # names in this launcher stable for existing notebooks and scripts while the
 # dashboard itself uses the modular implementations below.
-from p715_workers import (
+from examples.p715_workers import (
     AdvancedMonitorWorker,
     ConnectionCheckWorker,
     GattProbeWorker,
