@@ -1,14 +1,7 @@
-"""Application-wide Fluent 2-inspired Qt theme infrastructure.
-
-All colors are exposed as semantic aliases; widgets use dynamic properties
-(`fluentAppearance`, `fluentRole`, `fluentSeverity`) rather than local QSS.
-"""
 from __future__ import annotations
-
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication, QWidget
-
 
 class FluentThemeManager(QObject):
     themeChanged = Signal()

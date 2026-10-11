@@ -1,20 +1,10 @@
-"""Shared Bluetooth discovery for cycling devices.
-
-One scan is shared by the trainer and pedal selectors.  Running separate
-WinRT scans concurrently is unreliable on some Windows Bluetooth adapters.
-"""
-
 from __future__ import annotations
-
 import asyncio
-
 from PySide6.QtCore import QThread, Signal
-
 try:
     from bleak import BleakScanner
 except ImportError:  # pragma: no cover
     BleakScanner = None
-
 
 class CyclingDeviceScanWorker(QThread):
     devicesFound = Signal(object)
@@ -35,7 +25,10 @@ class CyclingDeviceScanWorker(QThread):
                 if self.isInterruptionRequested():
                     return []
                 await asyncio.sleep(0.1)
-            return list(scanner.discovered_devices.values())
+            discovered = scanner.discovered_devices
+            if hasattr(discovered, "values"):
+                return list(discovered.values())
+            return list(discovered)
         finally:
             await scanner.stop()
 
