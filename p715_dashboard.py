@@ -10,21 +10,45 @@ from pathlib import Path
 
 import pandas as pd
 from bleak import BleakClient, BleakScanner
+from fit_tool.fit_file import FitFile
+from fit_tool.fit_file_builder import FitFileBuilder
+from fit_tool.profile.messages.activity_message import ActivityMessage
+from fit_tool.profile.messages.event_message import EventMessage
+from fit_tool.profile.messages.file_id_message import FileIdMessage
+from fit_tool.profile.messages.lap_message import LapMessage
+from fit_tool.profile.messages.record_message import RecordMessage
+from fit_tool.profile.messages.session_message import SessionMessage
+from fit_tool.profile.profile_type import (
+    Activity, Event, EventType, FileType, Manufacturer, Sport, SubSport,
+)
 from PySide6.QtCore import QThread, QTimer, Signal, Qt
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QGridLayout,
     QDialog, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
-    QPlainTextEdit, QPushButton, QSpinBox, QTabWidget, QTableWidget,
+    QPlainTextEdit, QPushButton, QFileDialog, QSpinBox, QTabWidget, QTableWidget,
     QTableWidgetItem, QVBoxLayout, QWidget,
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.font_manager import FontProperties
 
 CYCLING_POWER_MEASUREMENT = "00002a63-0000-1000-8000-00805f9b34fb"
 CYCLING_POWER_FEATURE = "00002a65-0000-1000-8000-00805f9b34fb"
 ADVANCED_DATA_STREAM = "ec22dc02-dd0f-4df7-b022-7c41471bcc7a"
 TARGET_TEXT = "P715"
 OUTPUT_DIR = Path(__file__).parent
+DATA_DIR = OUTPUT_DIR / "data"
+CSV_DIR = DATA_DIR / "csv"
+FIT_DIR = DATA_DIR / "fit"
+# Use a font file instead of relying on Matplotlib's default font lookup.
+# Microsoft JhengHei is included with this Windows installation and renders
+# Traditional Chinese labels in the charts reliably.
+CHART_CHINESE_FONT_PATH = Path(r"C:\Windows\Fonts\msjh.ttc")
+CHART_CHINESE_FONT = (
+    FontProperties(fname=str(CHART_CHINESE_FONT_PATH))
+    if CHART_CHINESE_FONT_PATH.exists()
+    else FontProperties(family="sans-serif")
+)
 ADVANCED_NOTIFY_CHARACTERISTICS = [
     "6e400003-b5a3-f393-e0a9-e50e24dcca9e",  # Nordic UART TX
     "8ce5cc02-0a4d-11e9-ab14-d663bd873d93",
@@ -358,6 +382,18 @@ class RecordWorker(QThread):
         self.completed.emit(self.records)
 
 
+# Bluetooth code lives in dedicated modules.  The aliases keep the public
+# names in this launcher stable for existing notebooks and scripts while the
+# dashboard itself uses the modular implementations below.
+from p715_workers import (
+    AdvancedMonitorWorker,
+    ConnectionCheckWorker,
+    GattProbeWorker,
+    RecordWorker,
+    ScanWorker,
+)
+
+
 class MetricCard(QFrame):
     def __init__(self, title: str, unit: str) -> None:
         super().__init__()
@@ -385,15 +421,41 @@ def format_duration(seconds: float) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
+def nice_chart_top(value: float | None, minimum: int = 60) -> int:
+    """Return a readable graph ceiling with a little headroom above the peak."""
+    if value is None or not math.isfinite(value):
+        return minimum
+    value = max(0.0, float(value))
+    if value <= minimum:
+        return minimum
+    if value <= 100:
+        step = 10
+    elif value <= 250:
+        step = 25
+    elif value <= 500:
+        step = 50
+    else:
+        step = 100
+    # A peak exactly on a tick still needs visual breathing room.
+    return int((math.floor(value / step) + 1) * step)
+
+
 def calculate_analysis(df: pd.DataFrame, ftp: int) -> dict:
     """Calculate metrics that can be derived honestly from P715 power packets."""
     work = df.sort_values("timestamp").copy()
     work["elapsed_s"] = work["timestamp"] - work["timestamp"].iloc[0]
     duration_s = float(work["elapsed_s"].iloc[-1])
 
+    # Cadence is calculated only when the cumulative crank count changes.
+    # Carry the latest valid value across the intervening Cycling Power
+    # packets, exactly as the FIT exporter does.  This makes direct analysis
+    # and analysis after re-importing that FIT use the same cadence series.
+    work["display_cadence_rpm"] = work["cadence_rpm"].ffill().bfill()
+    work.loc[work["power_w"] <= 0, "display_cadence_rpm"] = pd.NA
+
     indexed = work.set_index(pd.to_datetime(work["timestamp"], unit="s"))
     power_1s = indexed["power_w"].resample("1s").mean().interpolate(limit_area="inside").fillna(0)
-    cadence_1s = indexed["cadence_rpm"].resample("1s").mean()
+    cadence_1s = indexed["display_cadence_rpm"].resample("1s").mean()
 
     rolling_30s = power_1s.rolling(30, min_periods=30).mean().dropna()
     normalized_power = (
@@ -405,8 +467,25 @@ def calculate_analysis(df: pd.DataFrame, ftp: int) -> dict:
     tss = duration_s / 3600 * intensity_factor**2 * 100 if intensity_factor is not None else None
     energy_kj = float(power_1s.sum() / 1000)
 
-    active = work[(work["power_w"] > 0) & (work["balance_percent"] > 0)]
+    # Ignore stopped packets but retain every valid moving balance sample.
+    # display_cadence_rpm is intentionally used here so this is identical
+    # before and after an exported FIT is imported again.
+    active = work[
+        (work["power_w"] > 0)
+        & (work["balance_percent"] > 0)
+        & work["display_cadence_rpm"].notna()
+    ]
     left_balance = float(active["balance_percent"].mean()) if not active.empty else None
+    left_average_power = (
+        float(active["left_power_w"].mean())
+        if not active.empty and active["left_power_w"].notna().any()
+        else None
+    )
+    right_average_power = (
+        float(active["right_power_w"].mean())
+        if not active.empty and active["right_power_w"].notna().any()
+        else None
+    )
 
     zone_limits = [0, ftp * 0.55, ftp * 0.75, ftp * 0.90, ftp * 1.05, ftp * 1.20, ftp * 1.50]
     zone_names = ["區間 1 主動恢復", "區間 2 耐力", "區間 3 節奏", "區間 4 閾值", "區間 5 最大攝氧量", "區間 6 無氧", "區間 7 神經肌肉爆發力"]
@@ -448,12 +527,169 @@ def calculate_analysis(df: pd.DataFrame, ftp: int) -> dict:
         "max_cadence": float(cadence_1s.max()) if cadence_1s.notna().any() else None,
         "left_balance": left_balance,
         "right_balance": 100 - left_balance if left_balance is not None else None,
+        "left_average_power": left_average_power,
+        "right_average_power": right_average_power,
         "normalized_power": normalized_power,
         "intensity_factor": intensity_factor,
         "tss": tss,
         "energy_kj": energy_kj,
         "zones": zones,
     }
+
+
+def export_fit_activity(df: pd.DataFrame, ftp: int) -> Path:
+    """Write a standard indoor-cycling FIT with only reliably decoded fields."""
+    if df.empty:
+        raise ValueError("No P715 records are available to export")
+
+    work = df.sort_values("timestamp").copy()
+    results = calculate_analysis(work, ftp)
+    start_ms = int(round(float(work["timestamp"].iloc[0]) * 1000))
+    end_ms = int(round(float(work["timestamp"].iloc[-1]) * 1000))
+    duration_s = max(0.0, (end_ms - start_ms) / 1000)
+
+    FIT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.fromtimestamp(float(work["timestamp"].iloc[0])).strftime("%Y%m%d_%H%M%S")
+    output_path = FIT_DIR / f"p715_export_{stamp}.fit"
+    suffix = 2
+    while output_path.exists():
+        output_path = FIT_DIR / f"p715_export_{stamp}_{suffix}.fit"
+        suffix += 1
+
+    file_id = FileIdMessage()
+    file_id.type = FileType.ACTIVITY
+    file_id.manufacturer = Manufacturer.DEVELOPMENT.value
+    file_id.product = 0
+    file_id.serial_number = 0
+    file_id.time_created = start_ms
+
+    start_event = EventMessage()
+    start_event.timestamp = start_ms
+    start_event.event = Event.TIMER
+    start_event.event_type = EventType.START
+
+    records: list[RecordMessage] = []
+    # The standard Cycling Power packet only includes enough crank data to
+    # calculate cadence when a new crank event arrives.  Garmin's own FIT
+    # recorder carries the last valid cadence into the intervening 1-second
+    # record.  Do the same here so Connect draws a continuous cadence chart
+    # rather than vertical spikes down to zero.
+    # Back-fill the very first crank events too: the first usable cadence can
+    # only be calculated after the second crank-time value arrives.
+    export_cadence = work["cadence_rpm"].ffill().bfill()
+    for row, cadence in zip(work.itertuples(index=False), export_cadence):
+        record = RecordMessage()
+        record.timestamp = int(round(float(row.timestamp) * 1000))
+        record.power = max(0, int(round(float(row.power_w))))
+        if pd.notna(cadence) and record.power > 0:
+            record.cadence = max(0, int(round(float(cadence))))
+        if pd.notna(row.balance_percent):
+            # The P715 BLE packet reports left balance.  In Garmin FIT's
+            # left_right_balance field, bit 7 marks the stored percentage as
+            # the *right* side, matching the encoding used by the Edge FIT.
+            right_balance = 100 - float(row.balance_percent)
+            right_balance = max(0, min(100, int(round(right_balance))))
+            record.left_right_balance = 0x80 | right_balance
+        records.append(record)
+
+    stop_event = EventMessage()
+    stop_event.timestamp = end_ms
+    stop_event.event = Event.TIMER
+    stop_event.event_type = EventType.STOP_ALL
+
+    def apply_summary(message: LapMessage | SessionMessage) -> None:
+        message.timestamp = end_ms
+        message.start_time = start_ms
+        message.total_elapsed_time = duration_s
+        message.total_timer_time = duration_s
+        message.total_work = int(round(results["energy_kj"] * 1000))
+        message.avg_power = int(round(results["average_power"]))
+        message.max_power = int(round(results["max_power"]))
+        message.normalized_power = int(round(results["normalized_power"]))
+        message.intensity_factor = float(results["intensity_factor"])
+        message.training_stress_score = float(results["tss"])
+        if results["average_cadence"] is not None:
+            message.avg_cadence = int(round(results["average_cadence"]))
+            message.max_cadence = int(round(results["max_cadence"]))
+        message.sport = Sport.CYCLING
+        message.sub_sport = SubSport.INDOOR_CYCLING
+
+    lap = LapMessage()
+    lap.message_index = 0
+    apply_summary(lap)
+    lap.event = Event.LAP
+    lap.event_type = EventType.STOP
+
+    session = SessionMessage()
+    session.message_index = 0
+    apply_summary(session)
+    session.first_lap_index = 0
+    session.num_laps = 1
+    session.event = Event.SESSION
+    session.event_type = EventType.STOP
+
+    activity = ActivityMessage()
+    activity.timestamp = end_ms
+    activity.total_timer_time = duration_s
+    activity.num_sessions = 1
+    activity.type = Activity.MANUAL
+    activity.event = Event.ACTIVITY
+    activity.event_type = EventType.STOP
+
+    builder = FitFileBuilder(auto_define=True, strict=True)
+    builder.add(file_id)
+    builder.add(start_event)
+    builder.add_all(records)
+    builder.add(stop_event)
+    builder.add(lap)
+    builder.add(session)
+    builder.add(activity)
+    builder.build().to_file(str(output_path))
+    return output_path
+
+
+def import_fit_activity(path: str | Path) -> pd.DataFrame:
+    """Read standard FIT record messages into the dashboard analysis schema."""
+    fit_path = Path(path)
+    fit_file = FitFile.from_file(fit_path)
+    rows: list[dict] = []
+
+    for record in fit_file.records:
+        message = record.message
+        if not isinstance(message, RecordMessage):
+            continue
+        if message.timestamp is None or message.power is None:
+            continue
+
+        timestamp_ms = float(message.timestamp)
+        timestamp_s = timestamp_ms / 1000 if timestamp_ms > 10_000_000_000 else timestamp_ms
+        power_w = float(message.power)
+        cadence = message.cadence
+
+        left_balance = None
+        raw_balance = message.left_right_balance
+        if raw_balance is not None:
+            raw_balance = int(raw_balance)
+            reported_percent = raw_balance & 0x7F
+            # FIT bit 7 means the stored percentage belongs to the right side.
+            left_balance = 100 - reported_percent if raw_balance & 0x80 else reported_percent
+
+        rows.append({
+            "timestamp": timestamp_s,
+            "power_w": power_w,
+            "cadence_rpm": None if cadence is None else float(cadence),
+            "balance_percent": left_balance,
+            "balance_reference": "left" if left_balance is not None else None,
+            "left_power_w": None if left_balance is None else power_w * left_balance / 100,
+            "right_power_w": None if left_balance is None else power_w * (100 - left_balance) / 100,
+            "crank_revs": None,
+            "crank_event_time": None,
+            "sync_reference_hex": None,
+        })
+
+    if not rows:
+        raise ValueError("This FIT file has no record messages with power data.")
+    return pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
 
 
 class AnalysisDialog(QDialog):
@@ -511,25 +747,119 @@ class AnalysisDialog(QDialog):
         for axis in axes:
             axis.spines[["top", "right"]].set_visible(False)
             axis.grid(axis="y", alpha=0.25)
+        average_power = results["average_power"]
+        max_power = results["max_power"]
+        average_cadence = results["average_cadence"]
+        max_cadence = results["max_cadence"]
+
         axes[0].plot(work["elapsed_s"], work["power_w"], color="#cf3cc6", linewidth=2)
         axes[0].fill_between(work["elapsed_s"], work["power_w"], color="#cf3cc6", alpha=0.25)
-        axes[0].set_ylabel("Power (W)")
-        axes[0].set_title("Power")
-        axes[1].plot(work["elapsed_s"], work["cadence_rpm"], color="#f58b1f", linewidth=2)
-        axes[1].fill_between(work["elapsed_s"], work["cadence_rpm"].fillna(0), color="#f58b1f", alpha=0.25)
-        axes[1].set_ylabel("Cadence (rpm)")
-        axes[1].set_title("Cadence")
+        axes[0].set_ylim(0, nice_chart_top(max_power, minimum=60))
+        axes[0].axhline(
+            average_power,
+            color="#666666",
+            linestyle="--",
+            linewidth=1.2,
+            label=f"平均 Average {average_power:.1f} W",
+        )
+        axes[0].set_ylabel("功率 Power (W)", fontproperties=CHART_CHINESE_FONT)
+        axes[0].set_title(
+            f"功率 Power  |  平均 Average {average_power:.1f} W  |  最大 Max {max_power:.0f} W",
+            fontproperties=CHART_CHINESE_FONT,
+        )
+        axes[0].legend(frameon=False, loc="upper right", prop=CHART_CHINESE_FONT)
+        axes[1].plot(work["elapsed_s"], work["display_cadence_rpm"], color="#f58b1f", linewidth=2)
+        axes[1].fill_between(work["elapsed_s"], work["display_cadence_rpm"].fillna(0), color="#f58b1f", alpha=0.25)
+        axes[1].set_ylim(0, nice_chart_top(max_cadence, minimum=60))
+        if average_cadence is not None:
+            axes[1].axhline(
+                average_cadence,
+                color="#666666",
+                linestyle="--",
+                linewidth=1.2,
+                label=f"平均 Average {average_cadence:.1f} rpm",
+            )
+            axes[1].set_title(
+                f"踏頻 Cadence  |  平均 Average {average_cadence:.1f} rpm  |  最大 Max {max_cadence:.0f} rpm",
+                fontproperties=CHART_CHINESE_FONT,
+            )
+            axes[1].legend(frameon=False, loc="upper right", prop=CHART_CHINESE_FONT)
+        else:
+            axes[1].set_title("踏頻 Cadence", fontproperties=CHART_CHINESE_FONT)
+        axes[1].set_ylabel("踏頻 Cadence (rpm)", fontproperties=CHART_CHINESE_FONT)
         balance = work["balance_percent"].where(work["balance_percent"] > 0)
         axes[2].scatter(work["elapsed_s"], balance, color="#62d52e", label="Left", s=24)
         axes[2].scatter(work["elapsed_s"], 100 - balance, color="#18a8e6", label="Right", s=24)
         axes[2].axhline(50, color="gray", linestyle="--", linewidth=1)
         axes[2].set_ylim(0, 100)
-        axes[2].set_ylabel("Balance (%)")
-        axes[2].set_xlabel("Time (s)")
-        axes[2].set_title("Left / Right Balance")
-        axes[2].legend(frameon=False, ncols=2)
+        axes[2].set_ylabel("平衡 Balance (%)", fontproperties=CHART_CHINESE_FONT)
+        axes[2].set_xlabel("時間 Time (s)", fontproperties=CHART_CHINESE_FONT)
+        if results["left_balance"] is not None:
+            axes[2].set_title(
+                "左右平衡 Left / Right Balance  |  "
+                f"平均 Average L {results['left_balance']:.1f}% / R {results['right_balance']:.1f}%",
+                fontproperties=CHART_CHINESE_FONT,
+            )
+        else:
+            axes[2].set_title("左右平衡 Left / Right Balance", fontproperties=CHART_CHINESE_FONT)
+        axes[2].legend(frameon=False, ncols=2, prop=CHART_CHINESE_FONT)
         chart_layout.addWidget(canvas)
         tabs.addTab(chart_page, "Charts")
+
+        rings_page = QWidget()
+        rings_layout = QVBoxLayout(rings_page)
+        rings_figure = Figure(figsize=(10, 4.8), tight_layout=True)
+        rings_canvas = FigureCanvas(rings_figure)
+        ring_axes = rings_figure.subplots(1, 2)
+        left_balance = results["left_balance"]
+        right_balance = results["right_balance"]
+        left_power = results["left_average_power"]
+        right_power = results["right_average_power"]
+
+        if left_balance is None or right_balance is None:
+            rings_figure.text(
+                0.5,
+                0.5,
+                "No valid left/right balance data was recorded.",
+                ha="center",
+                va="center",
+                fontsize=15,
+            )
+            for axis in ring_axes:
+                axis.axis("off")
+        else:
+            ring_specs = [
+                (ring_axes[0], "Left / 左腳", left_balance, left_power, "#63d429"),
+                (ring_axes[1], "Right / 右腳", right_balance, right_power, "#19a8e6"),
+            ]
+            for axis, title, balance_pct, power_w, color in ring_specs:
+                axis.pie(
+                    [balance_pct, 100 - balance_pct],
+                    startangle=90,
+                    counterclock=False,
+                    colors=[color, "#30343b"],
+                    wedgeprops={"width": 0.24, "edgecolor": "white"},
+                )
+                power_text = "–" if power_w is None else f"{power_w:.1f} W"
+                axis.text(0, 0.10, title, ha="center", va="center", fontsize=15, fontproperties=CHART_CHINESE_FONT)
+                axis.text(0, -0.12, power_text, ha="center", va="center", fontsize=19, fontweight="bold")
+                axis.text(0, -0.34, f"{balance_pct:.1f}% balance", ha="center", va="center", fontsize=11)
+                axis.set_title("Average estimated power", fontsize=11)
+                axis.set_aspect("equal")
+            rings_figure.suptitle(
+                "左右腳功率與平衡  Left / Right Power & Balance",
+                fontsize=17,
+                fontproperties=CHART_CHINESE_FONT,
+            )
+            rings_figure.text(
+                0.5,
+                0.03,
+                "Estimated from total power × the P715-reported left/right balance. This is not Power Phase.",
+                ha="center",
+                fontsize=10,
+            )
+        rings_layout.addWidget(rings_canvas)
+        tabs.addTab(rings_page, "左右功率／平衡")
 
 
 class Dashboard(QMainWindow):
@@ -597,6 +927,11 @@ class Dashboard(QMainWindow):
         self.analysis_button = QPushButton("查看事後分析")
         self.analysis_button.setEnabled(False)
         self.analysis_button.clicked.connect(self.show_analysis)
+        self.export_fit_button = QPushButton("匯出 FIT")
+        self.export_fit_button.setEnabled((CSV_DIR / "p715_data.csv").exists())
+        self.export_fit_button.clicked.connect(self.export_fit)
+        self.import_fit_button = QPushButton("匯入 FIT 分析")
+        self.import_fit_button.clicked.connect(self.import_fit)
         connect_layout.addWidget(self.scan_button)
         connect_layout.addWidget(self.device_box, 1)
         connect_layout.addWidget(self.verify_button)
@@ -610,6 +945,8 @@ class Dashboard(QMainWindow):
         connect_layout.addWidget(self.start_button)
         connect_layout.addWidget(self.stop_button)
         connect_layout.addWidget(self.analysis_button)
+        connect_layout.addWidget(self.export_fit_button)
+        connect_layout.addWidget(self.import_fit_button)
         layout.addWidget(connect_group)
 
         self.status_label = QLabel("請先按「掃描 P715」。")
@@ -855,8 +1192,9 @@ class Dashboard(QMainWindow):
         df = pd.DataFrame(records)
         self.latest_df = df
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        session_path = OUTPUT_DIR / f"p715_{stamp}.csv"
-        latest_path = OUTPUT_DIR / "p715_data.csv"
+        CSV_DIR.mkdir(parents=True, exist_ok=True)
+        session_path = CSV_DIR / f"p715_{stamp}.csv"
+        latest_path = CSV_DIR / "p715_data.csv"
         df.to_csv(session_path, index=False)
         df.to_csv(latest_path, index=False)
 
@@ -880,14 +1218,18 @@ class Dashboard(QMainWindow):
                 on="sync_reference_hex",
                 how="left",
             )
-            advanced_path = OUTPUT_DIR / f"p715_advanced_{stamp}.csv"
-            advanced_latest_path = OUTPUT_DIR / "p715_advanced_data.csv"
+            advanced_path = CSV_DIR / f"p715_advanced_{stamp}.csv"
+            advanced_latest_path = CSV_DIR / "p715_advanced_data.csv"
             advanced_df.to_csv(advanced_path, index=False)
             advanced_df.to_csv(advanced_latest_path, index=False)
             advanced_count = len(advanced_df)
             advanced_matched_count = int(advanced_df["power_w"].notna().sum())
 
-        active = df[(df["power_w"] > 0) & (df["balance_percent"] > 0)]
+        active = df[
+            (df["power_w"] > 0)
+            & (df["balance_percent"] > 0)
+            & df["cadence_rpm"].notna()
+        ]
         parts = [
             f"已收集 {len(df)} 筆資料。",
             f"平均功率 {df['power_w'].mean():.1f} W，最高 {df['power_w'].max():.0f} W。",
@@ -905,6 +1247,7 @@ class Dashboard(QMainWindow):
         parts.append(f"已儲存：{session_path.name}，並更新 p715_data.csv。")
         self.summary.setText("\n".join(parts))
         self.analysis_button.setEnabled(True)
+        self.export_fit_button.setEnabled(True)
         self.countdown_timer.stop()
         self.countdown_label.setText("剩餘時間：完成")
         self.set_status("收集完成。")
@@ -914,6 +1257,47 @@ class Dashboard(QMainWindow):
             QMessageBox.information(self, "尚無資料", "請先完成一段收集，再查看事後分析。")
             return
         dialog = AnalysisDialog(self.latest_df, self.ftp.value(), self)
+        dialog.exec()
+
+    def export_fit(self) -> None:
+        df = self.latest_df
+        if df is None or df.empty:
+            latest_path = CSV_DIR / "p715_data.csv"
+            if latest_path.exists():
+                df = pd.read_csv(latest_path)
+            else:
+                QMessageBox.information(self, "沒有可匯出的資料", "請先完成一次 P715 收集。")
+                return
+        try:
+            output_path = export_fit_activity(df, self.ftp.value())
+        except Exception as exc:
+            self.show_error(f"FIT 匯出失敗：{exc}")
+            return
+        self.set_status(f"已匯出 FIT：{output_path.name}")
+        QMessageBox.information(
+            self,
+            "FIT 匯出完成",
+            f"已儲存至：\n{output_path}\n\n"
+            "包含時間、功率、踏頻與左右平衡；不含速度、Power Phase 或 PCO。",
+        )
+
+    def import_fit(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "選擇要分析的 FIT 檔",
+            str(FIT_DIR),
+            "FIT files (*.fit);;All files (*.*)",
+        )
+        if not path:
+            return
+        try:
+            df = import_fit_activity(path)
+        except Exception as exc:
+            self.show_error(f"FIT 匯入失敗：{exc}")
+            return
+
+        self.set_status(f"已載入 FIT：{Path(path).name}（{len(df)} 筆功率記錄）")
+        dialog = AnalysisDialog(df, self.ftp.value(), self)
         dialog.exec()
 
     def record_finished(self) -> None:
