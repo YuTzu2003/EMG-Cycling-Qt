@@ -1,6 +1,6 @@
 from __future__ import annotations
 import json
-import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from .trigno import CHANNEL_COUNT
@@ -11,26 +11,14 @@ class SensorMapping:
     chinese_name: str
     english_name: str
     abbreviation: str
-
     def displayName(self) -> str:
         suffix = f" ({self.abbreviation})" if self.abbreviation else ""
         return f"{self.chinese_name} · {self.english_name}{suffix}"
 
-    def csvColumnName(self) -> str:
-        """Return a stable, analysis-friendly English CSV header for this slot."""
-        english = re.sub(r"[^a-z0-9]+", "_", self.english_name.lower()).strip("_")
-        side = self.abbreviation.rsplit("-", 1)[-1].lower() if "-" in self.abbreviation else ""
-        if english == "unassigned" or not english:
-            return f"unassigned_{self.slot:02d}"
-        return f"{side}_{english}" if side in {"r", "l"} else english
-
-
 def defaultMappings() -> list[SensorMapping]:
     return [SensorMapping(slot, "未指定", "Unassigned", "") for slot in range(1, CHANNEL_COUNT + 1)]
 
-
 def loadMappings(path: Path) -> list[SensorMapping]:
-    """Read the user-editable mapping file and validate all 16 SDK slots."""
     if not path.is_file():
         return defaultMappings()
     try:
@@ -53,7 +41,6 @@ def loadMappings(path: Path) -> list[SensorMapping]:
 
 
 def saveMappings(path: Path, mappings: list[SensorMapping]) -> None:
-    """Persist mappings edited in the GUI as readable UTF-8 JSON."""
     records = [
         {
             "slot": mapping.slot,
@@ -72,5 +59,40 @@ def projectMappingPath() -> Path:
 def loadProjectMappings() -> list[SensorMapping]:
     return loadMappings(projectMappingPath())
 
-def csvColumns(mappings: list[SensorMapping]) -> list[str]:
-    return [mapping.csvColumnName() for mapping in mappings]
+
+def duplicateMappingSlots(
+    mappings: list[SensorMapping],
+) -> dict[tuple[str, str], list[int]]:
+    """Return duplicate anatomical locations, excluding unassigned slots.
+
+    A left and right muscle are distinct locations. The side is derived from
+    the final ``-R`` or ``-L`` in the sensor abbreviation.
+    """
+    locations: dict[tuple[str, str], list[int]] = {}
+    for mapping in mappings:
+        muscle = " ".join(mapping.english_name.casefold().split())
+        if not muscle or muscle == "unassigned":
+            continue
+        suffix = mapping.abbreviation.rsplit("-", 1)[-1].casefold()
+        side = suffix if suffix in {"r", "l"} else ""
+        locations.setdefault((muscle, side), []).append(mapping.slot)
+    return {
+        location: slots
+        for location, slots in locations.items()
+        if len(slots) > 1
+    }
+
+
+def csvColumnNames(mappings: list[SensorMapping]) -> list[str]:
+    """Return readable, unique EMG CSV headers for the selected sensors."""
+    names = [
+        mapping.english_name.strip()
+        or mapping.chinese_name.strip()
+        or f"S{mapping.slot:02d}"
+        for mapping in mappings
+    ]
+    counts = Counter(names)
+    return [
+        name if counts[name] == 1 else f"S{mapping.slot:02d}_{name}"
+        for mapping, name in zip(mappings, names, strict=True)
+    ]

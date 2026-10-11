@@ -1,14 +1,13 @@
 from __future__ import annotations
 import asyncio
 import struct
+import time
 from dataclasses import dataclass, replace
 from PyQt5.QtCore import QThread, pyqtSignal
-
 try:
     from bleak import BleakClient, BleakScanner
 except ImportError:
     BleakClient = BleakScanner = None
-
 
 FTMS_SERVICE = "00001826-0000-1000-8000-00805f9b34fb"
 CONTROL_POINT = "00002ad9-0000-1000-8000-00805f9b34fb"
@@ -30,7 +29,6 @@ class NumericRange:
         steps = round((value - self.minimum) / self.increment)
         return self.minimum + steps * self.increment
 
-
 @dataclass(frozen=True)
 class BikeTelemetry:
     speedKph: float | None = None
@@ -42,9 +40,7 @@ class BikeTelemetry:
     energyKcal: int | None = None
     elapsedSeconds: int | None = None
 
-
 def parseIndoorBikeData(data: bytearray) -> BikeTelemetry:
-    """Parse the standard FTMS Indoor Bike Data (0x2AD2) notification."""
     if len(data) < 2:
         raise ValueError("Indoor Bike Data 封包長度不足。")
 
@@ -105,9 +101,12 @@ class FtmsTrainer:
         self.telemetryCallback = None
         self.latestTelemetry = BikeTelemetry()
         self.crankState: tuple[int, int] | None = None
+        self._deviceDistanceAvailable = False
+        self._estimatedDistanceMeters: float | None = None
+        self._lastTelemetryAt: float | None = None
+        self.disconnectedCallback = None
 
     def requireBleak(self) -> None:
-        """Confirm that the Bluetooth dependency is available before connecting."""
         if BleakClient is None or BleakScanner is None:
             raise RuntimeError("缺少 bleak 藍牙套件。請在專案資料夾執行 uv sync 後重新開啟程式。")
 
@@ -116,8 +115,14 @@ class FtmsTrainer:
         device = await BleakScanner.find_device_by_address(self.address, timeout=self.timeout)
         if device is None:
             raise RuntimeError(f"找不到阻力計 {self.address}。請喚醒設備後再試。")
-        self.client = BleakClient(device, timeout=self.timeout, winrt={"use_cached_services": False})
+        self.client = BleakClient(device,timeout=self.timeout,winrt={"use_cached_services": False},disconnected_callback=self._handleDisconnected,)
         await self.client.connect()
+
+    def _handleDisconnected(self, _client) -> None:
+        self.notificationsActive = False
+        self.bikeNotificationsActive = False
+        if self.disconnectedCallback is not None:
+            self.disconnectedCallback()
 
     async def disconnect(self) -> None:
         if self.client and self.client.is_connected:
@@ -164,9 +169,23 @@ class FtmsTrainer:
         await self.send(b"\x07")
 
     def emitTelemetry(self, update: BikeTelemetry) -> None:
-        values = {
-            name: value for name, value in vars(update).items() if value is not None
-        }
+        now = time.monotonic()
+        speedKph = update.speedKph
+        if speedKph is None:
+            speedKph = self.latestTelemetry.speedKph
+
+        if update.distanceMeters is not None:
+            self._deviceDistanceAvailable = True
+            self._estimatedDistanceMeters = float(update.distanceMeters)
+        elif not self._deviceDistanceAvailable and speedKph is not None:
+            if self._estimatedDistanceMeters is None:
+                self._estimatedDistanceMeters = 0.0
+            elif self._lastTelemetryAt is not None:
+                elapsedSeconds = max(0.0, now - self._lastTelemetryAt)
+                self._estimatedDistanceMeters += speedKph / 3.6 * elapsedSeconds
+            update = replace(update,distanceMeters=round(self._estimatedDistanceMeters),)
+        self._lastTelemetryAt = now
+        values = {name: value for name, value in vars(update).items() if value is not None}
         self.latestTelemetry = replace(self.latestTelemetry, **values)
         if self.telemetryCallback is not None:
             self.telemetryCallback(self.latestTelemetry)
@@ -252,9 +271,7 @@ class FtmsTrainer:
             raise ValueError("強度必須介於 0 到 30。")
         supported = await self.powerRange()
         if not supported.minimum <= level30Watts <= supported.maximum:
-            raise ValueError(
-                f"第 30 級目標功率需介於 {supported.minimum:g} 到 {supported.maximum:g} W。"
-            )
+            raise ValueError(f"第 30 級目標功率需介於 {supported.minimum:g} 到 {supported.maximum:g} W。")
         target = supported.minimum + (level30Watts - supported.minimum) * level / 30
         actual = supported.align(target)
         await self.send(struct.pack("<Bh", 0x05, round(actual)))
@@ -323,6 +340,7 @@ class TrainerWorker(QThread):
 
     async def connectTrainer(self, address: str) -> dict:
         self.trainer = FtmsTrainer(address)
+        self.trainer.disconnectedCallback = self.disconnected.emit
         await self.trainer.connect()
         await self.trainer.acquireControl()
         resistance = await self.trainer.resistanceRange()

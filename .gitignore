@@ -13,7 +13,8 @@ DelsysAPI.lic
 # Captured biosignal data
 recordings/
 *.csv
-*pptx
+*.pptx
+*.txt
 
 # Virtual environments
 .venv

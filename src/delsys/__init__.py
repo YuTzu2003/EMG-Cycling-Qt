@@ -1,4 +1,4 @@
-from .trigno import CHANNEL_COUNT, SAMPLE_RATE, TrignoClient, TrignoError
+from .emg.trigno import CHANNEL_COUNT, SAMPLE_RATE, TrignoClient, TrignoError
 
 __all__ = ["CHANNEL_COUNT", "SAMPLE_RATE", "TrignoClient", "TrignoError"]
 

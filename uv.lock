@@ -92,6 +92,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "bleak" },
+    { name = "fit-tool" },
     { name = "numpy" },
     { name = "pyqt5" },
     { name = "pyqtgraph" },
@@ -100,9 +101,19 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "bleak", specifier = ">=0.22" },
+    { name = "fit-tool", specifier = ">=0.9.16" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pyqt5", specifier = ">=5.15" },
     { name = "pyqtgraph", specifier = ">=0.13" },
+]
+
+[[package]]
+name = "fit-tool"
+version = "0.9.16"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fc/4f/be06a443553f5e74b4e9360724aaf41d0d09dceb0bc69d8faf3fe0f398f0/fit_tool-0.9.16.tar.gz", hash = "sha256:716b75b2fdfc66ca7b82df65f750c1427fd984c558284753f43e2bf8d2188f61", size = 300961, upload-time = "2026-08-05T04:06:48.023Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2f/4f/f0b1bfbc260007870aa0b05e07bdcdebc6080bfbc52dd680011ab0daa44b/fit_tool-0.9.16-py3-none-any.whl", hash = "sha256:3403c61663cc205da101a9952edcdc31cf9634dce2eb5c12a397eb24cf4aacf0", size = 497174, upload-time = "2026-08-05T04:06:46.48Z" },
 ]
 
 [[package]]
@@ -198,7 +209,7 @@ name = "pyobjc-framework-cocoa"
 version = "12.2.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
+    { name = "pyobjc-core", marker = "platform_machine != 'AMD64' or sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/75/76/49c6da2c6a831020b4854ba20079d5a1030474bffc776b7b73c2eeff8c15/pyobjc_framework_cocoa-12.2.2.tar.gz", hash = "sha256:c96c0ef69a71afbbb0e6a7d594b455c5fe47d62e0db376ee7a2b4b828c16ace9", size = 3132831, upload-time = "2026-08-11T19:44:02.288Z" }
 wheels = [
@@ -216,8 +227,8 @@ name = "pyobjc-framework-corebluetooth"
 version = "12.2.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
-    { name = "pyobjc-framework-cocoa" },
+    { name = "pyobjc-core", marker = "platform_machine != 'AMD64' or sys_platform != 'win32'" },
+    { name = "pyobjc-framework-cocoa", marker = "platform_machine != 'AMD64' or sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/53/f6/424a21392b3290dab0e8a78bddbe4e71754b9f1cf70d0e1584c03d6df987/pyobjc_framework_corebluetooth-12.2.2.tar.gz", hash = "sha256:75aa13f5355be549252d3192864bb3b82eb74c1f667d0527c1388117efffd688", size = 37806, upload-time = "2026-08-11T19:44:08.594Z" }
 wheels = [
@@ -235,8 +246,8 @@ name = "pyobjc-framework-libdispatch"
 version = "12.2.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pyobjc-core" },
-    { name = "pyobjc-framework-cocoa" },
+    { name = "pyobjc-core", marker = "platform_machine != 'AMD64' or sys_platform != 'win32'" },
+    { name = "pyobjc-framework-cocoa", marker = "platform_machine != 'AMD64' or sys_platform != 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f0/76/e40db30142b551790e5ab208e74de04cfc70823177a702c8c9e3f5e73034/pyobjc_framework_libdispatch-12.2.2.tar.gz", hash = "sha256:7cb799a7c5766cc1b68b68655a02c950646adfd2a743b7cbe8e4a04a51c44ecb", size = 40625, upload-time = "2026-08-11T19:44:46.277Z" }
 wheels = [
@@ -309,6 +320,10 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/94/7b/5361cd0cf56cb8a2aedbc368797ee8d91a6f4b7e0aa1f03839f5e7e0c8fd/pyqt5_sip-12.20.0-cp314-cp314-manylinux_2_5_x86_64.manylinux1_x86_64.whl", hash = "sha256:32fa6cd31b5b6c049171f11eeb76a7d06bb04e5823983d852ea64c336ce66b6c", size = 282761, upload-time = "2026-10-04T12:25:55.072Z" },
     { url = "https://files.pythonhosted.org/packages/d9/85/29e5ee4370b442e07f5a55f716ae35390f3cc9f355c16de41bef7bd48452/pyqt5_sip-12.20.0-cp314-cp314-win32.whl", hash = "sha256:7ec983ef59c0d2e06c900c409d346b9c0f00cca4e678397fd709089468bc15c5", size = 50691, upload-time = "2026-10-04T12:25:57.38Z" },
     { url = "https://files.pythonhosted.org/packages/20/5c/ecf0053e1b45464f2c06c036a16d54bc6e15a7d6d87f54a136e741c6dec4/pyqt5_sip-12.20.0-cp314-cp314-win_amd64.whl", hash = "sha256:c7bf7656d37e1144d0638f46ea623a9584a3921d5921c287ac831c5d77cdd2dd", size = 59615, upload-time = "2026-10-04T12:25:56.268Z" },
+    { url = "https://files.pythonhosted.org/packages/b5/34/ca7e43c9a0393740ac919588996f2b248a86c42bbbddcfdb1fac86706241/pyqt5_sip-12.20.0-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:413e4a7622b0b8999a2c6d8afa68bd1143a9f26d26a0f28c2141fd8075d80038", size = 125589, upload-time = "2026-10-10T14:49:54.53Z" },
+    { url = "https://files.pythonhosted.org/packages/75/50/edfd8f3f7ae5f65e1286d38e5c3d9551e939be6469ccc4c5fe3919384c47/pyqt5_sip-12.20.0-cp315-cp315-manylinux_2_5_x86_64.manylinux1_x86_64.whl", hash = "sha256:f36c3b02b4f76a8e923d1a11855b521225d6c6dca6d18b0ed2152c81d4d78419", size = 285607, upload-time = "2026-10-10T14:49:57.483Z" },
+    { url = "https://files.pythonhosted.org/packages/8f/70/3a83744a37476850389b3562ef90469b5ee8208162b5ae58eac5af7fcd42/pyqt5_sip-12.20.0-cp315-cp315-win32.whl", hash = "sha256:d04e4f9bf390b6ef69277cefcc770e4de238cb99efc60092a8401c8a16df4a80", size = 50762, upload-time = "2026-10-10T14:49:59.588Z" },
+    { url = "https://files.pythonhosted.org/packages/16/6d/f2cf237992f97285d1b60f92a015e73debd86318541a9cd200d560edbc35/pyqt5_sip-12.20.0-cp315-cp315-win_amd64.whl", hash = "sha256:ae4c75570f13f34335a0af6791e3160a183756504ace9542797fe104b3ceb536", size = 59709, upload-time = "2026-10-10T14:49:58.6Z" },
 ]
 
 [[package]]
