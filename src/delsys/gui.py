@@ -348,6 +348,20 @@ class TrignoWindow(QMainWindow):
             cardLayout.addLayout(valueRow)
             self.bikeMetricValues[key] = value
             metrics.addWidget(card, 1)
+        distanceCard = QFrame(objectName="metricCard")
+        distanceLayout = QVBoxLayout(distanceCard)
+        distanceLayout.setContentsMargins(12, 8, 12, 8)
+        distanceLayout.setSpacing(1)
+        distanceLayout.addWidget(QLabel("騎乘公里", objectName="metricTitle"))
+        distanceValue = QLabel("--", objectName="metricValue")
+        distanceRow = QHBoxLayout()
+        distanceRow.setSpacing(6)
+        distanceRow.addWidget(distanceValue)
+        distanceRow.addStretch()
+        distanceRow.addWidget(QLabel("km", objectName="metricUnit"))
+        distanceLayout.addLayout(distanceRow)
+        self.bikeMetricValues["distance"] = distanceValue
+        metrics.insertWidget(0, distanceCard, 1)
         layout.addLayout(metrics)
         recording = QHBoxLayout()
         self.recordCheck = QCheckBox("測量完成後輸出 CSV")
@@ -511,6 +525,10 @@ class TrignoWindow(QMainWindow):
             self.bikeMetricValues["cadence"].setText(f"{data.cadenceRpm:.0f}")
         if data.powerWatts is not None:
             self.bikeMetricValues["power"].setText(f"{data.powerWatts}")
+        if data.distanceMeters is not None:
+            self.bikeMetricValues["distance"].setText(
+                f"{data.distanceMeters / 1000:.2f}"
+            )
         if data.resistance is not None:
             self.bikeMetricValues["resistance"].setText(f"{data.resistance:g}")
         if self.trainerRecorder:
