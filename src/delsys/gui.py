@@ -5,16 +5,17 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QSettings, QTimer, Qt, Signal
+from PySide6.QtCore import QSettings, QStandardPaths, QTimer, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,
-    QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget,)
+    QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget, QInputDialog,)
 from delsys.collection import CollectionInfoRecorder, SubjectInfo, infoOutputPath
 from delsys.emg.body_map import BodyMapPanel
 from delsys.emg.sensor_mapping import (SensorMapping,duplicateMappingSlots,loadMappings,saveMappings,)
 from delsys.emg.trigno import CHANNEL_COUNT, SAMPLE_RATE
+from delsys.emg.baseline import BaselineManager, CalibrationSession, EMGPreprocessor, FilterSettings, RMSFeatureExtractor, load_raw_emg_csv
 from delsys.emg.workers import ConnectionWorker, StreamWorker
 from delsys.resistance.recording import TrainerCsvRecorder, trainerOutputPath
 from delsys.resistance.trainer import BikeTelemetry, NumericRange, TrainerWorker
@@ -26,6 +27,11 @@ from delsys.fluent_theme import FluentThemeManager
 
 COLORS = ("#1684d7", "#e95f54", "#7e57c2", "#00897b", "#f39c12", "#5c6bc0", "#43a047", "#c2185b")
 MAPPING_PATH = Path(__file__).resolve().parents[2] / "sensor_mapping.json"
+
+
+def baselineSettingsPath() -> Path:
+    location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation)
+    return Path(location) / "emg_baseline_settings.json"
 
 
 class SensorLegendToggle(QWidget):
@@ -68,14 +74,15 @@ class SensorLegendToggle(QWidget):
 
 
 class MappingEditorDialog(QDialog):
-    def __init__( self, mappings: list[SensorMapping], active_slots: set[int], parent: QWidget | None = None) -> None:
+    def __init__(self, mappings: list[SensorMapping], active_slots: set[int], baseline_records: dict[int, object], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("編輯感測器／肌肉對應")
-        self.resize(760, 650)
+        self.resize(920, 650)
         layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("基準 RMS 使用 mV；可直接修改，留白表示未設定，清空既有數字會移除該通道基準。", objectName="muted"))
         layout.addWidget(QLabel("修改後按「儲存並套用」。SDK Slot 是固定編號，無法變更。"))
         headings = QGridLayout()
-        for column, title in enumerate(("Slot", "狀態", "中文肌肉名稱", "English EMG name", "縮寫")):
+        for column, title in enumerate(("Slot", "狀態", "中文肌肉名稱", "English EMG name", "縮寫", "基準 RMS (mV)")):
             headings.addWidget(QLabel(title, objectName="editorHeader"), 0, column)
         layout.addLayout(headings)
         scroll = QScrollArea()
@@ -83,6 +90,8 @@ class MappingEditorDialog(QDialog):
         content = QWidget()
         grid = QGridLayout(content)
         self.edits: list[tuple[QLineEdit, QLineEdit, QLineEdit]] = []
+        self.baselineEdits: list[QLineEdit] = []
+        self._initialBaselines: list[float | None] = []
         for row, mapping in enumerate(mappings):
             grid.addWidget(QLabel(f"S{mapping.slot:02d}"), row, 0)
             state = QLabel("● 啟用" if mapping.slot in active_slots else "未啟用")
@@ -92,7 +101,15 @@ class MappingEditorDialog(QDialog):
             grid.addWidget(chinese, row, 2)
             grid.addWidget(english, row, 3)
             grid.addWidget(abbreviation, row, 4)
+            record = baseline_records.get(mapping.slot)
+            initial = record.rms_mv if record is not None else None
+            baseline = QLineEdit("" if initial is None else f"{initial:.6f}")
+            baseline.setPlaceholderText("未設定")
+            baseline.setAccessibleName(f"S{mapping.slot:02d} 基準 RMS (mV)")
+            grid.addWidget(baseline, row, 5)
             self.edits.append((chinese, english, abbreviation))
+            self.baselineEdits.append(baseline)
+            self._initialBaselines.append(initial)
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
@@ -106,12 +123,28 @@ class MappingEditorDialog(QDialog):
             SensorMapping(slot, chinese.text().strip() or "未指定", english.text().strip() or "UNASSIGNED", abbreviation.text().strip())
             for slot, (chinese, english, abbreviation) in enumerate(self.edits, 1) ]
 
+    def baselineChanges(self) -> dict[int, float | None]:
+        changes: dict[int, float | None] = {}
+        for slot, (edit, initial) in enumerate(zip(self.baselineEdits, self._initialBaselines, strict=True), 1):
+            text = edit.text().strip()
+            value = None if not text else float(text)
+            if value != initial:
+                changes[slot] = value
+        return changes
+
     def accept(self) -> None:
         duplicates = duplicateMappingSlots(self.mappings())
         if duplicates:
             conflicts = "\n".join(f"{muscle.title()} ({side.upper() or '?' }): "+ ", ".join(f"S{slot:02d}" for slot in slots)
                 for (muscle, side), slots in duplicates.items())
             QMessageBox.warning(self,"重複肌肉對應","同一側的同一肌肉只能對應一個感測器：\n" + conflicts,)
+            return
+        try:
+            for value in self.baselineChanges().values():
+                if value is not None and (not np.isfinite(value) or value <= 0):
+                    raise ValueError
+        except ValueError:
+            QMessageBox.warning(self, "基準值無效", "基準 RMS 必須是大於 0 的數值，或留白以移除。")
             return
         super().accept()
 
@@ -155,6 +188,16 @@ class TrignoWindow(QMainWindow):
         self.bikeOnlySession = False
         self.commandedNativeResistance: float | None = None
         self.currentSampleRate = SAMPLE_RATE
+        self.baselineManager = BaselineManager(baselineSettingsPath())
+        self.baselineManager.thresholds_enabled = True
+        self.filterSettings = FilterSettings()
+        self.preprocessor: EMGPreprocessor | None = None
+        self.rmsExtractor: RMSFeatureExtractor | None = None
+        self.calibrationSession: CalibrationSession | None = None
+        self.calibrationOnly = False
+        self.calibrationRecording = False
+        self.baselineMetricLabels: list[QLabel] = []
+        self.baselineStatusLabels: list[QLabel] = []
         self.lastTrainerDistanceMeters: int | None = None
         self.collectionDistanceBaselineMeters: int | None = None
         self.collectionDistanceMeters: int | None = None
@@ -451,10 +494,14 @@ class TrignoWindow(QMainWindow):
         self.hostEdit = QLineEdit("127.0.0.1")
         self.hostEdit.setMaximumWidth(200)
         self.testButton, self.startButton, self.stopButton = QPushButton("測試連線"), QPushButton("開始串流", objectName="record"), QPushButton("停止")
+        self.calibrateButton = QPushButton("測量 20 秒基準")
+        FluentThemeManager.set_property(self.calibrateButton, "fluentAppearance", "danger")
+        self.calibrationLabel = QLabel("基準：尚未開始", objectName="muted")
         FluentThemeManager.set_property(self.startButton, "fluentAppearance", "success")
         FluentThemeManager.set_property(self.stopButton, "fluentAppearance", "danger")
-        for widget in (self.hostEdit, self.testButton, self.startButton, self.stopButton):
+        for widget in (self.hostEdit, self.testButton, self.startButton, self.calibrateButton, self.stopButton):
             controls.addWidget(widget)
+        controls.addWidget(self.calibrationLabel)
         controls.addSpacing(10)
         controls.addWidget(QLabel("收集時間"))
         self.durationMinutesSpin = QSpinBox()
@@ -572,6 +619,15 @@ class TrignoWindow(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
+        controls = QHBoxLayout()
+        self.importBaselineButton = QPushButton("匯入基準 CSV")
+        self.thresholdButton = QPushButton("判定門檻")
+        FluentThemeManager.set_property(self.importBaselineButton, "fluentAppearance", "primary")
+        FluentThemeManager.set_property(self.thresholdButton, "fluentAppearance", "warning")
+        controls.addWidget(self.importBaselineButton)
+        controls.addWidget(self.thresholdButton)
+        controls.addStretch()
+        layout.addLayout(controls)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -602,6 +658,9 @@ class TrignoWindow(QMainWindow):
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
         self.updateSensorRows()
+        self.importBaselineButton.clicked.connect(self.importBaselineCsv)
+        self.thresholdButton.clicked.connect(self.editThresholds)
+        self.calibrateButton.clicked.connect(self.startBaselineCalibration)
         return panel
 
     def sensorSelectionChanged(self) -> None:
@@ -1015,10 +1074,24 @@ class TrignoWindow(QMainWindow):
 
     def editMappings(self) -> None:
         active_slots = {index + 1 for index, active in enumerate(self.sensorActive) if active}
-        dialog = MappingEditorDialog(self.mappings, active_slots, self)
+        dialog = MappingEditorDialog(self.mappings, active_slots, self.baselineManager.records, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.mappings = dialog.mappings()
             saveMappings(MAPPING_PATH, self.mappings)
+            for slot, value in dialog.baselineChanges().items():
+                if value is None:
+                    self.baselineManager.records.pop(slot, None)
+                    continue
+                channel = slot - 1
+                previous = self.baselineManager.records.get(slot)
+                serial = previous.sensor_serial if previous else self.sensorSerials.get(slot, "Manual mapping edit")
+                if serial == "Unknown SID":
+                    serial = "Manual mapping edit"
+                self.baselineManager.set_manual(
+                    slot, value, self.mappingIdentity(channel), serial,
+                    self.currentSampleRate, self.filterSettings, "Edited in muscle mapping",
+                )
+            self.baselineManager.save()
             self.updateSensorRows()
             self.syncMuscleMap()
             self.rebuildPlots()
@@ -1037,15 +1110,140 @@ class TrignoWindow(QMainWindow):
             self.sensorIcons[index].setToolTip(tooltip)
             self.sensorChecks[index].setToolTip(tooltip)
             self.sensorRows[index].setVisible(True)
-            self.sensorRows[index].setStyleSheet(
-                "QFrame#sensorRow { background: #f0fdf4; border: 1px solid #16a34a; }"
-                if detected
-                else ""
-            )
+            self.updateBaselineRow(index)
         if hasattr(self, "activeSlotsLabel"):
             active_text = ", ".join(f"S{index + 1:02d}" for index, active in enumerate(self.sensorActive) if active)
             self.activeSlotsLabel.setText(f"目前啟用感測器：{active_text or '無'}")
         self.syncMuscleMap()
+
+    def mappingIdentity(self, channel: int) -> str:
+        mapping = self.mappings[channel]
+        return f"{mapping.english_name.strip()}|{mapping.abbreviation.strip()}"
+
+    def updateBaselineRow(self, channel: int, current_mv: float | None = None) -> None:
+        if channel >= len(self.baselineMetricLabels):
+            return
+        slot = channel + 1
+        result = self.baselineManager.evaluate(slot, current_mv, self.mappingIdentity(channel), self.sensorSerials.get(slot, "Unknown SID"), self.currentSampleRate, self.filterSettings)
+        current = "--" if result["current_mv"] is None else f"{result['current_mv']:.3f} mV"
+        baseline = "--" if result["baseline_mv"] is None else f"{result['baseline_mv']:.3f} mV"
+        delta = "--" if result["delta_mv"] is None else f"{result['delta_mv']:+.3f} mV"
+        percent = "--" if result["percent"] is None else f"{result['percent']:+.1f}%"
+        self.baselineMetricLabels[channel].setText(f"目前 RMS：{current}\n基準：{baseline}｜差異：{delta}｜變化：{percent}")
+        self.baselineStatusLabels[channel].setText(result["text"])
+        self.baselineStatusLabels[channel].setToolTip("狀態是相對基準偏離程度，並非醫療診斷。")
+        FluentThemeManager.set_property(self.sensorRows[channel], "emgStatus", result["state"])
+
+    def startBaselineCalibration(self) -> None:
+        if self.streamWorker and self.streamWorker.isRunning():
+            QMessageBox.information(self, "基準測量", "請先停止目前的串流，再開始基準測量。")
+            return
+        if not self.useEmgCheck.isChecked() or not any(self.sensorActive):
+            QMessageBox.warning(self, "基準測量", "請先連線測試，確認至少一個 EMG 感測器啟用。")
+            return
+        protocol, accepted = QInputDialog.getText(self, "基準測量說明", "動作/姿勢/阻力/踏頻（待臨床確認）：", text=self.baselineManager.protocol)
+        if not accepted:
+            return
+        self.baselineManager.protocol = protocol.strip()
+        self.calibrationOnly = True
+        self.calibrationSession = None
+        self.startStream()
+
+    def importBaselineCsv(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "匯入原始 EMG 基準 CSV", self.defaultOutputDirectory(), "CSV files (*.csv)"
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        try:
+            _, columns, sample_rate = load_raw_emg_csv(path)
+            normalized = {name.strip().casefold(): name for name in columns}
+            channel_columns: list[tuple[int, str]] = []
+            for index, mapping in enumerate(self.mappings):
+                english = mapping.english_name.strip()
+                candidates = (f"S{mapping.slot:02d}_{english}", english, mapping.abbreviation.strip())
+                header = next((normalized[candidate.casefold()] for candidate in candidates if candidate and candidate.casefold() in normalized), None)
+                if header is not None:
+                    channel_columns.append((index, header))
+            if not channel_columns:
+                raise ValueError("CSV 欄位沒有符合目前肌肉對應的 EMG 名稱。")
+            frames = np.column_stack([columns[header] for _, header in channel_columns])
+            filtered = EMGPreprocessor(len(channel_columns), sample_rate, self.filterSettings).process(frames)
+            session = CalibrationSession(sample_rate, set(range(len(channel_columns))))
+            session.add(filtered)
+            if not session.complete:
+                raise ValueError("CSV 的前 20 秒資料不足。")
+            imported, invalid = [], []
+            for compact_channel, (channel, _header) in enumerate(channel_columns):
+                rms_mv = session.rms_mv(compact_channel)
+                if rms_mv is None or rms_mv <= 1e-9:
+                    invalid.append(f"S{channel + 1:02d}")
+                    continue
+                self.baselineManager.set_imported(channel + 1, rms_mv, self.mappingIdentity(channel), sample_rate, self.filterSettings, path.name)
+                imported.append(f"S{channel + 1:02d}")
+            if not imported:
+                raise ValueError("CSV 沒有可建立的有效基準。")
+            self.baselineManager.save()
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "匯入基準 CSV 失敗", str(exc))
+            return
+        self.currentSampleRate = sample_rate
+        self.calibrationLabel.setText(f"已匯入 {path.name}：{', '.join(imported)}" + (f"；無效：{', '.join(invalid)}" if invalid else ""))
+        self.updateSensorRows()
+        QMessageBox.information(self, "基準 CSV 已匯入", "已用前 20 秒資料（捨棄前 10 秒）建立基準；數值已顯示在各肌肉列。")
+
+    def editManualBaseline(self) -> None:
+        choices = [f"S{index + 1:02d} {mapping.abbreviation or mapping.english_name}" for index, mapping in enumerate(self.mappings)]
+        choice, accepted = QInputDialog.getItem(self, "手動修改基準", "肌肉/通道：", choices, 0, False)
+        if not accepted:
+            return
+        channel = choices.index(choice)
+        previous = self.baselineManager.records.get(channel + 1)
+        value, accepted = QInputDialog.getDouble(self, "手動修改基準", "RMS (mV)：", previous.rms_mv if previous else 0.1, 0.000001, 10000, 6)
+        if not accepted:
+            return
+        reason, accepted = QInputDialog.getText(self, "手動修改基準", "修改原因：")
+        if not accepted:
+            return
+        try:
+            self.baselineManager.set_manual(channel + 1, value, self.mappingIdentity(channel), self.sensorSerials.get(channel + 1, "Unknown SID"), self.currentSampleRate, self.filterSettings, reason.strip())
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "無法保存基準", str(exc))
+            return
+        self.updateBaselineRow(channel)
+
+    def editThresholds(self) -> None:
+        warning, accepted = QInputDialog.getDouble(self, "研究用判定門檻", "警告偏離百分比：", self.baselineManager.warning_percent, 0.1, 1000, 1)
+        if not accepted:
+            return
+        focus, accepted = QInputDialog.getDouble(self, "研究用判定門檻", "重點察看偏離百分比：", self.baselineManager.focus_percent, warning + 0.1, 1000, 1)
+        if accepted:
+            self.baselineManager.warning_percent, self.baselineManager.focus_percent = warning, focus
+            self.baselineManager.save()
+
+    def editFilterSettings(self) -> None:
+        highpass, accepted = QInputDialog.getDouble(self, "EMG 濾波設定", "高通截止頻率 (Hz)：", self.filterSettings.highpass_hz, 0.1, 1000, 1)
+        if not accepted:
+            return
+        lowpass, accepted = QInputDialog.getDouble(self, "EMG 濾波設定", "低通截止頻率 (Hz)：", self.filterSettings.lowpass_hz, highpass + 0.1, 10000, 1)
+        if not accepted:
+            return
+        try:
+            settings = FilterSettings(highpass, lowpass)
+            settings.validate(self.currentSampleRate)
+        except ValueError as exc:
+            QMessageBox.warning(self, "濾波設定無效", str(exc))
+            return
+        self.filterSettings = settings
+        self.baselineManager.filter_settings = {"highpass_hz": highpass, "lowpass_hz": lowpass, "notch_hz": None}
+        self.baselineManager.save()
+        self.updateSensorRows()
+
+    def setThresholdsEnabled(self, enabled: bool) -> None:
+        self.baselineManager.thresholds_enabled = enabled
+        self.baselineManager.save()
+        self.updateSensorRows()
 
     def applyStyles(self) -> None:
         FluentThemeManager(QApplication.instance()).apply()
@@ -1158,6 +1356,7 @@ class TrignoWindow(QMainWindow):
     def setStreaming(self, streaming: bool) -> None:
         testing = self.testWorker is not None
         self.startButton.setEnabled(not streaming and not testing)
+        self.calibrateButton.setEnabled(not streaming and not testing)
         self.stopButton.setEnabled(streaming)
         self.hostEdit.setEnabled(not streaming and not testing)
         self.testButton.setEnabled(not streaming and not testing)
@@ -1218,8 +1417,13 @@ class TrignoWindow(QMainWindow):
         self.updateSensorRows()
         for index, check in enumerate(self.sensorChecks):
             check.setChecked(self.sensorActive[index])
+        if self.calibrationOnly and self.preprocessor is not None and self.calibrationSession is None:
+            self.calibrationSession = CalibrationSession(self.currentSampleRate, {index for index, enabled in enumerate(self.sensorActive) if enabled})
 
     def startStream(self) -> None:
+        if self.calibrationOnly:
+            self.startCalibrationStream()
+            return
         if not any((self.useEmgCheck.isChecked(), self.useTrainerCheck.isChecked(), self.usePedalCheck.isChecked())):
             QMessageBox.warning(self, "尚未選擇設備", "請在第一頁至少勾選一個本次要測試的設備。")
             self.tabs.setCurrentWidget(self.settingsTab)
@@ -1285,6 +1489,59 @@ class TrignoWindow(QMainWindow):
         self.setStreaming(True)
         self.streamWorker.start()
 
+    def startCalibrationStream(self) -> None:
+        host = self.hostEdit.text().strip()
+        if not host:
+            QMessageBox.warning(self, "基準測量", "請輸入 Trigno SDK Server IP。")
+            self.calibrationOnly = False
+            return
+        self.collectionError = None
+        self.collectionSummary = None
+        self.calibrationRecording = self.trainerIsConnected or self.pedalIsConnected
+        output = None
+        self.trainerRecorder = None
+        self.pedalRecorder = None
+        self.infoRecorder = None
+        self.trainerOutput = None
+        self.pedalOutput = None
+        if self.calibrationRecording:
+            if not self.collectionSetupIsValid():
+                self.calibrationOnly = False
+                return
+            directory_text = self.pathEdit.text().strip()
+            directory = Path(directory_text).expanduser()
+            if not directory_text or (directory.exists() and not directory.is_dir()):
+                QMessageBox.warning(self, "基準測量", "請選擇有效的 CSV 輸出資料夾。")
+                self.calibrationOnly = False
+                return
+            output = self.outputPathForCollection(directory)
+            self.collectionOutput = output
+            self.collectionSubject = self.subjectInfo()
+            self.trainerOutput = trainerOutputPath(output) if self.trainerIsConnected else None
+            self.pedalOutput = pedalOutputPath(output) if self.pedalIsConnected else None
+            self.infoOutput = infoOutputPath(output)
+            self.infoRecorder = CollectionInfoRecorder(self.infoOutput, self.collectionSubject, output, self.trainerOutput)
+            try:
+                self.infoRecorder.start()
+            except OSError as exc:
+                self.infoRecorder = None
+                self.calibrationOnly = False
+                QMessageBox.critical(self, "基準測量", str(exc))
+                return
+        self.preprocessor = None
+        self.rmsExtractor = None
+        self.streamWorker = StreamWorker(host, output, self.mappings)
+        self.streamWorker.status_changed.connect(self.streamStatusChanged)
+        self.streamWorker.sensor_states_ready.connect(self.updateSensorStates)
+        self.streamWorker.sample_rate_ready.connect(self.emgRateReady)
+        self.streamWorker.frames_ready.connect(self.framesReceived)
+        self.streamWorker.collection_completed.connect(self.collectionCompleted)
+        self.streamWorker.failed.connect(self.streamFailed)
+        self.streamWorker.finished.connect(self.streamFinished)
+        self.calibrationLabel.setText("基準測量：0 / 20 秒（前 10 秒捨棄，後 10 秒計算 RMS）")
+        self.setStreaming(True)
+        self.streamWorker.start()
+
     def startBikeOnlySession(self) -> None:
         """Record selected trainer/pedal data without starting the EMG SDK."""
         if not self.collectionSetupIsValid():
@@ -1343,10 +1600,11 @@ class TrignoWindow(QMainWindow):
 
     def streamStatusChanged(self, text: str) -> None:
         self.setEmgStatus(text, "streaming" if text == "串流中" else "working")
-        if text == "串流中":
+        if text == "串流中" and (not self.calibrationOnly or self.calibrationRecording):
             self.beginTrainerRecording()
             self.beginPedalRecording()
-            self.startCountdown()
+            if not self.calibrationOnly:
+                self.startCountdown()
 
     def beginTrainerRecording(self) -> None:
         self.beginCollectionDistance()
@@ -1434,6 +1692,18 @@ class TrignoWindow(QMainWindow):
         )
         self.infoRecorder.append("EMG 資料", lines)
 
+        baseline_lines = [
+            "feature=filtered_rms_entire_final_10_seconds; live_window=200 ms",
+            f"filter=high-pass {self.filterSettings.highpass_hz:g} Hz, low-pass {self.filterSettings.lowpass_hz:g} Hz",
+            f"research_thresholds={'enabled' if self.baselineManager.thresholds_enabled else 'disabled'}; warning=±{self.baselineManager.warning_percent:g}%; focus=±{self.baselineManager.focus_percent:g}%",
+            "Clinical interpretation and thresholds require clinician confirmation.",
+        ]
+        for channel in metadata["channels"]:
+            record = self.baselineManager.records.get(channel["slot"])
+            if record:
+                baseline_lines.append(f"S{channel['slot']:02d}: {record.rms_mv:.6f} mV; {record.method}; {record.source}; {record.timestamp}")
+        self.infoRecorder.append("EMG baseline comparison", baseline_lines)
+
     def configuredDurationSeconds(self) -> int:
         return self.durationMinutesSpin.value() * 60 + self.durationSecondsSpin.value()
 
@@ -1476,13 +1746,52 @@ class TrignoWindow(QMainWindow):
             return
         for channel in activeChannels:
             self.histories[channel].extend(frames[:, channel].tolist())
+        if self.preprocessor is not None and self.rmsExtractor is not None:
+            filtered = self.preprocessor.process(frames)
+            if self.calibrationSession is not None:
+                self.calibrationSession.add(filtered)
+                self.calibrationLabel.setText(f"基準測量：{self.calibrationSession.progress_seconds:.1f} / 20 秒（前 10 秒捨棄）")
+                if self.calibrationSession.complete:
+                    self.finishBaselineCalibration()
+            else:
+                for channel, current in self.rmsExtractor.add(filtered).items():
+                    if channel in activeChannels:
+                        self.updateBaselineRow(channel, current)
         self.sampleLabel.setText(f"{len(self.histories[activeChannels[0]]):,} samples in view")
 
     def emgRateReady(self, sampleRate: float, samplesPerFrame: int, frameInterval: float) -> None:
         self.currentSampleRate = sampleRate
+        try:
+            self.preprocessor = EMGPreprocessor(CHANNEL_COUNT, sampleRate, self.filterSettings)
+            self.rmsExtractor = RMSFeatureExtractor(CHANNEL_COUNT, sampleRate)
+        except ValueError as exc:
+            self.preprocessor = None
+            self.rmsExtractor = None
+            self.calibrationLabel.setText(f"RMS 未啟用：{exc}")
         self.emgRateLabel.setText(
             f"EMG SDK 頻率：{sampleRate:.3f} Hz · {samplesPerFrame} samples/frame"
         )
+
+    def finishBaselineCalibration(self) -> None:
+        session = self.calibrationSession
+        if session is None:
+            return
+        saved, invalid = [], []
+        for channel in session.channels:
+            rms = session.rms_mv(channel)
+            if rms is None or rms <= 1e-9:
+                invalid.append(f"S{channel + 1:02d}")
+                continue
+            self.baselineManager.set_measured(channel + 1, rms, self.mappingIdentity(channel), self.sensorSerials.get(channel + 1, "Unknown SID"), self.currentSampleRate, self.filterSettings)
+            saved.append(f"S{channel + 1:02d}")
+        try:
+            self.baselineManager.save()
+        except OSError as exc:
+            QMessageBox.warning(self, "無法保存基準", str(exc))
+        self.calibrationLabel.setText(f"基準完成：{', '.join(saved) or '無有效通道'}" + (f"；無效：{', '.join(invalid)}" if invalid else ""))
+        self.calibrationSession = None
+        self.updateSensorRows()
+        self.stopStream()
 
     def collectionCompleted(self, samples: int, elapsed: float, sampleRate: float) -> None:
         self.collectionSummary = (samples, elapsed, sampleRate)
@@ -1512,6 +1821,12 @@ class TrignoWindow(QMainWindow):
         self.closeTrainerRecording()
         self.closePedalRecording()
         self.setStreaming(False)
+        if self.calibrationOnly:
+            self.calibrationOnly = False
+            self.calibrationRecording = False
+            if self.collectionError:
+                self.calibrationLabel.setText("基準測量失敗；既有基準未變更")
+            return
         if self.collectionError:
             return
         if self.collectionSummary:
