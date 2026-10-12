@@ -22,8 +22,8 @@ module-name = "delsys"
 
 [project.scripts]
 emg-cycling = "delsys.gui:main"
-emg-record = "delsys.cli:main"
-delsys = "delsys.cli:main"
+emg-record = "delsys.emg_cli:main"
+delsys = "delsys.emg_cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.9,<0.13.0"]
