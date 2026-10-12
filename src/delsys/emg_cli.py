@@ -7,7 +7,6 @@ from delsys.emg.sensor_mapping import csvColumnNames, loadProjectMappings
 from delsys.emg.trigno import CHANNEL_COUNT, TrignoClient, TrignoError
 
 def configure_console_encoding() -> None:
-    """Keep Traditional Chinese status text readable in Windows terminals."""
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure:

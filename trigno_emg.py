@@ -1,4 +1,4 @@
-from delsys.cli import main
+from delsys.emg_cli import main
 
 __all__ = ["main"]
 

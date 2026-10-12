@@ -18,3 +18,5 @@ recordings/
 
 # Virtual environments
 .venv
+.agents/
+pyside6-fluent-ui/

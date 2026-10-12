@@ -8,7 +8,7 @@ dependencies = [
     "bleak>=0.22",
     "fit-tool>=0.9.16",
     "numpy>=1.26",
-    "PyQt5>=5.15",
+    "PySide6>=6.8",
     "pyqtgraph>=0.13",
 ]
 
@@ -22,8 +22,8 @@ module-name = "delsys"
 
 [project.scripts]
 emg-cycling = "delsys.gui:main"
-emg-record = "delsys.cli:main"
-delsys = "delsys.cli:main"
+emg-record = "delsys.emg_cli:main"
+delsys = "delsys.emg_cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.9,<0.13.0"]

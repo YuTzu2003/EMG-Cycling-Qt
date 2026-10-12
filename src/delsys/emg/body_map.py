@@ -1,9 +1,10 @@
 from __future__ import annotations
 from collections.abc import Callable
-from PyQt5.QtCore import QByteArray, QRectF, Qt, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QTransform
-from PyQt5.QtSvg import QGraphicsSvgItem, QSvgRenderer
-from PyQt5.QtWidgets import (QButtonGroup,QFrame,QGraphicsPathItem,QGraphicsScene,QGraphicsView,QHBoxLayout,QLabel,QPushButton,QVBoxLayout,QWidget,)
+from PySide6.QtCore import QByteArray, QRectF, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QTransform
+from PySide6.QtSvgWidgets import QGraphicsSvgItem
+from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtWidgets import (QButtonGroup,QFrame,QGraphicsPathItem,QGraphicsScene,QGraphicsView,QHBoxLayout,QLabel,QPushButton,QVBoxLayout,QWidget,)
 from delsys.emg.anatomy_svg_data import ANATOMY_SVG
 from delsys.emg.sensor_mapping import SensorMapping
 
@@ -174,7 +175,7 @@ class BodyGraphicsView(QGraphicsView):
 
 
 class BodyMapPanel(QFrame):
-    slotToggled = pyqtSignal(int)
+    slotToggled = Signal(int)
 
     def __init__(self, colors: tuple[str, ...], parent: QWidget | None = None) -> None:
         super().__init__(parent, objectName="panel")
@@ -237,7 +238,8 @@ class BodyMapPanel(QFrame):
     def rebuildScene(self) -> None:
         previous = self.view.scene()
         scene = QGraphicsScene(self)
-        scene.setSceneRect(-2, -5, 122, 248)
+        # Reserve space above the anatomy diagram for the L/R orientation labels.
+        scene.setSceneRect(-2, -22, 122, 265)
         mapped = {
             region: mapping
             for mapping in self.mappings
@@ -355,6 +357,6 @@ class BodyMapPanel(QFrame):
             font.setPointSizeF(5.5)
             font.setBold(True)
             label.setFont(font)
-            label.setPos(x, BODY_RECT.bottom() + 1)
+            label.setPos(x, BODY_RECT.top() - 16)
             label.setAcceptedMouseButtons(Qt.NoButton)
             label.setZValue(32)

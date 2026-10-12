@@ -5,8 +5,8 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
-from PyQt5.QtCore import QSettings, QTimer, Qt, pyqtSignal
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QSettings, QTimer, Qt, Signal
+from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,
@@ -21,13 +21,15 @@ from delsys.resistance.trainer import BikeTelemetry, NumericRange, TrainerWorker
 from delsys.pedal.recording import PedalCsvRecorder, pedalOutputPath
 from delsys.pedal.worker import PedalWorker
 from delsys.pedal.fit_export import exportPedalFit
+from delsys.cycling_bluetooth import CyclingDeviceScanWorker
+from delsys.fluent_theme import FluentThemeManager
 
 COLORS = ("#1684d7", "#e95f54", "#7e57c2", "#00897b", "#f39c12", "#5c6bc0", "#43a047", "#c2185b")
 MAPPING_PATH = Path(__file__).resolve().parents[2] / "sensor_mapping.json"
 
 
 class SensorLegendToggle(QWidget):
-    toggled = pyqtSignal(bool)
+    toggled = Signal(bool)
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._checked = False
@@ -107,19 +109,11 @@ class MappingEditorDialog(QDialog):
     def accept(self) -> None:
         duplicates = duplicateMappingSlots(self.mappings())
         if duplicates:
-            conflicts = "\n".join(
-                f"{muscle.title()} ({side.upper() or '?' }): "
-                + ", ".join(f"S{slot:02d}" for slot in slots)
-                for (muscle, side), slots in duplicates.items()
-            )
-            QMessageBox.warning(
-                self,
-                "重複肌肉對應",
-                "同一側的同一肌肉只能對應一個感測器：\n" + conflicts,
-            )
+            conflicts = "\n".join(f"{muscle.title()} ({side.upper() or '?' }): "+ ", ".join(f"S{slot:02d}" for slot in slots)
+                for (muscle, side), slots in duplicates.items())
+            QMessageBox.warning(self,"重複肌肉對應","同一側的同一肌肉只能對應一個感測器：\n" + conflicts,)
             return
         super().accept()
-
 
 class TrignoWindow(QMainWindow):
     def __init__(self) -> None:
@@ -132,6 +126,11 @@ class TrignoWindow(QMainWindow):
         self.trainerIsConnected = False
         self.pedalWorker = PedalWorker()
         self.pedalIsConnected = False
+        self.bluetoothScanWorker: CyclingDeviceScanWorker | None = None
+        self.trainerBluetoothReady = False
+        self.pedalBluetoothReady = False
+        self.initialBluetoothScanStarted = False
+        self.selectedScannedDevice: tuple[str, str] | None = None
         self.settings = QSettings("Delsys", "EMG Cycling Monitor")
         self.savedPedalAddress = str(self.settings.value("pedal/address", ""))
         self.pedalScanInProgress = False
@@ -166,15 +165,9 @@ class TrignoWindow(QMainWindow):
         self.connectPedalSignals()
         self.pedalWorker.start()
         self.connectionStateTimer = QTimer(self)
-        self.connectionStateTimer.setInterval(2000)
+        self.connectionStateTimer.setInterval(500)
         self.connectionStateTimer.timeout.connect(self.refreshConnectionStates)
         self.connectionStateTimer.start()
-        self.pedalAutoConnectTimer = QTimer(self)
-        self.pedalAutoConnectTimer.setInterval(8000)
-        self.pedalAutoConnectTimer.timeout.connect(self.autoConnectPedal)
-        if self.savedPedalAddress:
-            self.pedalAutoConnectTimer.start()
-            QTimer.singleShot(1000, self.autoConnectPedal)
         self.setStreaming(False)
         self.setEmgStatus("尚未連線", "idle")
         self.setTrainerConnectionState(False)
@@ -185,20 +178,21 @@ class TrignoWindow(QMainWindow):
         root = QWidget(objectName="root")
         self.setCentralWidget(root)
         outer = QVBoxLayout(root)
-        outer.setContentsMargins(20, 16, 20, 18)
-        header = QHBoxLayout()
-        header.addWidget(QLabel("EMG Cycling Monitor", objectName="title"))
-        header.addStretch()
+        outer.setContentsMargins(12, 10, 12, 12)
+        self.tabs = QTabWidget()
+        statusCorner = QWidget()
+        header = QHBoxLayout(statusCorner)
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(6)
         self.trainerConnectionLabel = QLabel(objectName="connectionIndicator")
         self.pedalConnectionLabel = QLabel(objectName="connectionIndicator")
         self.emgConnectionLabel = QLabel(objectName="connectionIndicator")
         header.addWidget(self.trainerConnectionLabel)
         header.addWidget(self.pedalConnectionLabel)
         header.addWidget(self.emgConnectionLabel)
-        outer.addLayout(header)
-        self.tabs = QTabWidget()
-        self.trainerTab = self.createTrainerTab()
+        self.tabs.setCornerWidget(statusCorner, Qt.Corner.TopRightCorner)
         self.resistanceTab = self.createResistanceTab()
+        self.trainerTab = self.createTrainerTab()
         self.collectionTab = self.createCollectionTab()
         self.settingsTab = self.createSettingsTab()
         self.startButton.setText("開始收集資料")
@@ -206,142 +200,15 @@ class TrignoWindow(QMainWindow):
         self.tabs.addTab(self.collectionTab, "收集資料")
         outer.addWidget(self.tabs, 1)
 
-    def createTrainerTab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(0, 0, 0, 0)
-        connection = QFrame(objectName="panel")
-        grid = QGridLayout(connection)
-        grid.addWidget(QLabel("藍牙裝置"), 0, 0)
-        self.trainerDevices = QComboBox()
-        self.trainerDevices.setEditable(True)
-        self.trainerDevices.setPlaceholderText("掃描後選取，或直接輸入 Bluetooth MAC 位址")
-        grid.addWidget(self.trainerDevices, 0, 1)
-        self.scanTrainerButton = QPushButton("掃描")
-        self.connectTrainerButton = QPushButton("連線", objectName="primary")
-        grid.addWidget(self.scanTrainerButton, 0, 2)
-        grid.addWidget(self.connectTrainerButton, 0, 3)
-        self.trainerStatus = QLabel("藍牙服務準備中…", objectName="status")
-        grid.addWidget(self.trainerStatus, 1, 0, 1, 4)
-        self.trainerTelemetryLabel = QLabel("即時騎乘資料：尚未連線", objectName="muted")
-        grid.addWidget(self.trainerTelemetryLabel, 2, 0, 1, 4)
-        layout.addWidget(connection)
-        # Both cycling devices are configured in one Bluetooth section. They
-        # remain separate connections because they are separate BLE peripherals.
-        layout.addWidget(self.createPedalPanel())
-
-        self.scanTrainerButton.clicked.connect(self.scanTrainer)
-        self.connectTrainerButton.clicked.connect(self.connectTrainer)
-        return tab
-
-    def createResistanceTab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setContentsMargins(0, 0, 0, 0)
-        resistance = QFrame(objectName="panel")
-        resistanceLayout = QVBoxLayout(resistance)
-        resistanceLayout.addWidget(QLabel("固定阻力", objectName="sectionTitle"))
-        self.resistanceRangeLabel = QLabel("等級 0–30；連線後依設備原生阻力範圍換算", objectName="muted")
-        resistanceLayout.addWidget(self.resistanceRangeLabel)
-        resistanceRow = QHBoxLayout()
-        self.resistanceSpin = QSpinBox()
-        self.resistanceSpin.setRange(0, 30)
-        self.resistanceSpin.setValue(0)
-        self.resistanceSpin.setSingleStep(1)
-        self.resistanceSpin.setSuffix(" / 30")
-        self.resistanceSpin.setReadOnly(True)
-        self.decreaseResistanceButton = QPushButton("− 1 級")
-        self.increaseResistanceButton = QPushButton("+ 1 級")
-        resistanceRow.addWidget(self.decreaseResistanceButton)
-        resistanceRow.addWidget(self.resistanceSpin)
-        resistanceRow.addWidget(self.increaseResistanceButton)
-        resistanceLayout.addLayout(resistanceRow)
-        self.nativeResistanceLabel = QLabel("原生阻力：0（固定模式）", objectName="muted")
-        resistanceLayout.addWidget(self.nativeResistanceLabel)
-        layout.addWidget(resistance)
-        self.resistanceStepLevels = 1
-        self.decreaseResistanceButton.clicked.connect(lambda: self.adjustFixedResistance(-1))
-        self.increaseResistanceButton.clicked.connect(lambda: self.adjustFixedResistance(1))
-        self.setTrainerControls(False)
-        return tab
-
-    def createSettingsTab(self) -> QWidget:
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        subjectSetup = QFrame(objectName="panel")
-        subjectLayout = QVBoxLayout(subjectSetup)
-        subjectLayout.addWidget(QLabel("測試者資訊", objectName="sectionTitle"))
-        subjectRow = QHBoxLayout()
-        subjectRow.setSpacing(10)
-        subjectRow.addWidget(QLabel("ID"))
-        self.patientIdEdit = QLineEdit()
-        self.patientIdEdit.setFixedWidth(180)
-        subjectRow.addWidget(self.patientIdEdit)
-        subjectRow.addWidget(QLabel("姓名"))
-        self.patientNameEdit = QLineEdit()
-        self.patientNameEdit.setFixedWidth(180)
-        subjectRow.addWidget(self.patientNameEdit)
-        subjectRow.addWidget(QLabel("性別"))
-        self.genderCombo = QComboBox()
-        self.genderCombo.addItems(("女性", "男性"))
-        self.genderCombo.setCurrentIndex(0)
-        self.genderCombo.setFixedWidth(100)
-        subjectRow.addWidget(self.genderCombo)
-        subjectRow.addStretch()
-        subjectLayout.addLayout(subjectRow)
-        layout.addWidget(subjectSetup)
-        testDevices = QFrame(objectName="panel")
-        testDevicesLayout = QHBoxLayout(testDevices)
-        testDevicesLayout.addWidget(QLabel("本次測試設備", objectName="sectionTitle"))
-        self.useEmgCheck = QCheckBox("EMG")
-        self.useTrainerCheck = QCheckBox("阻力計")
-        self.usePedalCheck = QCheckBox("踏板")
-        # Keep the existing all-device workflow as the default.
-        for check in (self.useEmgCheck, self.useTrainerCheck, self.usePedalCheck):
-            check.setChecked(True)
-            testDevicesLayout.addWidget(check)
-        testDevicesLayout.addStretch()
-        layout.addWidget(testDevices)
-        emgSetup = QFrame(objectName="panel")
-        emgLayout = QVBoxLayout(emgSetup)
-        emgLayout.addWidget(QLabel("Delsys EMG", objectName="sectionTitle"))
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Server"))
-        row.addWidget(self.hostEdit)
-        row.addWidget(self.testButton)
-        editButton = QPushButton("編輯肌肉對應")
-        editButton.clicked.connect(self.editMappings)
-        row.addWidget(editButton)
-        row.addStretch()
-        emgLayout.addLayout(row)
-        self.activeSlotsLabel = QLabel("目前啟用感測器：尚未測試連線", objectName="muted")
-        emgLayout.addWidget(self.activeSlotsLabel)
-        layout.addWidget(emgSetup)
-        layout.addWidget(self.trainerTab)
-        layout.addWidget(self.resistanceTab)
-        layout.addStretch(1)
-        eventLogPanel = QFrame(objectName="eventLogPanel")
-        eventLogLayout = QVBoxLayout(eventLogPanel)
-        eventLogLayout.setContentsMargins(10, 7, 10, 8)
-        eventLogLayout.setSpacing(2)
-        eventLogLayout.addWidget(QLabel("事件 Log", objectName="eventLogTitle"))
-        self.eventLog = QPlainTextEdit(objectName="eventLog")
-        self.eventLog.setReadOnly(True)
-        self.eventLog.setMaximumBlockCount(200)
-        self.eventLog.setFixedHeight(92)
-        eventLogLayout.addWidget(self.eventLog)
-        layout.addWidget(eventLogPanel)
-        return tab
-
     def createPedalPanel(self) -> QWidget:
         panel = QFrame(objectName="panel")
         layout = QGridLayout(panel)
-        layout.addWidget(QLabel("踏板功率計", objectName="sectionTitle"), 0, 0)
+        layout.addWidget(QLabel("踏板", objectName="sectionTitle"), 0, 0)
         self.pedalDevices = QComboBox()
         self.pedalDevices.setEditable(True)
         self.pedalDevices.setPlaceholderText("掃描所有藍牙裝置，或輸入 Bluetooth MAC 位址")
         layout.addWidget(self.pedalDevices, 0, 1)
-        self.scanPedalButton = QPushButton("掃描藍牙")
+        self.scanPedalButton = QPushButton("使用上方掃描")
         self.connectPedalButton = QPushButton("連線", objectName="primary")
         layout.addWidget(self.scanPedalButton, 0, 2)
         layout.addWidget(self.connectPedalButton, 0, 3)
@@ -349,9 +216,223 @@ class TrignoWindow(QMainWindow):
         self.pedalTelemetryLabel = QLabel("踏板資料：等待連線", objectName="muted")
         layout.addWidget(self.pedalStatus, 1, 0, 1, 4)
         layout.addWidget(self.pedalTelemetryLabel, 2, 0, 1, 4)
-        self.scanPedalButton.clicked.connect(self.scanPedal)
+        self.scanPedalButton.clicked.connect(self.scanCyclingDevices)
         self.connectPedalButton.clicked.connect(self.connectPedal)
         return panel
+
+    def createSettingsTab(self) -> QWidget:
+        tab = QWidget(objectName="settingsPage")
+        page = QVBoxLayout(tab)
+        page.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(16, 12, 16, 16)
+        layout.setSpacing(6)
+
+        heading = QFrame()
+        FluentThemeManager.set_property(heading, "fluentRole", "surface")
+        headingLayout = QVBoxLayout(heading)
+        headingLayout.setContentsMargins(20, 18, 20, 18)
+        title = QLabel("測試設定", objectName="title")
+        subtitle = QLabel("先設定受試者與本次設備，再掃描並連線騎乘裝置。", objectName="muted")
+        headingLayout.addWidget(title)
+        headingLayout.addWidget(subtitle)
+        heading.setParent(None)
+        heading.deleteLater()
+
+        subject = QFrame()
+        FluentThemeManager.set_property(subject, "fluentRole", "surface")
+        subjectLayout = QGridLayout(subject)
+        subjectLayout.setContentsMargins(14, 12, 14, 12)
+        subjectLayout.setHorizontalSpacing(12)
+        subjectLayout.setVerticalSpacing(10)
+        subjectLayout.addWidget(QLabel("受試者資料", objectName="sectionTitle"), 0, 0, 1, 6)
+        self.patientIdEdit = QLineEdit()
+        self.patientIdEdit.setPlaceholderText("必填")
+        self.patientNameEdit = QLineEdit()
+        self.patientNameEdit.setPlaceholderText("必填")
+        self.genderCombo = QComboBox()
+        self.genderCombo.addItems(("未指定", "男性", "女性"))
+        subjectLayout.addWidget(QLabel("ID"), 1, 0)
+        subjectLayout.addWidget(self.patientIdEdit, 1, 1)
+        subjectLayout.addWidget(QLabel("姓名"), 1, 2)
+        subjectLayout.addWidget(self.patientNameEdit, 1, 3)
+        subjectLayout.addWidget(QLabel("性別"), 1, 4)
+        subjectLayout.addWidget(self.genderCombo, 1, 5)
+        self.patientIdEdit.setFixedWidth(160)
+        self.patientNameEdit.setFixedWidth(180)
+        self.genderCombo.setFixedWidth(100)
+        subjectLayout.setColumnStretch(6, 1)
+        layout.addWidget(subject)
+
+        devices = QFrame()
+        FluentThemeManager.set_property(devices, "fluentRole", "surface")
+        devicesLayout = QVBoxLayout(devices)
+        devicesLayout.setContentsMargins(14, 12, 14, 12)
+        deviceHeader = QHBoxLayout()
+        deviceHeader.setAlignment(Qt.AlignLeft)
+        deviceHeader.addWidget(QLabel("本次設備", objectName="sectionTitle"))
+        checks = QHBoxLayout()
+        checks.setSpacing(18)
+        self.useEmgCheck = QCheckBox("EMG")
+        self.useTrainerCheck = QCheckBox("阻力計")
+        self.usePedalCheck = QCheckBox("踏板")
+        for check in (self.useEmgCheck, self.useTrainerCheck, self.usePedalCheck):
+            check.setChecked(True)
+            checks.addWidget(check)
+        deviceHeader.addSpacing(28)
+        deviceHeader.addLayout(checks)
+        devicesLayout.addLayout(deviceHeader)
+        layout.addWidget(devices)
+
+        bluetooth = QFrame()
+        FluentThemeManager.set_property(bluetooth, "fluentRole", "surface")
+        bluetoothLayout = QVBoxLayout(bluetooth)
+        bluetoothLayout.setContentsMargins(14, 12, 14, 12)
+        bluetoothLayout.setSpacing(8)
+        bluetoothHeader = QHBoxLayout()
+        bluetoothHeader.addWidget(QLabel("騎乘裝置藍牙", objectName="sectionTitle"))
+        bluetoothHeader.addStretch()
+        bluetoothHeader.itemAt(0).widget().setText("裝置連線")
+        self.scanTrainerButton.setText("掃描所有藍牙裝置")
+        FluentThemeManager.set_property(self.scanTrainerButton, "fluentAppearance", "primary")
+        self.scanTrainerButton.setText("重新掃描")
+        bluetoothHeader.addWidget(self.scanTrainerButton)
+        bluetoothLayout.addLayout(bluetoothHeader)
+        bluetoothLayout.addWidget(self.trainerTab)
+        assignmentRow = QHBoxLayout()
+        assignmentRow.setSpacing(8)
+        assignmentRow.addWidget(QLabel("已選擇裝置："))
+        self.selectedScannedDeviceLabel = QLabel("尚未選擇", objectName="muted")
+        self.selectedScannedDeviceLabel.setFixedWidth(310)
+        assignmentRow.addWidget(self.selectedScannedDeviceLabel)
+        self.assignTrainerButton = QPushButton("設定為阻力計")
+        self.assignPedalButton = QPushButton("設定為踏板")
+        self.assignTrainerButton.setEnabled(False)
+        self.assignPedalButton.setEnabled(False)
+        FluentThemeManager.set_property(self.assignTrainerButton, "fluentAppearance", "dark")
+        FluentThemeManager.set_property(self.assignPedalButton, "fluentAppearance", "dark")
+        assignmentRow.addWidget(self.assignTrainerButton)
+        assignmentRow.addWidget(self.assignPedalButton)
+        assignmentRow.addStretch()
+        bluetoothLayout.addLayout(assignmentRow)
+        assignmentRow.itemAt(0).widget().hide()
+        self.assignTrainerButton.clicked.connect(lambda: self.assignSelectedScannedDevice("阻力計"))
+        self.assignPedalButton.clicked.connect(lambda: self.assignSelectedScannedDevice("踏板"))
+
+        emg = QFrame()
+        FluentThemeManager.set_property(emg, "fluentRole", "surface")
+        emgLayout = QGridLayout(emg)
+        emgLayout.setContentsMargins(14, 12, 14, 12)
+        emgLayout.setHorizontalSpacing(12)
+        emgLayout.setVerticalSpacing(10)
+        emgLayout.addWidget(QLabel("EMG 連線", objectName="sectionTitle"), 0, 0, 1, 4)
+        emgLayout.addWidget(QLabel("Server"), 1, 0)
+        emgLayout.addWidget(self.hostEdit, 1, 1)
+        self.testButton.setText("測試 EMG 連線")
+        FluentThemeManager.set_property(self.testButton, "fluentAppearance", "dark")
+        self.testButton.setFixedWidth(180)
+        emgLayout.addWidget(self.testButton, 1, 2)
+        mappingButton = QPushButton("設定感測器對應")
+        mappingButton.setAccessibleName("設定感測器對應")
+        mappingButton.setFixedWidth(180)
+        mappingButton.clicked.connect(self.editMappings)
+        emgLayout.addWidget(mappingButton, 1, 3)
+        emgLayout.setColumnStretch(4, 1)
+        self.activeSlotsLabel = QLabel("尚未取得 EMG 感測器狀態", objectName="muted")
+        self.activeSlotsLabel.setWordWrap(True)
+        emgLayout.addWidget(self.activeSlotsLabel, 2, 0, 1, 4)
+        layout.addWidget(emg)
+        layout.addWidget(bluetooth)
+
+        scanResults = QFrame()
+        FluentThemeManager.set_property(scanResults, "fluentRole", "scanResults")
+        scanResultsLayout = QVBoxLayout(scanResults)
+        scanResultsLayout.setContentsMargins(14, 10, 14, 10)
+        scanResultsLayout.setSpacing(5)
+        scanResultsLayout.addWidget(QLabel("掃描到的裝置", objectName="sectionTitle"))
+        scanResultsLayout.addWidget(QLabel("為每個裝置選擇用途，指定後會套用至上方連線選單。", objectName="muted"))
+        scanResultsLayout.itemAt(0).widget().hide()
+        scanResultsLayout.itemAt(1).widget().hide()
+        scanResultsHeader = QHBoxLayout()
+        scanResultsHeader.addWidget(QLabel("掃描到的裝置", objectName="sectionTitle"))
+        scanResultsHeader.addWidget(self.selectedScannedDeviceLabel)
+        scanResultsHeader.addStretch()
+        FluentThemeManager.set_property(self.assignTrainerButton, "fluentAppearance", "success")
+        FluentThemeManager.set_property(self.assignPedalButton, "fluentAppearance", "warning")
+        scanResultsHeader.addWidget(self.assignTrainerButton)
+        scanResultsHeader.addWidget(self.assignPedalButton)
+        scanResultsHeader.addWidget(self.scanTrainerButton)
+        scanResultsLayout.addLayout(scanResultsHeader)
+        self.scanResultsScroll = QScrollArea()
+        self.scanResultsScroll.setWidgetResizable(True)
+        self.scanResultsScroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scanResultsScroll.setFixedHeight(180)
+        scanResultsContent = QWidget()
+        self.scanResultsLayout = QVBoxLayout(scanResultsContent)
+        self.scanResultsLayout.setContentsMargins(0, 0, 0, 0)
+        self.scanResultsLayout.setSpacing(3)
+        self.scanResultsLayout.addStretch()
+        self.scanResultsScroll.setWidget(scanResultsContent)
+        scanResultsLayout.addWidget(self.scanResultsScroll)
+        layout.addWidget(scanResults)
+
+        resistance = QFrame()
+        FluentThemeManager.set_property(resistance, "fluentRole", "surface")
+        resistanceLayout = QVBoxLayout(resistance)
+        resistanceLayout.setContentsMargins(14, 12, 14, 12)
+        resistanceLayout.addWidget(QLabel("阻力控制", objectName="sectionTitle"))
+
+        eventLogPanel = QFrame(objectName="eventLogPanel")
+        FluentThemeManager.set_property(eventLogPanel, "fluentRole", "surface")
+        eventLogPanel.setFixedHeight(110)
+        eventLayout = QVBoxLayout(eventLogPanel)
+        eventLayout.setContentsMargins(10, 4, 10, 4)
+        eventLayout.addWidget(QLabel("事件紀錄", objectName="sectionTitle"))
+        self.eventLog = QPlainTextEdit(objectName="eventLog")
+        self.eventLog.setReadOnly(True)
+        self.eventLog.setMaximumBlockCount(200)
+        self.eventLog.setPlaceholderText("連線與收集事件會顯示在這裡。")
+        self.eventLog.setFixedHeight(78)
+        eventLayout.addWidget(self.eventLog)
+        layout.addStretch()
+        scroll.setWidget(content)
+        page.addWidget(scroll, 1)
+        page.addWidget(eventLogPanel, 0)
+        return tab
+
+    def createResistanceTab(self) -> QWidget:
+        tab = QWidget()
+        layout = QHBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self.resistanceRangeLabel = QLabel("連線阻力計後，可在此手動調整阻力。",objectName="muted",)
+        self.resistanceRangeLabel.hide()
+        self.decreaseResistanceButton = QPushButton("降低")
+        self.decreaseResistanceButton.setAccessibleName("降低阻力")
+        self.resistanceSpin = QSpinBox()
+        self.resistanceSpin.setRange(0, 30)
+        self.resistanceSpin.setValue(0)
+        self.resistanceSpin.setSingleStep(1)
+        self.resistanceSpin.setSuffix(" / 30")
+        self.resistanceSpin.setReadOnly(True)
+        self.resistanceSpin.setAccessibleName("阻力等級")
+        self.increaseResistanceButton = QPushButton("提高")
+        self.increaseResistanceButton.setAccessibleName("提高阻力")
+        layout.addWidget(self.decreaseResistanceButton)
+        layout.addWidget(self.resistanceSpin)
+        layout.addWidget(self.increaseResistanceButton)
+        self.nativeResistanceLabel = QLabel("阻力計狀態：尚未連線", objectName="muted")
+        self.nativeResistanceLabel.hide()
+        self.resistanceStepLevels = 1
+        self.decreaseResistanceButton.clicked.connect(lambda: self.adjustFixedResistance(-1))
+        self.increaseResistanceButton.clicked.connect(lambda: self.adjustFixedResistance(1))
+        self.decreaseResistanceButton.setEnabled(False)
+        self.increaseResistanceButton.setEnabled(False)
+        return tab
 
     def createCollectionTab(self) -> QWidget:
         tab = QWidget()
@@ -362,9 +443,7 @@ class TrignoWindow(QMainWindow):
         statusRow.addWidget(self.emgStatus)
         statusRow.addWidget(self.baseLabel)
         statusRow.addStretch()
-        self.emgRateLabel = QLabel(
-            "EMG 頻率：等待 SDK 查詢", objectName="muted"
-        )
+        self.emgRateLabel = QLabel("EMG 頻率：等待 SDK 查詢", objectName="muted" )
         statusRow.addWidget(self.emgRateLabel)
         self.emgStatus.hide()
         self.baseLabel.hide()
@@ -372,6 +451,8 @@ class TrignoWindow(QMainWindow):
         self.hostEdit = QLineEdit("127.0.0.1")
         self.hostEdit.setMaximumWidth(200)
         self.testButton, self.startButton, self.stopButton = QPushButton("測試連線"), QPushButton("開始串流", objectName="record"), QPushButton("停止")
+        FluentThemeManager.set_property(self.startButton, "fluentAppearance", "success")
+        FluentThemeManager.set_property(self.stopButton, "fluentAppearance", "danger")
         for widget in (self.hostEdit, self.testButton, self.startButton, self.stopButton):
             controls.addWidget(widget)
         controls.addSpacing(10)
@@ -494,9 +575,7 @@ class TrignoWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet(
-            "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: 0; }"
-        )
+        scroll.setStyleSheet("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: 0; }")
         content = QWidget()
         content.setStyleSheet("background: transparent;")
         items = QVBoxLayout(content)
@@ -537,12 +616,8 @@ class TrignoWindow(QMainWindow):
     def syncMuscleMap(self) -> None:
         if not hasattr(self, "bodyMap"):
             return
-        selected = {
-            index + 1 for index, check in enumerate(self.sensorChecks) if check.isChecked()
-        }
-        active = {
-            index + 1 for index, isActive in enumerate(self.sensorActive) if isActive
-        }
+        selected = {index + 1 for index, check in enumerate(self.sensorChecks) if check.isChecked()}
+        active = {index + 1 for index, isActive in enumerate(self.sensorActive) if isActive}
         self.bodyMap.setMappings(self.mappings, selected, active)
 
     def connectTrainerSignals(self) -> None:
@@ -563,30 +638,105 @@ class TrignoWindow(QMainWindow):
         self.pedalWorker.dataReceived.connect(self.updatePedalTelemetry)
         self.pedalWorker.failed.connect(self.pedalFailed)
 
-    def pedalReady(self) -> None:
-        """Run the same initial Bluetooth discovery as the trainer."""
-        self.scanPedal()
+    def createTrainerTab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(7)
+        trainerRow = QHBoxLayout()
+        trainerRow.setSpacing(8)
+        trainerTitle = QLabel("阻力計", objectName="sectionTitle")
+        trainerTitle.setFixedWidth(86)
+        trainerRow.addWidget(trainerTitle)
+        self.trainerDevices = QComboBox()
+        self.trainerDevices.setEditable(True)
+        self.trainerDevices.setFixedWidth(280)
+        self.trainerDevices.setPlaceholderText("選擇阻力計")
+        trainerRow.addWidget(self.trainerDevices)
+        self.connectTrainerButton = QPushButton("連線")
+        self.connectTrainerButton.setFixedWidth(100)
+        FluentThemeManager.set_property(self.connectTrainerButton, "fluentAppearance", "dark")
+        trainerRow.addWidget(self.connectTrainerButton)
+        self.trainerTelemetryLabel = QLabel("阻力計即時騎乘資料：--", objectName="muted")
+        trainerRow.addWidget(self.trainerTelemetryLabel)
+        trainerRow.addStretch()
+        self.resistanceTab.show()
+        trainerRow.addWidget(self.resistanceTab)
+        layout.addLayout(trainerRow)
+        pedalRow = QHBoxLayout()
+        pedalRow.setSpacing(8)
+        pedalTitle = QLabel("踏板功率計", objectName="sectionTitle")
+        pedalTitle.setFixedWidth(86)
+        pedalRow.addWidget(pedalTitle)
+        self.pedalDevices = QComboBox()
+        self.pedalDevices.setEditable(True)
+        self.pedalDevices.setFixedWidth(280)
+        self.pedalDevices.setPlaceholderText("選擇主踏板")
+        pedalRow.addWidget(self.pedalDevices)
+        self.connectPedalButton = QPushButton("連線")
+        self.connectPedalButton.setFixedWidth(100)
+        FluentThemeManager.set_property(self.connectPedalButton, "fluentAppearance", "dark")
+        pedalRow.addWidget(self.connectPedalButton)
+        self.pedalTelemetryLabel = QLabel("踏板即時功率資料：--", objectName="muted")
+        pedalRow.addWidget(self.pedalTelemetryLabel)
+        pedalRow.addStretch()
+        layout.addLayout(pedalRow)
+        self.trainerStatus = QLabel()
+        self.trainerStatus.hide()
+        self.pedalStatus = QLabel()
+        self.pedalStatus.hide()
+        self.scanTrainerButton = QPushButton("重新掃描")
+        self.scanPedalButton = self.scanTrainerButton
+        FluentThemeManager.set_property(self.scanTrainerButton, "fluentAppearance", "primary")
+        self.scanTrainerButton.clicked.connect(self.scanCyclingDevices)
+        self.connectTrainerButton.clicked.connect(self.connectTrainer)
+        self.connectPedalButton.clicked.connect(self.connectPedal)
+        self.setTrainerControls(False)
+        return tab
+
+    def startInitialBluetoothScan(self) -> None:
+        if (self.initialBluetoothScanStarted or not self.trainerBluetoothReady or not self.pedalBluetoothReady):
+            return
+        self.initialBluetoothScanStarted = True
+        self.scanCyclingDevices()
 
     def scanPedal(self) -> None:
-        if self.pedalScanInProgress:
-            return
-        self.pedalScanInProgress = True
-        self.setPedalStatus("正在掃描藍牙裝置…", "working")
-        self.scanPedalButton.setEnabled(False)
-        self.pedalWorker.scan()
-        QTimer.singleShot(7000, self.finishPedalScan)
+        self.scanCyclingDevices()
+
+    def assignScannedDevice(self, address: str, name: str, role: str) -> None:
+        label = f"{name or 'Unknown device'} · {address}"
+        if role == "阻力計":
+            self.trainerDevices.clear()
+            self.trainerDevices.addItem(label, address)
+            self.trainerDevices.setCurrentIndex(0)
+            self.appendLog(f"Device assignment | trainer: {label}")
+        elif role == "踏板":
+            if name.strip().upper().endswith(" R"):
+                self.appendLog(f"Device assignment skipped | right pedal: {label}")
+                return
+            self.pedalDevices.clear()
+            self.pedalDevices.addItem(label, address)
+            self.pedalDevices.setCurrentIndex(0)
+            self.appendLog(f"Device assignment | pedal: {label}")
+
+    def cyclingScanFailed(self, message: str) -> None:
+        self.setTrainerStatus(f"藍牙掃描失敗：{message}", "error")
+        self.setPedalStatus(f"藍牙掃描失敗：{message}", "error")
+
+    def finishCyclingScan(self) -> None:
+        self.pedalScanInProgress = False
+        self.scanTrainerButton.setEnabled(True)
+        self.scanPedalButton.setEnabled(True)
 
     def finishPedalScan(self) -> None:
         self.pedalScanInProgress = False
         self.scanPedalButton.setEnabled(True)
 
     def autoConnectPedal(self) -> None:
-        """Reconnect silently once a remembered pedal wakes and advertises."""
-        if not self.pedalIsConnected and self.savedPedalAddress and not self.pedalScanInProgress:
-            self.scanPedal()
+        """Compatibility hook: background Bluetooth scanning is intentionally disabled."""
+        return
 
     def showPedalDevices(self, devices: list[tuple[str, str]]) -> None:
-        self.finishPedalScan()
         self.pedalDevices.clear()
         # P715's left pedal is the Bluetooth master.  A name ending in "R"
         # identifies the right pedal, which should not be selected on its own.
@@ -599,15 +749,12 @@ class TrignoWindow(QMainWindow):
         if remembered is not None and not self.pedalIsConnected:
             self.pedalDevices.setCurrentIndex(remembered)
             self.setPedalStatus("已找到記憶的踏板，正在自動連線…", "working")
-            self.connectPedal()
+            self.setPedalStatus("已選取記憶的踏板，請按「連線」。", "idle")
             return
         if onlyRightPedal:
             self.setPedalStatus("只找到右踏板（R）；請喚醒左踏板，並選擇沒有 R 的裝置", "working")
         else:
-            self.setPedalStatus(
-                f"找到 {len(devices)} 個藍牙裝置，請選擇沒有 R 的踏板連線" if devices else "找不到藍牙裝置；請確認踏板已喚醒",
-                "idle",
-            )
+            self.setPedalStatus(f"找到 {len(devices)} 個藍牙裝置，請選擇沒有 R 的踏板連線" if devices else "找不到藍牙裝置；請確認踏板已喚醒","idle",)
 
     def pedalAddress(self) -> str:
         address = self.pedalDevices.currentData()
@@ -630,17 +777,14 @@ class TrignoWindow(QMainWindow):
         self.pedalIsConnected = True
         self.savedPedalAddress = address
         self.settings.setValue("pedal/address", address)
-        self.pedalAutoConnectTimer.start()
         self.setPedalConnectionState(True)
         self.setPedalStatus(f"踏板已連線：{address}", "connected")
-        self.pedalTelemetryLabel.setText("踏板資料：等待踩踏…")
+        self.pedalTelemetryLabel.setText("踏板功率資訊：等待踩踏…")
 
     def pedalDisconnected(self) -> None:
         self.pedalIsConnected = False
         self.setPedalConnectionState(False)
         self.connectPedalButton.setEnabled(True)
-        if self.savedPedalAddress:
-            self.pedalAutoConnectTimer.start()
         self.setPedalStatus("踏板已中斷", "idle")
 
     def pedalFailed(self, message: str) -> None:
@@ -686,7 +830,7 @@ class TrignoWindow(QMainWindow):
             fields.append(f"踏頻 {cadence:.1f} rpm")
         if left is not None:
             fields.append(f"左右 {left:.1f}% / {100-left:.1f}%")
-        self.pedalTelemetryLabel.setText("踏板資料：" + " · ".join(fields))
+        self.pedalTelemetryLabel.setText("踏板功率資訊：" + " · ".join(fields))
         if self.pedalRecorder:
             try:
                 self.pedalRecorder.append(data)
@@ -694,9 +838,6 @@ class TrignoWindow(QMainWindow):
                 self.appendLog(f"踏板 CSV 寫入失敗：{exc}")
                 self.closePedalRecording()
 
-    def trainerReady(self) -> None:
-        self.setTrainerStatus("藍牙服務已就緒，正在自動掃描…", "working")
-        self.trainerWorker.scan()
 
     def resistanceSet(self, value: float) -> None:
         self.commandedNativeResistance = value
@@ -735,7 +876,7 @@ class TrignoWindow(QMainWindow):
             fields.append(f"距離 {data.distanceMeters / 1000:.2f} km")
         if data.resistance is not None:
             fields.append(f"原生阻力 {data.resistance:g}")
-        self.trainerTelemetryLabel.setText("即時騎乘資料：" + (" · ".join(fields) or "等待踩踏…"))
+        self.trainerTelemetryLabel.setText("阻力計資訊：" + (" · ".join(fields) or "等待踩踏…"))
         if data.speedKph is not None:
             self.bikeMetricValues["speed"].setText(f"{data.speedKph:.1f}")
         if data.cadenceRpm is not None and not self.pedalIsConnected:
@@ -787,8 +928,7 @@ class TrignoWindow(QMainWindow):
         return self.collectionDistanceMeters
 
     def scanTrainer(self) -> None:
-        self.setTrainerStatus("正在掃描藍牙裝置…", "working")
-        self.trainerWorker.scan()
+        self.scanCyclingDevices()
 
     def showTrainerDevices(self, devices: list[tuple[str, str]]) -> None:
         current = self.trainerDevices.currentText()
@@ -832,9 +972,9 @@ class TrignoWindow(QMainWindow):
         self.bikeMetricValues["resistance"].setText(f"{info['nativeResistance']:g}")
         self.setTrainerStatus(f"已連線：{info['address']}，控制權已取得", "connected")
         if info["telemetryEnabled"]:
-            self.trainerTelemetryLabel.setText("即時騎乘資料：等待踩踏…")
+            self.trainerTelemetryLabel.setText("阻力計資訊：等待踩踏…")
         else:
-            self.trainerTelemetryLabel.setText("即時騎乘資料：此設備未提供 Indoor Bike Data")
+            self.trainerTelemetryLabel.setText("阻力計資訊：此設備未提供 Indoor Bike Data")
 
     def trainerDisconnected(self) -> None:
         self.setTrainerControls(False)
@@ -842,7 +982,7 @@ class TrignoWindow(QMainWindow):
         self.setTrainerConnectionState(False)
         self.resetBikeMetrics()
         self.setTrainerStatus("阻力計已中斷連線", "idle")
-        self.trainerTelemetryLabel.setText("即時騎乘資料：尚未連線")
+        self.trainerTelemetryLabel.setText("阻力計資訊：--")
 
     def trainerFailed(self, message: str) -> None:
         self.setTrainerControls(False)
@@ -869,15 +1009,14 @@ class TrignoWindow(QMainWindow):
 
     @staticmethod
     def setConnectionIndicator(label: QLabel, name: str, connected: bool) -> None:
-        color = "#16a34a" if connected else "#dc2626"
         state = "連線" if connected else "未連線"
         label.setText(f"● {name}：{state}")
-        label.setStyleSheet(f"padding: 5px 8px; color: {color}; font-weight: 700;")
+        FluentThemeManager.set_property(label, "fluentSeverity", "success" if connected else "danger")
 
     def editMappings(self) -> None:
         active_slots = {index + 1 for index, active in enumerate(self.sensorActive) if active}
         dialog = MappingEditorDialog(self.mappings, active_slots, self)
-        if dialog.exec_() == QDialog.Accepted:
+        if dialog.exec() == QDialog.DialogCode.Accepted:
             self.mappings = dialog.mappings()
             saveMappings(MAPPING_PATH, self.mappings)
             self.updateSensorRows()
@@ -909,6 +1048,8 @@ class TrignoWindow(QMainWindow):
         self.syncMuscleMap()
 
     def applyStyles(self) -> None:
+        FluentThemeManager(QApplication.instance()).apply()
+        return
         self.setStyleSheet("""
             QWidget#root { background: #eef3f8; color: #1e293b; }
             QLabel#title { font-size: 24px; font-weight: 700; }
@@ -1002,10 +1143,9 @@ class TrignoWindow(QMainWindow):
         return candidate
 
     def setStatusLabel(self, label: QLabel, text: str, state: str) -> None:
-        colors = {"idle": ("#e2e8f0", "#475569"), "working": ("#fef3c7", "#92400e"), "connected": ("#dcfce7", "#166534"), "streaming": ("#dbeafe", "#1d4ed8"), "error": ("#fee2e2", "#b91c1c")}
-        background, foreground = colors[state]
         label.setText(text)
-        label.setStyleSheet(f"padding: 5px 10px; border-radius: 10px; background: {background}; color: {foreground};")
+        severity = {"idle": "info", "working": "warning", "connected": "success", "streaming": "info", "error": "danger"}[state]
+        FluentThemeManager.set_property(label, "fluentSeverity", severity)
 
     def setEmgStatus(self, text: str, state: str) -> None:
         self.setStatusLabel(self.emgStatus, text, state)
@@ -1393,6 +1533,17 @@ class TrignoWindow(QMainWindow):
         ]
         self.plotWidget.clear()
         self.curves.clear()
+        if not selected:
+            # Keep the coordinate system visible before EMG sensors have been
+            # connected or selected, so the live-waveform area is not blank.
+            plot = self.plotWidget.addPlot(row=0, col=0)
+            plot.setLabel("left", "Amplitude", units="mV")
+            plot.setLabel("bottom", "Time", units="s")
+            plot.showGrid(x=True, y=True, alpha=0.16)
+            plot.setXRange(-10, 0, padding=0)
+            plot.setYRange(-1, 1, padding=0)
+            plot.setMenuEnabled(False)
+            return
         for row, channel in enumerate(selected):
             mapping = self.mappings[channel]
             plot = self.plotWidget.addPlot(row=row, col=0)
@@ -1423,16 +1574,134 @@ class TrignoWindow(QMainWindow):
             plot.setYRange(-limit, limit, padding=0)
             curve.setData(xAxis, values)
 
+    def pedalReady(self) -> None:
+        self.pedalBluetoothReady = True
+        self.startInitialBluetoothScan()
+
+    def trainerReady(self) -> None:
+        self.trainerBluetoothReady = True
+        self.startInitialBluetoothScan()
+
+    # Final scan-assignment flow: scan feedback belongs in the event log, while
+    # the connection panel only presents connected/disconnected state.
+    def scanCyclingDevices(self) -> None:
+        if self.bluetoothScanWorker and self.bluetoothScanWorker.isRunning():
+            return
+        self.pedalScanInProgress = True
+        self.scanTrainerButton.setEnabled(False)
+        self.scanPedalButton.setEnabled(False)
+        self.appendLog("Bluetooth scan started")
+        self.bluetoothScanWorker = CyclingDeviceScanWorker()
+        self.bluetoothScanWorker.devicesFound.connect(self.showCyclingDevices)
+        self.bluetoothScanWorker.failed.connect(self.cyclingScanFailed)
+        self.bluetoothScanWorker.finished.connect(self.finishCyclingScan)
+        self.bluetoothScanWorker.start()
+
+    def showCyclingDevices(self, devices: list[tuple[str, str]]) -> None:
+        self.showScanResults(devices)
+        self.appendLog(f"Bluetooth scan | {len(devices)} devices found")
+
+    def showScanResults(self, devices: list[tuple[str, str]]) -> None:
+        if not hasattr(self, "scanResultsLayout"):
+            return
+        while self.scanResultsLayout.count():
+            item = self.scanResultsLayout.takeAt(0)
+            if widget := item.widget():
+                widget.deleteLater()
+        if not devices:
+            self.scanResultsLayout.addWidget(QLabel("未找到藍牙裝置", objectName="muted"))
+            self.scanResultsLayout.addStretch()
+            return
+        self.scanResultButtons: list[tuple[str, QPushButton]] = []
+        for address, name in sorted(devices, key=lambda item: item[1].casefold()):
+            button = QPushButton(f"{name or 'Unknown device'}  ·  {address}")
+            button.setCheckable(True)
+            button.setToolTip("點選此裝置，再在上方設定為阻力計或踏板")
+            button.setFixedWidth(500)
+            FluentThemeManager.set_property(button, "fluentRole", "scanResult")
+            button.clicked.connect(
+                lambda _checked=False, deviceAddress=address, deviceName=name: self.selectScannedDevice(
+                    deviceAddress, deviceName
+                )
+            )
+            self.scanResultsLayout.addWidget(button, 0, Qt.AlignLeft)
+            self.scanResultButtons.append((address, button))
+        self.scanResultsLayout.addStretch()
+
+    def selectScannedDevice(self, address: str, name: str) -> None:
+        self.selectedScannedDevice = (address, name)
+        for buttonAddress, button in getattr(self, "scanResultButtons", []):
+            selected = buttonAddress == address
+            button.setChecked(selected)
+            FluentThemeManager.set_property(button, "fluentSelected", "true" if selected else "false")
+        label = f"{name or 'Unknown device'} · {address}"
+        self.selectedScannedDeviceLabel.setText(label)
+        self.assignTrainerButton.setEnabled(True)
+        self.assignPedalButton.setEnabled(True)
+        self.appendLog(f"Device selected | {label}")
+
+    def assignSelectedScannedDevice(self, role: str) -> None:
+        if self.selectedScannedDevice is None:
+            return
+        address, name = self.selectedScannedDevice
+        label = f"{name or 'Unknown device'} · {address}"
+        if role == "阻力計":
+            self.trainerDevices.clear()
+            self.trainerDevices.addItem(label, address)
+            self.trainerDevices.setCurrentIndex(0)
+        elif role == "踏板":
+            if name.strip().upper().endswith(" R"):
+                self.appendLog(f"Device assignment skipped | right pedal: {label}")
+                return
+            self.pedalDevices.clear()
+            self.pedalDevices.addItem(label, address)
+            self.pedalDevices.setCurrentIndex(0)
+        self.appendLog(f"Device assignment | {role}: {label}")
+
     def closeEvent(self, event) -> None:  # noqa: N802
-        if self.streamWorker:
+        # Every QThread must finish before its Python/Qt owner is destroyed.
+        # In particular, a shared BLE scan can still be running during the
+        # first few seconds after the application opens.
+        if self.bluetoothScanWorker and self.bluetoothScanWorker.isRunning():
+            self.bluetoothScanWorker.stop()
+            if not self.bluetoothScanWorker.wait(3000):
+                self.appendLog("Bluetooth scan is still stopping; close delayed")
+                event.ignore()
+                QTimer.singleShot(150, self.close)
+                return
+
+        if self.testWorker and self.testWorker.isRunning():
+            # ConnectionWorker uses a bounded socket timeout.  Waiting here
+            # prevents a connection test from being destroyed mid-request.
+            if not self.testWorker.wait(5000):
+                self.appendLog("EMG connection test is still stopping; close delayed")
+                event.ignore()
+                QTimer.singleShot(150, self.close)
+                return
+
+        if self.streamWorker and self.streamWorker.isRunning():
             self.streamWorker.request_stop()
-            self.streamWorker.wait(6000)
+            if not self.streamWorker.wait(6000):
+                self.appendLog("EMG collection is still stopping; close delayed")
+                event.ignore()
+                QTimer.singleShot(150, self.close)
+                return
         if self.bikeOnlySession:
             self.finishBikeOnlySession()
-        self.trainerWorker.stopWorker()
-        self.trainerWorker.wait(6000)
-        self.pedalWorker.stopWorker()
-        self.pedalWorker.wait(6000)
+        if self.trainerWorker.isRunning():
+            self.trainerWorker.stopWorker()
+            if not self.trainerWorker.wait(6000):
+                self.appendLog("Resistance-meter worker is still stopping; close delayed")
+                event.ignore()
+                QTimer.singleShot(150, self.close)
+                return
+        if self.pedalWorker.isRunning():
+            self.pedalWorker.stopWorker()
+            if not self.pedalWorker.wait(6000):
+                self.appendLog("Pedal worker is still stopping; close delayed")
+                event.ignore()
+                QTimer.singleShot(150, self.close)
+                return
         event.accept()
 
 def main() -> int:
@@ -1440,7 +1709,7 @@ def main() -> int:
     app.setStyle("Fusion")
     window = TrignoWindow()
     window.show()
-    return app.exec_()
+    return app.exec()
 
 if __name__ == "__main__":
     raise SystemExit(main())

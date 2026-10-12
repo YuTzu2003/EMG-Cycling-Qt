@@ -1,6 +1,6 @@
 from __future__ import annotations
 import asyncio
-from PyQt5.QtCore import QThread, pyqtSignal
+from PySide6.QtCore import QThread, Signal
 from .protocol import CYCLING_POWER_FEATURE, CYCLING_POWER_MEASUREMENT, decodeCyclingPower
 try:
     from bleak import BleakClient, BleakScanner
@@ -8,12 +8,12 @@ except ImportError:  # pragma: no cover
     BleakClient = BleakScanner = None
 
 class PedalWorker(QThread):
-    ready = pyqtSignal()
-    devicesFound = pyqtSignal(object)
-    connected = pyqtSignal(str)
-    disconnected = pyqtSignal()
-    dataReceived = pyqtSignal(object)
-    failed = pyqtSignal(str)
+    ready = Signal()
+    devicesFound = Signal(object)
+    connected = Signal(str)
+    disconnected = Signal()
+    dataReceived = Signal(object)
+    failed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
