@@ -20,8 +20,10 @@ from delsys.emg.workers import ConnectionWorker, StreamWorker
 from delsys.resistance.recording import TrainerCsvRecorder, trainerOutputPath
 from delsys.resistance.trainer import BikeTelemetry, NumericRange, TrainerWorker
 from delsys.pedal.recording import PedalCsvRecorder, pedalOutputPath
+from delsys.pedal.analysis import analyze_pedal_records, pedal_analysis_lines, pedal_summary_lines, summarize_pedal_records
 from delsys.pedal.worker import PedalWorker
 from delsys.pedal.fit_export import exportPedalFit
+from delsys.pedal.fit_import import load_pedal_fit
 from delsys.cycling_bluetooth import CyclingDeviceScanWorker
 from delsys.fluent_theme import FluentThemeManager
 
@@ -148,6 +150,27 @@ class MappingEditorDialog(QDialog):
             return
         super().accept()
 
+
+class PedalSummaryDialog(QDialog):
+    """Show the current-session P715 summary without creating a second GUI."""
+    def __init__(self, summary: dict[str, float | int | None], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("本次騎乘摘要")
+        self.resize(480, 310)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("本次踏板功率／踏頻資料", objectName="sectionTitle"))
+        details = QPlainTextEdit()
+        details.setReadOnly(True)
+        details.setPlainText("\n".join(pedal_summary_lines(summary)))
+        layout.addWidget(details, 1)
+        note = QLabel("左右功率由總功率與踏板回報的左右平衡估算，並非 Power Phase。", objectName="muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
 class TrignoWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -155,6 +178,10 @@ class TrignoWindow(QMainWindow):
         self.resize(1500, 920)
         self.streamWorker: StreamWorker | None = None
         self.testWorker: ConnectionWorker | None = None
+        # The SDK test worker is intentionally short-lived.  Keep its result
+        # separate from the active streaming worker so the header does not
+        # incorrectly revert to "未連線" after a successful test.
+        self.emgTested = False
         self.trainerWorker = TrainerWorker()
         self.trainerIsConnected = False
         self.pedalWorker = PedalWorker()
@@ -185,6 +212,8 @@ class TrignoWindow(QMainWindow):
         self.trainerOutput: Path | None = None
         self.pedalRecorder: PedalCsvRecorder | None = None
         self.pedalOutput: Path | None = None
+        self.latestPedalRecords: list[dict] = []
+        self.summaryRecords: list[dict] = []
         self.bikeOnlySession = False
         self.commandedNativeResistance: float | None = None
         self.currentSampleRate = SAMPLE_RATE
@@ -196,6 +225,8 @@ class TrignoWindow(QMainWindow):
         self.calibrationSession: CalibrationSession | None = None
         self.calibrationOnly = False
         self.calibrationRecording = False
+        # Per-slot live comparison state drives the body-map research cue.
+        self.muscleStatuses: dict[int, str] = {}
         self.baselineMetricLabels: list[QLabel] = []
         self.baselineStatusLabels: list[QLabel] = []
         self.lastTrainerDistanceMeters: int | None = None
@@ -237,10 +268,12 @@ class TrignoWindow(QMainWindow):
         self.resistanceTab = self.createResistanceTab()
         self.trainerTab = self.createTrainerTab()
         self.collectionTab = self.createCollectionTab()
+        self.summaryTab = self.createSummaryTab()
         self.settingsTab = self.createSettingsTab()
         self.startButton.setText("開始收集資料")
         self.tabs.addTab(self.settingsTab, "設定")
         self.tabs.addTab(self.collectionTab, "收集資料")
+        self.tabs.addTab(self.summaryTab, "本次摘要")
         outer.addWidget(self.tabs, 1)
 
     def createPedalPanel(self) -> QWidget:
@@ -477,6 +510,80 @@ class TrignoWindow(QMainWindow):
         self.increaseResistanceButton.setEnabled(False)
         return tab
 
+    def createSummaryTab(self) -> QWidget:
+        """Persistent summary page for the latest session or an imported FIT file."""
+        tab = QWidget(objectName="summaryPage")
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(16, 12, 16, 16)
+        layout.setSpacing(10)
+        layout.addWidget(QLabel("本次摘要", objectName="title"))
+        description = QLabel("查看本程式最新收集的踏板資料，或匯入 Garmin FIT 活動檔進行比對。", objectName="muted")
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        actions = QHBoxLayout()
+        self.importFitButton = QPushButton("匯入 Garmin FIT")
+        self.importFitButton.setAccessibleName("匯入 Garmin FIT 活動檔")
+        self.importFitButton.setToolTip("匯入 .fit 檔並顯示功率、踏頻與左右平衡摘要")
+        FluentThemeManager.set_property(self.importFitButton, "fluentAppearance", "primary")
+        self.currentSessionSummaryButton = QPushButton("顯示本次收集")
+        self.currentSessionSummaryButton.setEnabled(False)
+        self.currentSessionSummaryButton.setToolTip("切換回本程式最新收集的踏板資料")
+        actions.addWidget(self.importFitButton)
+        actions.addWidget(self.currentSessionSummaryButton)
+        actions.addStretch()
+        layout.addLayout(actions)
+        self.summarySourceLabel = QLabel("尚未有可摘要的踏板資料。", objectName="status")
+        layout.addWidget(self.summarySourceLabel)
+        self.analysisFtpSpin = QSpinBox()
+        self.analysisFtpSpin.setRange(1, 600)
+        self.analysisFtpSpin.setSuffix(" W")
+        self.analysisFtpSpin.setValue(int(self.settings.value("analysis/ftp_w", 200)))
+        self.analysisFtpSpin.setAccessibleName("FTP 功率設定")
+        self.analysisFtpSpin.setToolTip("用於計算 NP、IF、TSS 與功率區間；不是醫療判讀")
+        ftpRow = QHBoxLayout()
+        ftpRow.addWidget(QLabel("FTP"))
+        ftpRow.addWidget(self.analysisFtpSpin)
+        ftpRow.addWidget(QLabel("僅供騎乘訓練指標計算", objectName="muted"))
+        ftpRow.addStretch()
+        layout.addLayout(ftpRow)
+        self.summaryTabs = QTabWidget()
+        summaryPage = QWidget()
+        summaryLayout = QVBoxLayout(summaryPage)
+        summaryLayout.setContentsMargins(8, 8, 8, 8)
+        self.summaryDetails = QPlainTextEdit()
+        self.summaryDetails.setReadOnly(True)
+        self.summaryDetails.setPlaceholderText("完成一次踏板收集，或匯入 Garmin .fit 檔後，摘要會顯示在這裡。")
+        self.summaryDetails.setMinimumHeight(260)
+        summaryLayout.addWidget(self.summaryDetails)
+        self.summaryTabs.addTab(summaryPage, "數值與功率區間")
+        chartPage = QWidget()
+        chartLayout = QVBoxLayout(chartPage)
+        chartLayout.setContentsMargins(8, 8, 8, 8)
+        self.summaryPlots = pg.GraphicsLayoutWidget()
+        self.summaryPlots.setBackground("#ffffff")
+        self.powerAnalysisPlot = self.summaryPlots.addPlot(row=0, col=0, title="功率 Power")
+        self.cadenceAnalysisPlot = self.summaryPlots.addPlot(row=1, col=0, title="踏頻 Cadence")
+        self.balanceAnalysisPlot = self.summaryPlots.addPlot(row=2, col=0, title="左右平衡 Left / Right Balance")
+        self.powerAnalysisPlot.setLabel("left", "功率", units="W")
+        self.cadenceAnalysisPlot.setLabel("left", "踏頻", units="rpm")
+        self.balanceAnalysisPlot.setLabel("left", "平衡", units="%")
+        self.balanceAnalysisPlot.setLabel("bottom", "時間", units="s")
+        self.balanceAnalysisPlot.setYRange(0, 100, padding=0.04)
+        self.cadenceAnalysisPlot.setXLink(self.powerAnalysisPlot)
+        self.balanceAnalysisPlot.setXLink(self.powerAnalysisPlot)
+        for plot in (self.powerAnalysisPlot, self.cadenceAnalysisPlot, self.balanceAnalysisPlot):
+            plot.showGrid(x=True, y=True, alpha=0.18)
+        chartLayout.addWidget(self.summaryPlots)
+        self.summaryTabs.addTab(chartPage, "圖表")
+        layout.addWidget(self.summaryTabs, 1)
+        note = QLabel("左右功率由總功率與左右平衡估算；FIT 檔若沒有左右平衡欄位，該項目會顯示 --。此頁用於設備資料比對，並非醫療判讀。", objectName="muted")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.importFitButton.clicked.connect(self.importFitSummary)
+        self.currentSessionSummaryButton.clicked.connect(self.showCurrentSessionSummary)
+        self.analysisFtpSpin.valueChanged.connect(self.refreshSummaryAnalysis)
+        return tab
+
     def createCollectionTab(self) -> QWidget:
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -580,7 +687,9 @@ class TrignoWindow(QMainWindow):
         body = QHBoxLayout()
         panel = self.createSensorPanel()
         self.bodyMap = BodyMapPanel(COLORS)
-        self.bodyMap.setFixedWidth(590)
+        # Give the anatomy view more room while retaining the existing
+        # sensor legend and the independently resizable waveform area.
+        self.bodyMap.setFixedWidth(720)
         self.bodyMap.setLegendWidget(panel)
         self.bodyMap.slotToggled.connect(self.toggleSensorFromBodyMap)
         body.addWidget(self.bodyMap)
@@ -677,7 +786,7 @@ class TrignoWindow(QMainWindow):
             return
         selected = {index + 1 for index, check in enumerate(self.sensorChecks) if check.isChecked()}
         active = {index + 1 for index, isActive in enumerate(self.sensorActive) if isActive}
-        self.bodyMap.setMappings(self.mappings, selected, active)
+        self.bodyMap.setMappings(self.mappings, selected, active, self.muscleStatuses)
 
     def connectTrainerSignals(self) -> None:
         self.trainerWorker.ready.connect(self.trainerReady)
@@ -871,8 +980,10 @@ class TrignoWindow(QMainWindow):
         pedalConnected = bool(pedal and pedal.is_connected)
         if self.pedalIsConnected and not pedalConnected:
             self.pedalDisconnected()
-        # An EMG SDK connection exists only while StreamWorker is running.
-        self.setEmgConnectionState(bool(self.streamWorker and self.streamWorker.isRunning()))
+        # Unlike BLE devices, the short-lived EMG connection test has already
+        # ended by the time this timer runs.  Preserve that test result while
+        # still giving an active stream precedence in the header.
+        self.updateEmgConnectionIndicator()
 
     def updatePedalTelemetry(self, data: dict) -> None:
         power, cadence, left = data["power_w"], data["cadence_rpm"], data["left_balance_percent"]
@@ -1063,8 +1174,21 @@ class TrignoWindow(QMainWindow):
     def setTrainerConnectionState(self, connected: bool) -> None:
         self.setConnectionIndicator(self.trainerConnectionLabel, "阻力計", connected)
 
-    def setEmgConnectionState(self, connected: bool) -> None:
-        self.setConnectionIndicator(self.emgConnectionLabel, "EMG", connected)
+    def setEmgConnectionState(self, tested: bool) -> None:
+        """Record whether the Trigno SDK test has succeeded."""
+        self.emgTested = tested
+        self.updateEmgConnectionIndicator()
+
+    def updateEmgConnectionIndicator(self) -> None:
+        """Show the EMG lifecycle without mistaking an idle SDK for failure."""
+        if self.streamWorker and self.streamWorker.isRunning():
+            state, severity = "串流中", "info"
+        elif self.emgTested:
+            state, severity = "已測試（待收集）", "success"
+        else:
+            state, severity = "未連線", "danger"
+        self.emgConnectionLabel.setText(f"● EMG：{state}")
+        FluentThemeManager.set_property(self.emgConnectionLabel, "fluentSeverity", severity)
 
     @staticmethod
     def setConnectionIndicator(label: QLabel, name: str, connected: bool) -> None:
@@ -1121,18 +1245,21 @@ class TrignoWindow(QMainWindow):
         return f"{mapping.english_name.strip()}|{mapping.abbreviation.strip()}"
 
     def updateBaselineRow(self, channel: int, current_mv: float | None = None) -> None:
-        if channel >= len(self.baselineMetricLabels):
-            return
         slot = channel + 1
         result = self.baselineManager.evaluate(slot, current_mv, self.mappingIdentity(channel), self.sensorSerials.get(slot, "Unknown SID"), self.currentSampleRate, self.filterSettings)
+        status_changed = self.muscleStatuses.get(slot) != result["state"]
+        self.muscleStatuses[slot] = result["state"]
         current = "--" if result["current_mv"] is None else f"{result['current_mv']:.3f} mV"
         baseline = "--" if result["baseline_mv"] is None else f"{result['baseline_mv']:.3f} mV"
         delta = "--" if result["delta_mv"] is None else f"{result['delta_mv']:+.3f} mV"
         percent = "--" if result["percent"] is None else f"{result['percent']:+.1f}%"
-        self.baselineMetricLabels[channel].setText(f"目前 RMS：{current}\n基準：{baseline}｜差異：{delta}｜變化：{percent}")
-        self.baselineStatusLabels[channel].setText(result["text"])
-        self.baselineStatusLabels[channel].setToolTip("狀態是相對基準偏離程度，並非醫療診斷。")
+        if channel < len(self.baselineMetricLabels):
+            self.baselineMetricLabels[channel].setText(f"目前 RMS：{current}\n基準：{baseline}｜差異：{delta}｜變化：{percent}")
+            self.baselineStatusLabels[channel].setText(result["text"])
+            self.baselineStatusLabels[channel].setToolTip("狀態是相對基準偏離程度，並非醫療診斷。")
         FluentThemeManager.set_property(self.sensorRows[channel], "emgStatus", result["state"])
+        if status_changed:
+            self.syncMuscleMap()
 
     def startBaselineCalibration(self) -> None:
         if self.streamWorker and self.streamWorker.isRunning():
@@ -1456,6 +1583,8 @@ class TrignoWindow(QMainWindow):
         infoOutput = infoOutputPath(output)
         self.collectionSummary = None
         self.collectionError = None
+        self.latestPedalRecords = []
+        self.currentSessionSummaryButton.setEnabled(False)
         self.collectionOutput = output
         self.collectionSubject = self.subjectInfo()
         self.infoOutput = infoOutput
@@ -1561,6 +1690,8 @@ class TrignoWindow(QMainWindow):
             QMessageBox.warning(self, "輸出位置無效", "請選擇資料夾，而不是檔案。")
             return
         output = self.outputPathForCollection(directory)
+        self.latestPedalRecords = []
+        self.currentSessionSummaryButton.setEnabled(False)
         self.collectionOutput = output
         self.collectionSubject = self.subjectInfo()
         self.trainerOutput = trainerOutputPath(output) if self.useTrainerCheck.isChecked() else None
@@ -1600,6 +1731,11 @@ class TrignoWindow(QMainWindow):
 
     def streamStatusChanged(self, text: str) -> None:
         self.setEmgStatus(text, "streaming" if text == "串流中" else "working")
+        if text == "串流中":
+            # A live stream is also a verified SDK connection.  Retain this
+            # state when collection stops normally.
+            self.emgTested = True
+            self.updateEmgConnectionIndicator()
         if text == "串流中" and (not self.calibrationOnly or self.calibrationRecording):
             self.beginTrainerRecording()
             self.beginPedalRecording()
@@ -1659,6 +1795,9 @@ class TrignoWindow(QMainWindow):
             return
         recorder, self.pedalRecorder = self.pedalRecorder, None
         elapsed = recorder.close()
+        self.latestPedalRecords = list(recorder.records)
+        summary = summarize_pedal_records(self.latestPedalRecords)
+        self.showCurrentSessionSummary()
         self.appendLog(f"踏板 CSV 已完成：{recorder.rows} 筆資料")
         if recorder.records:
             try:
@@ -1672,7 +1811,70 @@ class TrignoWindow(QMainWindow):
                 f"踏板資料檔：{recorder.outputPath.name}",
                 f"踏板封包數：{recorder.rows}",
                 f"踏板平均頻率：{frequency:.3f} Hz",
+                *pedal_summary_lines(summary),
             ])
+
+    def setSummaryRecords(self, records: list[dict], source: str) -> None:
+        """Render one standardized summary on the persistent summary page."""
+        self.summaryRecords = list(records)
+        self.summarySourceLabel.setText(source)
+        self.refreshSummaryAnalysis()
+
+    def refreshSummaryAnalysis(self) -> None:
+        """Refresh the numerical report and time-series plots for the selected source."""
+        if not self.summaryRecords:
+            return
+        ftp = self.analysisFtpSpin.value()
+        self.settings.setValue("analysis/ftp_w", ftp)
+        summary = summarize_pedal_records(self.summaryRecords)
+        self.summaryDetails.setPlainText("\n".join([
+            *pedal_summary_lines(summary), "", *pedal_analysis_lines(self.summaryRecords, ftp),
+        ]))
+        analysis = analyze_pedal_records(self.summaryRecords, ftp)
+        series = analysis["series"]
+        x = np.array([point["elapsed_s"] for point in series], dtype=float)
+        power = np.array([np.nan if point["power_w"] is None else point["power_w"] for point in series], dtype=float)
+        cadence = np.array([np.nan if point["cadence_rpm"] is None else point["cadence_rpm"] for point in series], dtype=float)
+        left = np.array([np.nan if point["left_balance_percent"] is None else point["left_balance_percent"] for point in series], dtype=float)
+        for plot in (self.powerAnalysisPlot, self.cadenceAnalysisPlot, self.balanceAnalysisPlot):
+            plot.clear()
+        if not len(x):
+            return
+        self.powerAnalysisPlot.plot(x, power, pen=pg.mkPen("#c2185b", width=2), connect="finite")
+        average_power = summary.get("average_power_w")
+        if average_power is not None:
+            self.powerAnalysisPlot.addItem(pg.InfiniteLine(pos=float(average_power), angle=0,
+                                                           pen=pg.mkPen("#616161", style=Qt.DashLine)))
+        self.cadenceAnalysisPlot.plot(x, cadence, pen=pg.mkPen("#f39c12", width=2), connect="finite")
+        average_cadence = summary.get("average_cadence_rpm")
+        if average_cadence is not None:
+            self.cadenceAnalysisPlot.addItem(pg.InfiniteLine(pos=float(average_cadence), angle=0,
+                                                             pen=pg.mkPen("#616161", style=Qt.DashLine)))
+        valid = np.isfinite(left)
+        if valid.any():
+            self.balanceAnalysisPlot.plot(x[valid], left[valid], pen=None, symbol="o", symbolSize=6,
+                                          symbolBrush="#43a047", name="左")
+            self.balanceAnalysisPlot.plot(x[valid], 100 - left[valid], pen=None, symbol="o", symbolSize=6,
+                                          symbolBrush="#1684d7", name="右")
+
+    def showCurrentSessionSummary(self) -> None:
+        if not self.latestPedalRecords:
+            QMessageBox.information(self, "本次摘要", "本次尚未收集到踏板資料。")
+            return
+        self.currentSessionSummaryButton.setEnabled(True)
+        self.setSummaryRecords(self.latestPedalRecords, "資料來源：本程式最新收集的踏板資料")
+
+    def importFitSummary(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "匯入 Garmin FIT", "", "FIT files (*.fit *.FIT)")
+        if not path:
+            return
+        try:
+            records = load_pedal_fit(Path(path))
+        except Exception as exc:
+            QMessageBox.warning(self, "無法匯入 FIT", f"讀取 FIT 檔失敗：{exc}")
+            return
+        self.setSummaryRecords(records, f"資料來源：匯入 FIT — {Path(path).name}")
+        self.appendLog(f"已匯入 Garmin FIT 摘要：{Path(path).name}（{len(records)} 筆 record）")
 
     def collectionMetadataReady(self, metadata: dict) -> None:
         if self.infoRecorder is None:
@@ -1811,6 +2013,8 @@ class TrignoWindow(QMainWindow):
         self.collectionError = message
         title = "CSV 輸出錯誤" if message.startswith("CSV 輸出失敗：") else "Trigno 串流錯誤"
         self.setEmgStatus(message, "error")
+        if not message.startswith("CSV 輸出失敗："):
+            self.setEmgConnectionState(False)
         QMessageBox.critical(self, title, message)
 
     def streamFinished(self) -> None:

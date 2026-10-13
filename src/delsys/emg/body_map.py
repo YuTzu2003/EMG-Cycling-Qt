@@ -55,6 +55,18 @@ ANATOMY_COLORS = {
     "feet": "#dfb9b2",
 }
 
+# These colours identify a relative RMS deviation only; they do not imply a
+# clinical diagnosis.
+MUSCLE_STATUS_COLORS = {
+    "warning": "#facc15",
+    "focus": "#ef4444",
+}
+
+MUSCLE_STATUS_TEXT = {
+    "warning": "警告：相對基準偏離達警告門檻（研究提示）",
+    "focus": "重點察看：相對基準偏離達重點門檻（研究提示）",
+}
+
 BODY_RECT = QRectF(0, 0, 118, 236)
 
 # Click targets use the matched SVG model's local 724 x 1448 view box.
@@ -160,8 +172,14 @@ class ClickableMuscleItem(QGraphicsPathItem):
 
 
 class BodyGraphicsView(QGraphicsView):
+    slotClicked = Signal(int)
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._zoomFactor = 1.0
+        self._panning = False
+        self._panPosition = None
+        self._dragButton = Qt.NoButton
         self.setRenderHint(QPainter.Antialiasing, True)
         self.setFrameShape(QFrame.NoFrame)
         self.setStyleSheet("background: transparent; border: 0;")
@@ -171,7 +189,94 @@ class BodyGraphicsView(QGraphicsView):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         if self.scene() is not None:
-            self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
+            self.fitToScene()
+
+    @property
+    def zoomFactor(self) -> float:
+        return self._zoomFactor
+
+    def fitToScene(self) -> None:
+        """Fit the anatomy first, then apply the user-selected zoom level."""
+        if self.scene() is None:
+            return
+        self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
+        self.scale(self._zoomFactor, self._zoomFactor)
+
+    def setZoomFactor(self, factor: float, anchor_position=None) -> None:
+        """Scale around a viewport point without resetting the user's pan."""
+        target = max(0.75, min(2.5, factor))
+        if self.scene() is None or target == self._zoomFactor:
+            return
+        position = anchor_position or self.viewport().rect().center()
+        scene_position = self.mapToScene(position)
+        ratio = target / self._zoomFactor
+        self.scale(ratio, ratio)
+        # Restore the scene point that was under the cursor to that cursor
+        # location. Scroll bars remain hidden but still provide the pan state.
+        offset = self.mapFromScene(scene_position) - position
+        self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() + offset.x())
+        self.verticalScrollBar().setValue(self.verticalScrollBar().value() + offset.y())
+        self._zoomFactor = target
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        """Zoom the anatomy where the user is pointing, rather than scrolling it."""
+        wheel_delta = event.angleDelta().y()
+        if wheel_delta:
+            self.setZoomFactor(
+                self._zoomFactor * (1.12 if wheel_delta > 0 else 1 / 1.12),
+                event.position().toPoint(),
+            )
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() in (Qt.LeftButton, Qt.MiddleButton):
+            # A short left click keeps muscle selection. Dragging past a
+            # small threshold turns the same gesture into map-style panning.
+            self._dragButton = event.button()
+            self._panning = event.button() == Qt.MiddleButton
+            self._panPosition = event.position()
+            if self._panning:
+                self.viewport().setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._dragButton != Qt.NoButton and self._panPosition is not None:
+            position = event.position()
+            delta = position - self._panPosition
+            if not self._panning and abs(delta.x()) + abs(delta.y()) < 5:
+                event.accept()
+                return
+            if not self._panning:
+                self._panning = True
+                self.viewport().setCursor(Qt.ClosedHandCursor)
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - round(delta.x()))
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - round(delta.y()))
+            self._panPosition = position
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == self._dragButton:
+            is_click = event.button() == Qt.LeftButton and not self._panning
+            position = event.position().toPoint()
+            self._panning = False
+            self._panPosition = None
+            self._dragButton = Qt.NoButton
+            self.viewport().unsetCursor()
+            if is_click:
+                item = self.itemAt(position)
+                while item is not None and item.data(0) is None:
+                    item = item.parentItem()
+                if item is not None and isinstance(item.data(0), int):
+                    self.slotClicked.emit(item.data(0))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class BodyMapPanel(QFrame):
@@ -184,6 +289,7 @@ class BodyMapPanel(QFrame):
         self.mappings: list[SensorMapping] = []
         self.selectedSlots: set[int] = set()
         self.activeSlots: set[int] = set()
+        self.statusBySlot: dict[int, str] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -207,11 +313,23 @@ class BodyMapPanel(QFrame):
         self.backButton.clicked.connect(lambda: self.setView("back"))
         layout.addLayout(switch)
 
+        self.statusCaption = QLabel(
+            "即時 RMS 相對基準：黃色為警告、紅色為重點察看；正常或未判定維持原色。"
+            "僅供研究提示；可用滾輪縮放、左鍵拖移人體圖。",
+            objectName="bodyCaption",
+        )
+        self.statusCaption.setWordWrap(True)
+        layout.addWidget(self.statusCaption)
+
         self.contentLayout = QHBoxLayout()
         self.contentLayout.setContentsMargins(0, 0, 0, 0)
         self.contentLayout.setSpacing(6)
         self.view = BodyGraphicsView()
-        self.view.setMinimumHeight(440)
+        # The source anatomy is tall and narrow.  Reserve enough vertical
+        # space for a materially larger rendered figure, not merely more
+        # horizontal whitespace around it.
+        self.view.setMinimumHeight(680)
+        self.view.slotClicked.connect(lambda slot: self.slotToggled.emit(slot))
         self.contentLayout.addWidget(self.view, 1)
         layout.addLayout(self.contentLayout, 1)
         self.rebuildScene()
@@ -229,14 +347,25 @@ class BodyMapPanel(QFrame):
         self.backButton.setChecked(view == "back")
         self.rebuildScene()
 
-    def setMappings(self,mappings: list[SensorMapping],selectedSlots: set[int],activeSlots: set[int],) -> None:
+    def setMappings(
+        self,
+        mappings: list[SensorMapping],
+        selectedSlots: set[int],
+        activeSlots: set[int],
+        status_by_slot: dict[int, str] | None = None,
+    ) -> None:
         self.mappings = mappings
         self.selectedSlots = selectedSlots
         self.activeSlots = activeSlots
+        self.statusBySlot = dict(status_by_slot or {})
         self.rebuildScene()
 
     def rebuildScene(self) -> None:
         previous = self.view.scene()
+        previous_center = (
+            self.view.mapToScene(self.view.viewport().rect().center())
+            if previous is not None else None
+        )
         scene = QGraphicsScene(self)
         # Reserve space above the anatomy diagram for the L/R orientation labels.
         scene.setSceneRect(-2, -22, 122, 265)
@@ -264,13 +393,16 @@ class BodyMapPanel(QFrame):
             zonePath = QPainterPath()
             zonePath.addRoundedRect(localRect, 8, 8)
             zonePath = transform.map(zonePath)
-            self._addClickZone(scene, zonePath, region, mapping)
+            self._addClickZone(scene, zonePath, region, mapping, self.statusBySlot.get(mapping.slot, "unknown"))
             center = zonePath.boundingRect().center()
             self._addSlotBadge(scene, mapping.slot, center.x(), center.y())
 
         self._addOrientationLabels(scene)
         self.view.setScene(scene)
-        self.view.fitInView(scene.sceneRect(), Qt.KeepAspectRatio)
+        if previous_center is None:
+            self.view.fitToScene()
+        else:
+            self.view.centerOn(previous_center)
         if previous is not None:
             previous.deleteLater()
 
@@ -291,8 +423,11 @@ class BodyMapPanel(QFrame):
             base = QColor(ANATOMY_COLORS.get(slug, "#d6aaa3"))
             selected = mapping is not None and mapping.slot in self.selectedSlots
             active = mapping is not None and mapping.slot in self.activeSlots
+            status = self.statusBySlot.get(mapping.slot, "unknown") if mapping is not None else "unknown"
             fill = (
-                self.colors[(mapping.slot - 1) % len(self.colors)]
+                MUSCLE_STATUS_COLORS[status]
+                if status in MUSCLE_STATUS_COLORS
+                else self.colors[(mapping.slot - 1) % len(self.colors)]
                 if mapping is not None and selected
                 else base.name()
             )
@@ -324,11 +459,24 @@ class BodyMapPanel(QFrame):
         elements.append("</svg>")
         return "".join(elements)
 
-    def _addClickZone(self,scene: QGraphicsScene,path: QPainterPath,region: tuple[str, str],mapping: SensorMapping,) -> None:
+    def _addClickZone(
+        self,
+        scene: QGraphicsScene,
+        path: QPainterPath,
+        region: tuple[str, str],
+        mapping: SensorMapping,
+        status: str,
+    ) -> None:
         item = ClickableMuscleItem(path,lambda slot=mapping.slot: self.slotToggled.emit(slot),)
+        item.setData(0, mapping.slot)
         side = "右" if region[1] == "right" else "左"
-        status = "已啟用" if mapping.slot in self.activeSlots else "未連線"
-        item.setToolTip(f"S{mapping.slot:02d}｜{side}{MUSCLE_LABELS[region[0]]}\n"f"{mapping.english_name}｜{status}\n點擊切換即時波形")
+        connection = "已啟用" if mapping.slot in self.activeSlots else "未連線"
+        research_status = MUSCLE_STATUS_TEXT.get(status, "正常或尚未取得可比較的 RMS 資料")
+        item.setToolTip(
+            f"S{mapping.slot:02d}｜{side}{MUSCLE_LABELS[region[0]]}\n"
+            f"{mapping.english_name}｜{connection}\n{research_status}\n"
+            "點擊切換即時波形"
+        )
         item.setZValue(20)
         scene.addItem(item)
 
