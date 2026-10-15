@@ -39,7 +39,7 @@ class StreamWorker(QThread):
     collection_completed = Signal(int, float, float)
     failed = Signal(str)
 
-    def __init__(self,host: str,output_path: Path,mappings: list[SensorMapping],) -> None:
+    def __init__(self,host: str,output_path: Path | None,mappings: list[SensorMapping],) -> None:
         super().__init__()
         self.host, self.output_path, self.mappings = host, output_path, mappings
         self._stop_event = threading.Event()
@@ -81,11 +81,13 @@ class StreamWorker(QThread):
                         for slot in active
                     ],
                 })
-                self.output_path.parent.mkdir(parents=True, exist_ok=True)
-                csv_file = self.output_path.open("x", newline="", encoding="utf-8-sig")
-                output_opened = True
-                writer = csv.writer(csv_file)
-                writer.writerow(["time_seconds", *csvColumnNames(activeMappings)])
+                writer = None
+                if self.output_path is not None:
+                    self.output_path.parent.mkdir(parents=True, exist_ok=True)
+                    csv_file = self.output_path.open("x", newline="", encoding="utf-8-sig")
+                    output_opened = True
+                    writer = csv.writer(csv_file)
+                    writer.writerow(["time_seconds", *csvColumnNames(activeMappings)])
                 client.start()
                 collectionStarted = time.monotonic()
                 self.status_changed.emit("串流中")
@@ -96,7 +98,8 @@ class StreamWorker(QThread):
                     frames = client.read_emg_frames()
                     for frame in frames:
                         timeSeconds = sampleIndex / sampleRate
-                        writer.writerow([timeSeconds, *(frame[index] for index in activeIndices)])
+                        if writer is not None:
+                            writer.writerow([timeSeconds, *(frame[index] for index in activeIndices)])
                         sampleIndex += 1
                     buffer.extend(frames)
                     if buffer and (len(buffer) >= 100 or time.monotonic() - last_emit >= 0.05):

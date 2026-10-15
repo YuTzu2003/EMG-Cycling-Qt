@@ -54,6 +54,8 @@ class FluentThemeManager(QObject):
         palette.setColor(QPalette.ColorRole.ButtonText, QColor(t["text_primary"]))
         palette.setColor(QPalette.ColorRole.Highlight, QColor(t["brand_background"]))
         palette.setColor(QPalette.ColorRole.HighlightedText, QColor(t["brand_foreground"]))
+        palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(t["surface_background"]))
+        palette.setColor(QPalette.ColorRole.ToolTipText, QColor(t["text_primary"]))
         palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(t["text_disabled"]))
         self.app.setPalette(palette)
         self.app.setStyleSheet(self._qss(t))
@@ -63,15 +65,19 @@ class FluentThemeManager(QObject):
     def _qss(t: dict[str, str]) -> str:
         return f"""
         QWidget {{ color: {t['text_primary']}; font-family: 'Segoe UI'; font-size: 12px; }}
+        QToolTip {{ background: {t['surface_background']}; color: {t['text_primary']}; border: 1px solid {t['border_primary']}; padding: 4px 6px; }}
         QMainWindow, QWidget#root {{ background: {t['window_background']}; }}
         QTabWidget::pane {{ background: {t['window_background']}; border: 1px solid {t['border_primary']}; border-radius: 6px; top: -1px; }}
         QLabel {{ background: transparent; }}
         QFrame[fluentRole="surface"], QFrame#panel {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 6px; }}
         QFrame[fluentRole="scanResults"] {{ background: {t['surface_secondary']}; border: 1px solid {t['border_primary']}; border-radius: 4px; }}
         QLabel#title {{ font-size: 20px; font-weight: 600; }} QLabel#sectionTitle {{ font-size: 14px; font-weight: 600; }} QLabel#muted {{ color: {t['text_secondary']}; }}
-        QLineEdit, QComboBox, QSpinBox, QPlainTextEdit {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 4px; padding: 4px 6px; }}
+        QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTableWidget {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 4px; padding: 4px 6px; }}
+        QTableWidget::item {{ padding: 5px; }}
+        QTableWidget::item:selected {{ background: {t['selection_background']}; color: {t['text_primary']}; }}
+        QHeaderView::section {{ background: {t['surface_secondary']}; color: {t['text_primary']}; border: 0; border-bottom: 1px solid {t['border_primary']}; padding: 7px; font-weight: 600; }}
         QLineEdit:hover, QComboBox:hover, QSpinBox:hover {{ border-color: {t['text_secondary']}; }}
-        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPushButton:focus, QCheckBox:focus {{ border: 2px solid {t['focus_border']}; }}
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus, QTableWidget:focus, QPushButton:focus, QCheckBox:focus {{ border: 2px solid {t['focus_border']}; }}
         QPushButton {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 4px; padding: 4px 8px; min-height: 16px; }}
         QPushButton:hover {{ background: {t['surface_secondary']}; }} QPushButton:pressed {{ background: {t['selection_background']}; }}
         QPushButton[fluentAppearance="primary"], QPushButton#primary {{ background: {t['brand_background']}; color: {t['brand_foreground']}; border-color: {t['brand_background']}; font-weight: 600; }}
@@ -96,6 +102,11 @@ class FluentThemeManager(QObject):
         QLabel#status[fluentSeverity="success"], QLabel#connectionIndicator[fluentSeverity="success"] {{ background: {t['success_surface']}; }}
         QLabel#status[fluentSeverity="warning"], QLabel#connectionIndicator[fluentSeverity="warning"] {{ background: {t['warning_surface']}; }}
         QLabel#status[fluentSeverity="danger"], QLabel#connectionIndicator[fluentSeverity="danger"] {{ background: {t['danger_surface']}; }}
+        QFrame#sensorRow[emgStatus="normal"], QFrame#sensorRow[emgStatus="unknown"] {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; }}
+        QFrame#sensorRow[emgStatus="warning"] {{ background: {t['warning_surface']}; border: 1px solid {t['warning']}; }}
+        QFrame#sensorRow[emgStatus="focus"] {{ background: {t['danger_surface']}; border: 1px solid {t['danger']}; }}
+        QLabel#emgMetrics {{ color: {t['text_secondary']}; font-size: 11px; }}
+        QLabel#emgMuscleStatus {{ font-weight: 600; }}
         QFrame#eventLogPanel {{ background: #111827; border: 1px solid #374151; border-radius: 0px; }}
         QFrame#eventLogPanel QLabel {{ color: #f3f4f6; }}
         QPlainTextEdit#eventLog {{ background: transparent; color: #d1d5db; border: 0; padding: 3px; font-family: Consolas, monospace; }}
