@@ -612,8 +612,8 @@ class TrignoWindow(QMainWindow):
         description.setWordWrap(True)
         layout.addWidget(description)
         actions = QHBoxLayout()
-        self.importFitButton = QPushButton("匯入 Garmin FIT")
-        self.importFitButton.setAccessibleName("匯入 Garmin FIT 活動檔")
+        self.importFitButton = QPushButton("匯入FIT檔")
+        self.importFitButton.setAccessibleName("匯入 FIT 活動檔")
         self.importFitButton.setToolTip("匯入 .fit 檔並顯示功率、踏頻與左右平衡摘要")
         FluentThemeManager.set_property(self.importFitButton, "fluentAppearance", "primary")
         self.currentSessionSummaryButton = QPushButton("顯示本次收集")
@@ -683,7 +683,7 @@ class TrignoWindow(QMainWindow):
         summaryLayout.setContentsMargins(8, 8, 8, 8)
         self.summaryDetails = QPlainTextEdit()
         self.summaryDetails.setReadOnly(True)
-        self.summaryDetails.setPlaceholderText("完成一次踏板收集，或匯入 Garmin .fit 檔後，摘要會顯示在這裡。")
+        self.summaryDetails.setPlaceholderText("完成一次踏板收集，或匯入 fit 檔後，摘要會顯示在這裡。")
         self.summaryDetails.setMinimumHeight(150)
         self.summaryDetails.setMaximumHeight(190)
         summaryLayout.addWidget(self.summaryDetails)
@@ -2459,7 +2459,7 @@ class TrignoWindow(QMainWindow):
         self.setSummaryRecords(self.latestPedalRecords, "資料來源：本程式最新收集的踏板資料")
 
     def importFitSummary(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "匯入 Garmin FIT", "", "FIT files (*.fit *.FIT)")
+        path, _ = QFileDialog.getOpenFileName(self, "匯入 FIT", "", "FIT files (*.fit *.FIT)")
         if not path:
             return
         try:
@@ -2469,7 +2469,7 @@ class TrignoWindow(QMainWindow):
             return
         self.setSummaryRecords(records, f"資料來源：匯入 FIT — {Path(path).name}")
         self.summaryTabs.setCurrentIndex(2)
-        self.appendLog(f"已匯入 Garmin FIT 摘要：{Path(path).name}（{len(records)} 筆 record）")
+        self.appendLog(f"已匯入 FIT 摘要：{Path(path).name}（{len(records)} 筆 record）")
 
     def collectionMetadataReady(self, metadata: dict) -> None:
         if self.infoRecorder is None:

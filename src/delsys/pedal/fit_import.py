@@ -1,4 +1,4 @@
-"""Read standard cycling record fields from a Garmin-compatible FIT file."""
+"""Read standard cycling record fields from a compatible FIT file."""
 from __future__ import annotations
 
 import math
