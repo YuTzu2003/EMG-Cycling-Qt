@@ -2976,6 +2976,90 @@ class TrignoWindow(QMainWindow):
             self.pedalDevices.setCurrentIndex(0)
         self.appendLog(f"Device assignment | {role}: {label}")
 
+    def pedalReady(self) -> None:
+        self.pedalBluetoothReady = True
+        self.startInitialBluetoothScan()
+
+    def trainerReady(self) -> None:
+        self.trainerBluetoothReady = True
+        self.startInitialBluetoothScan()
+
+    # Final scan-assignment flow: scan feedback belongs in the event log, while
+    # the connection panel only presents connected/disconnected state.
+    def scanCyclingDevices(self) -> None:
+        if self.bluetoothScanWorker and self.bluetoothScanWorker.isRunning():
+            return
+        self.pedalScanInProgress = True
+        self.scanTrainerButton.setEnabled(False)
+        self.scanPedalButton.setEnabled(False)
+        self.appendLog("Bluetooth scan started")
+        self.bluetoothScanWorker = CyclingDeviceScanWorker()
+        self.bluetoothScanWorker.devicesFound.connect(self.showCyclingDevices)
+        self.bluetoothScanWorker.failed.connect(self.cyclingScanFailed)
+        self.bluetoothScanWorker.finished.connect(self.finishCyclingScan)
+        self.bluetoothScanWorker.start()
+
+    def showCyclingDevices(self, devices: list[tuple[str, str]]) -> None:
+        self.showScanResults(devices)
+        self.appendLog(f"Bluetooth scan | {len(devices)} devices found")
+
+    def showScanResults(self, devices: list[tuple[str, str]]) -> None:
+        if not hasattr(self, "scanResultsLayout"):
+            return
+        while self.scanResultsLayout.count():
+            item = self.scanResultsLayout.takeAt(0)
+            if widget := item.widget():
+                widget.deleteLater()
+        if not devices:
+            self.scanResultsLayout.addWidget(QLabel("未找到藍牙裝置", objectName="muted"))
+            self.scanResultsLayout.addStretch()
+            return
+        self.scanResultButtons: list[tuple[str, QPushButton]] = []
+        for address, name in sorted(devices, key=lambda item: item[1].casefold()):
+            button = QPushButton(f"{name or 'Unknown device'}  ·  {address}")
+            button.setCheckable(True)
+            button.setToolTip("點選此裝置，再在上方設定為阻力計或踏板")
+            button.setFixedWidth(500)
+            FluentThemeManager.set_property(button, "fluentRole", "scanResult")
+            button.clicked.connect(
+                lambda _checked=False, deviceAddress=address, deviceName=name: self.selectScannedDevice(
+                    deviceAddress, deviceName
+                )
+            )
+            self.scanResultsLayout.addWidget(button, 0, Qt.AlignLeft)
+            self.scanResultButtons.append((address, button))
+        self.scanResultsLayout.addStretch()
+
+    def selectScannedDevice(self, address: str, name: str) -> None:
+        self.selectedScannedDevice = (address, name)
+        for buttonAddress, button in getattr(self, "scanResultButtons", []):
+            selected = buttonAddress == address
+            button.setChecked(selected)
+            FluentThemeManager.set_property(button, "fluentSelected", "true" if selected else "false")
+        label = f"{name or 'Unknown device'} · {address}"
+        self.selectedScannedDeviceLabel.setText(label)
+        self.assignTrainerButton.setEnabled(True)
+        self.assignPedalButton.setEnabled(True)
+        self.appendLog(f"Device selected | {label}")
+
+    def assignSelectedScannedDevice(self, role: str) -> None:
+        if self.selectedScannedDevice is None:
+            return
+        address, name = self.selectedScannedDevice
+        label = f"{name or 'Unknown device'} · {address}"
+        if role == "阻力計":
+            self.trainerDevices.clear()
+            self.trainerDevices.addItem(label, address)
+            self.trainerDevices.setCurrentIndex(0)
+        elif role == "踏板":
+            if name.strip().upper().endswith(" R"):
+                self.appendLog(f"Device assignment skipped | right pedal: {label}")
+                return
+            self.pedalDevices.clear()
+            self.pedalDevices.addItem(label, address)
+            self.pedalDevices.setCurrentIndex(0)
+        self.appendLog(f"Device assignment | {role}: {label}")
+
     def closeEvent(self, event) -> None:  # noqa: N802
         # Every QThread must finish before its Python/Qt owner is destroyed.
         # In particular, a shared BLE scan can still be running during the
