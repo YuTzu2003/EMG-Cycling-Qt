@@ -260,11 +260,13 @@ class BaselineManager:
         return result
 
 
-def load_raw_emg_csv(path: Path) -> tuple[np.ndarray, dict[str, np.ndarray], float]:
+def load_raw_emg_csv(path: Path, limit_seconds: float | None = CALIBRATION_SECONDS) -> tuple[np.ndarray, dict[str, np.ndarray], float]:
     """Load a raw EMG CSV written by StreamWorker without changing it.
 
     The file must contain ``time_seconds`` followed by one or more numeric EMG
-    columns.  A usable continuous first 20-second segment is required.
+    columns.  By default, return the continuous first 20-second segment for
+    baseline calibration.  Pass ``limit_seconds=None`` to load the full session
+    for offline RMS analysis.
     """
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as source:
@@ -291,7 +293,12 @@ def load_raw_emg_csv(path: Path) -> tuple[np.ndarray, dict[str, np.ndarray], flo
     if not math.isfinite(sample_rate_hz) or sample_rate_hz <= 0:
         raise ValueError("Unable to determine CSV sample rate.")
     relative = times - times[0]
-    keep = relative < CALIBRATION_SECONDS
-    if relative[keep][-1] < CALIBRATION_SECONDS - (2 / sample_rate_hz):
-        raise ValueError("CSV needs a continuous first 20-second EMG segment.")
+    if limit_seconds is None:
+        keep = np.ones(len(relative), dtype=bool)
+    else:
+        if not math.isfinite(limit_seconds) or limit_seconds <= 0:
+            raise ValueError("CSV limit_seconds must be positive or None.")
+        keep = relative < limit_seconds
+        if relative[keep][-1] < limit_seconds - (2 / sample_rate_hz):
+            raise ValueError(f"CSV needs a continuous first {limit_seconds:g}-second EMG segment.")
     return relative[keep], {name: values[keep] for name, values in columns.items()}, sample_rate_hz

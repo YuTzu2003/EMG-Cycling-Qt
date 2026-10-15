@@ -3,10 +3,34 @@ import unittest
 from pathlib import Path
 
 from delsys.session_analysis import (add_point, analyze, compare_rms, export_html,
-                                     load_session, new_session, save_session, summary_lines)
+                                     load_session, new_session, peak_envelope, rms_envelope,
+                                     save_session, summary_lines)
 
 
 class SessionAnalysisTests(unittest.TestCase):
+    def test_rms_envelope_is_time_based_and_ignores_invalid_values(self):
+        points = [
+            {"time_s": 0.0, "rms_mv": 1.0},
+            {"time_s": 0.5, "rms_mv": 3.0},
+            {"time_s": 1.1, "rms_mv": 5.0},
+            {"time_s": 1.2, "rms_mv": float("nan")},
+        ]
+        self.assertEqual(rms_envelope(points, 1.0), [(0.0, 1.0), (0.5, 2.0), (1.1, 4.0)])
+        with self.assertRaises(ValueError):
+            rms_envelope(points, 0)
+
+    def test_peak_envelope_joins_each_window_highest_rms(self):
+        points = [
+            {"time_s": 0.0, "rms_mv": 1.0},
+            {"time_s": 0.5, "rms_mv": 3.0},
+            {"time_s": 1.1, "rms_mv": 5.0},
+            {"time_s": 1.4, "rms_mv": 4.0},
+            {"time_s": 1.6, "rms_mv": float("nan")},
+        ]
+        self.assertEqual(peak_envelope(points, 1.0), [(0.5, 3.0), (1.1, 5.0)])
+        with self.assertRaises(ValueError):
+            peak_envelope(points, 0)
+
     def test_signed_baseline_comparison_and_invalid_baseline(self):
         self.assertAlmostEqual(compare_rms(0.08, 0.10)["delta_mv"], -0.02)
         self.assertAlmostEqual(compare_rms(0.08, 0.10)["normalized"], 0.8)
@@ -36,9 +60,12 @@ class SessionAnalysisTests(unittest.TestCase):
             export_html(report, session, ftp_w=220)
             document = report.read_text(encoding="utf-8")
             self.assertIn("&lt;researcher&gt;", document)
-            self.assertIn("踏板功率", document)
-            self.assertIn("FTP 設定：220 W", document)
-            self.assertIn("資料空窗不視為零功率", document)
+            self.assertIn("本次肌電分析報表", document)
+            self.assertIn("肌電摘要", document)
+            self.assertIn("各肌肉 Peak RMS 包絡線", document)
+            self.assertNotIn("踏板功率", document)
+            self.assertNotIn("阻力回報值", document)
+            self.assertNotIn("資料狀態", document)
 
     def test_missing_streams_and_incompatible_baseline_remain_explicit(self):
         session = new_session({}, {"2": {"rms_mv": 0.1}})

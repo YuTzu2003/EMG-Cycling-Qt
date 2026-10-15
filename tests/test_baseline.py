@@ -64,4 +64,7 @@ class BaselineTests(unittest.TestCase):
             self.assertAlmostEqual(rate, 100.0)
             self.assertEqual(len(times), 2000)
             self.assertEqual(len(columns["Rectus femoris"]), 2000)
+            all_times, all_columns, _ = load_raw_emg_csv(path, limit_seconds=None)
+            self.assertEqual(len(all_times), 2001)
+            self.assertEqual(len(all_columns["Rectus femoris"]), 2001)
 

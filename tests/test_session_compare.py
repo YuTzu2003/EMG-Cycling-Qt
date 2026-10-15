@@ -32,8 +32,9 @@ class ComparisonTests(unittest.TestCase):
             report = Path(folder) / "comparison.html"
             export_html(report, second, reference_session=first)
             document = report.read_text(encoding="utf-8")
-            self.assertIn("兩次騎乘肌肉活化比較", document)
-            self.assertIn("兩次 RMS 曲線", document)
+            self.assertIn("本次肌電分析報表", document)
+            self.assertIn("肌電摘要", document)
+            self.assertNotIn("兩次 RMS 曲線", document)
 
     def test_incompatible_mapping_sensor_and_rate_are_explicit(self):
         original = ride([0.2])

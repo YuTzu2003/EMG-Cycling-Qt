@@ -5,7 +5,7 @@ import html
 import json
 import math
 from bisect import bisect_left
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
@@ -65,6 +65,67 @@ def _stats(values):
     numbers = [number for value in values if (number := finite(value)) is not None]
     return {"mean": mean(numbers) if numbers else None,
             "max": max(numbers) if numbers else None, "count": len(numbers)}
+
+
+def rms_envelope(rows: list[dict], window_s: float = 1.0) -> list[tuple[float, float]]:
+    """Return a trailing moving-average envelope for recorded RMS points.
+
+    RMS values are already produced from filtered EMG by the acquisition path.  This
+    deliberately smooths those feature values (rather than the raw waveform) so an
+    archived ``.analysis.json`` has everything needed to reproduce the chart.
+    """
+    window_s = finite(window_s)
+    if window_s is None or window_s <= 0:
+        raise ValueError("window_s must be a positive finite number")
+    samples = sorted(
+        ((time_s, value) for row in rows
+         if (time_s := finite(row.get("time_s"))) is not None
+         and (value := finite(row.get("rms_mv"))) is not None),
+        key=lambda point: point[0],
+    )
+    window: deque[tuple[float, float]] = deque()
+    total = 0.0
+    envelope = []
+    for time_s, value in samples:
+        window.append((time_s, value))
+        total += value
+        while window and window[0][0] < time_s - window_s:
+            _old_time, old_value = window.popleft()
+            total -= old_value
+        envelope.append((time_s, total / len(window)))
+    return envelope
+
+
+def peak_envelope(rows: list[dict], window_s: float = 1.0) -> list[tuple[float, float]]:
+    """Return one highest recorded RMS value for each consecutive time window.
+
+    This is a peak envelope of the archived RMS feature: it does not recreate a
+    peak envelope directly from the raw EMG waveform.  Empty time windows are
+    omitted rather than converted into zero-valued muscle activity.
+    """
+    window_s = finite(window_s)
+    if window_s is None or window_s <= 0:
+        raise ValueError("window_s must be a positive finite number")
+    samples = sorted(
+        ((time_s, value) for row in rows
+         if (time_s := finite(row.get("time_s"))) is not None
+         and (value := finite(row.get("rms_mv"))) is not None),
+        key=lambda point: point[0],
+    )
+    if not samples:
+        return []
+    window_start = samples[0][0]
+    peak_time, peak_value = samples[0]
+    envelope = []
+    for time_s, value in samples[1:]:
+        while time_s >= window_start + window_s:
+            envelope.append((peak_time, peak_value))
+            window_start += window_s
+            peak_time, peak_value = time_s, value
+        if value > peak_value:
+            peak_time, peak_value = time_s, value
+    envelope.append((peak_time, peak_value))
+    return envelope
 
 
 def _pearson(pairs):
@@ -253,38 +314,87 @@ def summary_lines(result: dict, normalized: bool = False) -> list[str]:
 
 def export_html(path: Path, session: dict, normalized: bool = False, reference_session: dict | None = None,
                 ftp_w: int = 200) -> None:
-    """Write a standalone report with inline SVG and escaped session metadata."""
+    """Write a fixed report for the current session's EMG summary only.
+
+    Pedal, trainer, resistance, and historical-comparison output are deliberately
+    excluded: they make the current-session EMG report hard to scan.  The
+    reference_session and ftp_w arguments remain for compatible callers.
+    """
     result = analyze(session, normalized)
-    lines = summary_lines(result, normalized)
-    from delsys.pedal.analysis import pedal_analysis_lines
-    pedal_rows = [{**row, "timestamp": row.get("time_s")} for row in session.get("pedal", [])]
-    pedal_report = "\n".join(pedal_analysis_lines(pedal_rows, ftp_w)) if pedal_rows else "沒有踏板資料"
-    emg_sections = []
-    baseline_lines = []
-    for slot, record in sorted(session.get("baselines", {}).items()):
-        baseline_lines.append(f"S{slot}: {_fmt(record.get('rms_mv'), ' mV', 3)}；{record.get('source', '')}；{record.get('timestamp', '')}")
-    for slot in sorted(result["emg"]):
-        rows = [row for row in session["emg"] if str(row.get("slot")) == slot]
-        emg_sections.append(_chart_fragment(f"S{int(slot):02d} EMG RMS", rows, "rms_mv", "#7e57c2"))
-        emg_sections.append(_chart_fragment(f"S{int(slot):02d} {'normalized RMS' if normalized else 'RMS - baseline'}",
-                                            rows, "normalized" if normalized else "delta_mv", "#c2185b"))
-    content = "\n".join(("<h1>EMG Cycling 騎乘分析</h1>",
-        f"<p>受試者：{html.escape(str(session.get('subject', {}).get('patientId', '')))}　測試者：{html.escape(str(session.get('subject', {}).get('name', '')))}</p>",
-        f"<p>開始時間：{html.escape(str(session.get('started_at', '--')))}　EMG 取樣率：{_fmt(session.get('sample_rate_hz'), ' Hz')}</p>",
-        f"<p>分析方法：{html.escape(str(session.get('feature', '')))}；原始檔：{html.escape(', '.join(str(name) for name in session.get('raw_files', {}).values()))}</p>",
-        f"<p>基準快照：{html.escape(' / '.join(baseline_lines) or '無')}</p>",
-        "<p>研究用途；跨設備時間以程式接收時間近似對齊，未使用共同硬體觸發。</p>",
-        f"<pre>{html.escape(chr(10).join(lines))}</pre>", *emg_sections,
-        f"<section><h2>踏板訓練指標</h2><pre>{html.escape(pedal_report)}</pre><p>依設定 FTP 計算；資料空窗不視為零功率。左右功率為估算值，非踩踏相位。</p></section>",
-        _chart_fragment("踏板功率", session["pedal"], "power_w", "#c2185b"),
-        _chart_fragment("踏板踏頻", session["pedal"], "cadence_rpm", "#f39c12"),
-        _chart_fragment("踏板左平衡", session["pedal"], "left_balance_percent", "#43a047"),
-        _chart_fragment("阻力回報值", session["trainer"], "resistance_native_reported", "#1684d7")))
-    if reference_session is not None:
-        from delsys.session_compare import compare_sessions, comparison_charts, comparison_html
-        comparison = compare_sessions(reference_session, session)
-        content += comparison_html(comparison) + comparison_charts(reference_session, session, comparison)
-    document = '<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><title>騎乘分析</title><style>body{font:16px system-ui;max-width:1000px;margin:32px auto;color:#222}section{border:1px solid #ddd;padding:12px;margin:18px 0}svg{width:100%;background:#fafafa}pre{white-space:pre-wrap;line-height:1.7}table{border-collapse:collapse;width:100%}td,th{text-align:left;border-color:#ddd}</style>' + content + '</html>'
+    subject = session.get("subject", {})
+    channels = session.get("channels", {})
+    comparison_label = "平均 normalized RMS" if normalized else "平均 RMS－基準值"
+    table_rows = []
+    charts = []
+    for slot in sorted(result["emg"], key=lambda value: int(value) if str(value).isdigit() else str(value)):
+        data = result["emg"][slot]
+        channel = channels.get(slot, {})
+        name = channel.get("label") or channel.get("mapping_name") or "未命名肌肉"
+        slot_label = f"S{int(slot):02d}" if str(slot).isdigit() else f"S{slot}"
+        table_rows.append(
+            "<tr>"
+            f"<th scope=\"row\">{html.escape(slot_label)} {html.escape(str(name))}</th>"
+            f"<td>{_fmt(data['rms_mv']['mean'], ' mV', 3)}</td>"
+            f"<td>{_fmt(data['rms_mv']['max'], ' mV', 3)}</td>"
+            f"<td>{_fmt(data['comparison']['mean'], '' if normalized else ' mV', 3)}</td>"
+            f"<td>{_fmt(data['early_rms_mv'], ' mV', 3)} → {_fmt(data['late_rms_mv'], ' mV', 3)}</td>"
+            "</tr>"
+        )
+        rows = [row for row in session.get("emg", []) if str(row.get("slot")) == str(slot)]
+        envelope_rows = [{"time_s": time_s, "rms_mv": value}
+                         for time_s, value in peak_envelope(rows)]
+        charts.append(
+            "<details class=\"muscle-chart\">"
+            f"<summary>{html.escape(slot_label)} {html.escape(str(name))}：Peak RMS 包絡線</summary>"
+            f"{_chart_fragment(f'{slot_label} {name} Peak RMS 包絡線', envelope_rows, 'rms_mv', '#6d4bc3')}"
+            "</details>"
+        )
+
+    raw_files = ", ".join(str(name) for name in session.get("raw_files", {}).values()) or "未提供"
+    metadata = "".join((
+        f"<div><span>受試者</span><strong>{html.escape(str(subject.get('patientId', '未提供')))}</strong></div>",
+        f"<div><span>測試者</span><strong>{html.escape(str(subject.get('name', '未提供')))}</strong></div>",
+        f"<div><span>開始時間</span><strong>{html.escape(str(session.get('started_at', '--')))}</strong></div>",
+        f"<div><span>EMG 取樣率</span><strong>{_fmt(session.get('sample_rate_hz'), ' Hz')}</strong></div>",
+        f"<div><span>分析方法</span><strong>{html.escape(str(session.get('feature', '未提供')))}</strong></div>",
+        f"<div><span>原始檔</span><strong>{html.escape(raw_files)}</strong></div>",
+    ))
+    if table_rows:
+        analysis = (
+            "<section><h2>肌電摘要</h2>"
+            "<p class=\"hint\">數值為本次騎乘的 RMS 分析結果；基準比較僅在相容基準存在時顯示。</p>"
+            "<div class=\"table-wrap\"><table><thead><tr>"
+            f"<th>肌肉／通道</th><th>平均 RMS</th><th>Peak RMS</th><th>{comparison_label}</th>"
+            "<th>前段 → 後段</th>"
+            "</tr></thead><tbody>" + "".join(table_rows) + "</tbody></table></div></section>"
+            "<section><h2>各肌肉 Peak RMS 包絡線</h2>"
+            "<p class=\"hint\">每 1 秒取一次最高 RMS；展開單一肌肉即可查看其隨騎乘時間的變化。</p>" + "".join(charts) + "</section>"
+        )
+    else:
+        analysis = (
+            "<section class=\"empty\"><h2>尚無可匯出的本次肌電資料</h2>"
+            "<p>請先匯入或完成本次 EMG 紀錄，再重新匯出報表。</p></section>"
+        )
+    content = (
+        "<header><p class=\"eyebrow\">EMG CYCLING MONITOR</p><h1>本次肌電分析報表</h1>"
+        "<p class=\"subtitle\">固定格式｜僅包含本次摘要的 EMG 分析</p></header>"
+        f"<section><h2>紀錄資訊</h2><div class=\"metadata\">{metadata}</div></section>"
+        + analysis
+        + "<footer>研究用途：本報表為訊號分析摘要，不作醫療診斷。</footer>"
+    )
+    document = (
+        '<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<title>本次肌電分析報表</title><style>'
+        ':root{color-scheme:light;font-family:"Segoe UI","Microsoft JhengHei",sans-serif;color:#172033;background:#f4f7fa}'
+        'body{max-width:1120px;margin:0 auto;padding:36px 24px 48px;line-height:1.55}'
+        'header{border-left:5px solid #1684d7;padding:4px 0 4px 18px;margin-bottom:24px}'
+        'h1,h2{margin:0;color:#13243a}h1{font-size:28px}.eyebrow{margin:0;color:#1684d7;font-size:12px;font-weight:700;letter-spacing:.12em}.subtitle,.hint{color:#617086}.subtitle{margin:5px 0 0}'
+        'section{background:#fff;border:1px solid #dbe3ec;border-radius:10px;padding:20px;margin:16px 0;box-shadow:0 1px 2px #13243a0a}'
+        'h2{font-size:18px;margin-bottom:12px}.metadata{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 20px}.metadata div{min-width:0}.metadata span{display:block;color:#617086;font-size:13px}.metadata strong{display:block;overflow-wrap:anywhere;font-weight:500}'
+        '.table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;min-width:740px}th,td{padding:10px 12px;border-bottom:1px solid #e5ebf1;text-align:left;vertical-align:top}thead th{background:#eff6fc;color:#25415f;font-size:13px;white-space:nowrap}tbody th{font-weight:600}.muscle-chart{border-top:1px solid #e5ebf1;padding:12px 0}.muscle-chart:last-child{padding-bottom:0}.muscle-chart summary{cursor:pointer;color:#164b7a;font-weight:600}.muscle-chart section{box-shadow:none;border:0;padding:12px 0 0;margin:0}.muscle-chart h2{font-size:15px}.muscle-chart svg{width:100%;background:#fbfcfe;border:1px solid #e5ebf1}.empty{text-align:center;padding:40px 20px}footer{margin-top:24px;color:#617086;font-size:13px;text-align:center}@media(max-width:680px){body{padding:24px 14px}.metadata{grid-template-columns:1fr}section{padding:16px}}'
+        '</style></head><body>' + content + '</body></html>'
+    )
     path.write_text(document, encoding="utf-8")
 
 
