@@ -39,7 +39,8 @@ def decodeCyclingPower(data: bytearray, lastCrank: dict | None) -> tuple[dict, d
         rightPower = power - leftPower
     return {
         "timestamp": time.time(), "power_w": power, "cadence_rpm": cadence,
-        "left_balance_percent": balance, "right_balance_percent": None if balance is None else 100 - balance,
+        "left_balance_percent": balance if reference == "left" else None,
+        "right_balance_percent": 100 - balance if balance is not None and reference == "left" else None,
         "left_power_w": leftPower, "right_power_w": rightPower,
         "crank_revolutions": crankRevolutions, "crank_event_time": crankEventTime,
         "raw_hex": packet.hex(" "),}, lastCrank

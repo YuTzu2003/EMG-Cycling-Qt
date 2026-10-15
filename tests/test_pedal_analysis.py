@@ -28,6 +28,14 @@ class PedalAnalysisTests(unittest.TestCase):
         self.assertIsNone(summary["average_cadence_rpm"])
         self.assertIn("--", "\n".join(pedal_summary_lines(summary)))
 
+    def test_sparse_crank_cadence_keeps_recent_active_balance_only(self):
+        summary = summarize_pedal_records([
+            {"timestamp": 0, "power_w": 100, "cadence_rpm": 80, "left_balance_percent": 45},
+            {"timestamp": 2, "power_w": 100, "cadence_rpm": None, "left_balance_percent": 55},
+            {"timestamp": 8, "power_w": 100, "cadence_rpm": None, "left_balance_percent": 80},
+        ])
+        self.assertEqual(summary["average_left_balance_percent"], 50)
+
     def test_advanced_analysis_creates_time_series_and_training_values(self):
         analysis = analyze_pedal_records([
             {"timestamp": 100, "power_w": 120, "cadence_rpm": 80, "left_balance_percent": 49},
@@ -37,6 +45,27 @@ class PedalAnalysisTests(unittest.TestCase):
         self.assertEqual([point["elapsed_s"] for point in analysis["series"]], [0, 1, 2])
         self.assertEqual([point["cadence_rpm"] for point in analysis["series"]], [80, 80, 95])
         self.assertEqual(analysis["power_1s"], [120, 180, 240])
-        self.assertAlmostEqual(analysis["normalized_power_w"], 180)
+        self.assertIsNone(analysis["normalized_power_w"])
+        self.assertIsNone(analysis["tss"])
         self.assertEqual(sum(zone["seconds"] for zone in analysis["zones"]), 3)
         self.assertIn("FTP 設定：200 W", "\n".join(pedal_analysis_lines([], 200)))
+
+    def test_missing_packets_are_not_counted_as_zero_power(self):
+        rows = [{"timestamp": second, "power_w": 200} for second in range(35)]
+        rows += [{"timestamp": 45, "power_w": 0}]
+        result = analyze_pedal_records(rows, 200)
+        self.assertEqual(result["missing_seconds"], 10)
+        self.assertEqual(result["coasting_seconds"], 1)
+        self.assertIsNone(result["power_1s"][40])
+        self.assertEqual(result["peak_5s_w"], 200)
+        self.assertEqual(result["normalized_power_w"], 200)
+        self.assertIsNone(result["tss"])
+        self.assertEqual(sum(zone["seconds"] for zone in result["zones"]), 36)
+
+    def test_continuous_power_produces_np_and_tss(self):
+        result = analyze_pedal_records(
+            [{"timestamp": second, "power_w": 200} for second in range(61)], 200)
+        self.assertAlmostEqual(result["normalized_power_w"], 200)
+        self.assertAlmostEqual(result["intensity_factor"], 1)
+        self.assertIsNotNone(result["tss"])
+        self.assertEqual(result["peak_60s_w"], 200)

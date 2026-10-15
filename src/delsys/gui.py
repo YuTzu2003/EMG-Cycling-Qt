@@ -1,16 +1,20 @@
 from __future__ import annotations
 import sys
+import time
+from dataclasses import asdict
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QSettings, QStandardPaths, QTimer, Qt, Signal
+from PySide6.QtCore import QRectF, QSettings, QStandardPaths, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
     QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,
-    QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget, QInputDialog,)
+    QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget, QInputDialog,
+    QTableWidget, QTableWidgetItem, QHeaderView, QDoubleSpinBox,)
 from delsys.collection import CollectionInfoRecorder, SubjectInfo, infoOutputPath
 from delsys.emg.body_map import BodyMapPanel
 from delsys.emg.sensor_mapping import (SensorMapping,duplicateMappingSlots,loadMappings,saveMappings,)
@@ -26,6 +30,8 @@ from delsys.pedal.fit_export import exportPedalFit
 from delsys.pedal.fit_import import load_pedal_fit
 from delsys.cycling_bluetooth import CyclingDeviceScanWorker
 from delsys.fluent_theme import FluentThemeManager
+from delsys.session_analysis import add_point, analyze, compare_rms, export_html, load_session, new_session, save_session, summary_lines
+from delsys.session_compare import compare_sessions
 
 COLORS = ("#1684d7", "#e95f54", "#7e57c2", "#00897b", "#f39c12", "#5c6bc0", "#43a047", "#c2185b")
 MAPPING_PATH = Path(__file__).resolve().parents[2] / "sensor_mapping.json"
@@ -73,6 +79,69 @@ class SensorLegendToggle(QWidget):
             event.accept()
             return
         super().mousePressEvent(event)
+
+
+class PowerBalanceRing(QWidget):
+    """A compact, non-interactive ring for one side's estimated pedal output."""
+
+    def __init__(self, side: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.side = side
+        self.balance: float | None = None
+        self.power_w: float | None = None
+        self.active_color = QColor("#107c10")
+        self.track_color = QColor("#d1d1d1")
+        self.text_color = QColor("#242424")
+        # Keep the summary visual compact while retaining enough space for
+        # the power and balance labels at normal desktop text scaling.
+        self.setMinimumSize(170, 195)
+        self.setMaximumSize(190, 215)
+        self.setAccessibleName(f"{side}腳估計功率與平衡")
+
+    def setValues(self, balance: float | None, power_w: float | None) -> None:
+        self.balance = balance if balance is not None and 0 <= balance <= 100 else None
+        self.power_w = power_w
+        if self.balance is None or self.power_w is None:
+            self.setAccessibleDescription("沒有有效的左右平衡資料。")
+        else:
+            self.setAccessibleDescription(
+                f"平均估計功率 {self.power_w:.1f} W，平衡 {self.balance:.1f}%。"
+            )
+        self.update()
+
+    def setThemeColors(self, active: str, track: str, text: str) -> None:
+        self.active_color = QColor(active)
+        self.track_color = QColor(track)
+        self.text_color = QColor(text)
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        content = self.rect().adjusted(12, 12, -12, -12)
+        diameter = min(content.width(), content.height() - 70)
+        ring = QRectF(
+            content.center().x() - diameter / 2, content.top() + 24,
+            diameter, diameter,
+        )
+        pen = QPen(self.track_color, 18)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(ring)
+        if self.balance is not None:
+            pen.setColor(self.active_color)
+            painter.setPen(pen)
+            painter.drawArc(ring, 90 * 16, -round(self.balance * 3.6 * 16))
+        painter.setPen(self.text_color)
+        painter.drawText(content.adjusted(0, 38, 0, -content.height() + 104),
+                         Qt.AlignmentFlag.AlignHCenter, self.side)
+        power_text = "--" if self.power_w is None else f"{self.power_w:.1f} W"
+        painter.drawText(content.adjusted(0, 66, 0, -content.height() + 132),
+                         Qt.AlignmentFlag.AlignHCenter, power_text)
+        balance_text = "無有效資料" if self.balance is None else f"平衡 {self.balance:.1f}%"
+        painter.drawText(content.adjusted(0, 94, 0, -content.height() + 160),
+                         Qt.AlignmentFlag.AlignHCenter, balance_text)
 
 
 class MappingEditorDialog(QDialog):
@@ -201,7 +270,7 @@ class TrignoWindow(QMainWindow):
         self.sensorRows: list[QFrame] = []
         self.sensorActive = [False] * CHANNEL_COUNT
         self.sensorSerials: dict[int, str] = {}
-        self.curves: dict[int, tuple[pg.PlotItem, pg.PlotDataItem]] = {}
+        self.curves: dict[int, tuple[pg.PlotItem, pg.PlotDataItem, pg.TextItem]] = {}
         self.collectionSummary: tuple[int, float, float] | None = None
         self.collectionError: str | None = None
         self.collectionOutput: Path | None = None
@@ -214,6 +283,15 @@ class TrignoWindow(QMainWindow):
         self.pedalOutput: Path | None = None
         self.latestPedalRecords: list[dict] = []
         self.summaryRecords: list[dict] = []
+        self.pedalSummarySource = "current"
+        self.rideSession: dict | None = None
+        self.latestRideSession: dict | None = None
+        self.collectedRideSession: dict | None = None
+        self.collectedRidePath: Path | None = None
+        self.loadedRidePath: Path | None = None
+        self.referenceRideSession: dict | None = None
+        self.rideStartedAt = 0.0
+        self.lastEmgAnalysisAt = 0.0
         self.bikeOnlySession = False
         self.commandedNativeResistance: float | None = None
         self.currentSampleRate = SAMPLE_RATE
@@ -234,6 +312,9 @@ class TrignoWindow(QMainWindow):
         self.collectionDistanceMeters: int | None = None
         self.distanceSessionActive = False
         self.buildUi()
+        if hasattr(QApplication.instance().styleHints(), "colorSchemeChanged"):
+            QApplication.instance().styleHints().colorSchemeChanged.connect(self.onSystemThemeChanged)
+        self.applySummaryPlotTheme()
         self.connectTrainerSignals()
         self.trainerWorker.start()
         self.connectPedalSignals()
@@ -242,6 +323,10 @@ class TrignoWindow(QMainWindow):
         self.connectionStateTimer.setInterval(500)
         self.connectionStateTimer.timeout.connect(self.refreshConnectionStates)
         self.connectionStateTimer.start()
+        self.analysisTimer = QTimer(self)
+        self.analysisTimer.setInterval(1000)
+        self.analysisTimer.timeout.connect(self.refreshLiveRideSummary)
+        self.analysisTimer.start()
         self.setStreaming(False)
         self.setEmgStatus("尚未連線", "idle")
         self.setTrainerConnectionState(False)
@@ -511,13 +596,19 @@ class TrignoWindow(QMainWindow):
         return tab
 
     def createSummaryTab(self) -> QWidget:
-        """Persistent summary page for the latest session or an imported FIT file."""
+        """Fluent summary workspace for the live ride, comparison and pedal detail."""
         tab = QWidget(objectName="summaryPage")
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(16, 12, 16, 16)
         layout.setSpacing(10)
-        layout.addWidget(QLabel("本次摘要", objectName="title"))
-        description = QLabel("查看本程式最新收集的踏板資料，或匯入 Garmin FIT 活動檔進行比對。", objectName="muted")
+        heading = QHBoxLayout()
+        heading.addWidget(QLabel("騎乘分析", objectName="title"))
+        heading.addStretch()
+        self.rideStateLabel = QLabel("等待騎乘", objectName="status")
+        FluentThemeManager.set_property(self.rideStateLabel, "fluentSeverity", "info")
+        heading.addWidget(self.rideStateLabel)
+        layout.addLayout(heading)
+        description = QLabel("即時摘要、兩次紀錄的肌肉活化比較，以及獨立的踏板分析。", objectName="muted")
         description.setWordWrap(True)
         layout.addWidget(description)
         actions = QHBoxLayout()
@@ -528,12 +619,36 @@ class TrignoWindow(QMainWindow):
         self.currentSessionSummaryButton = QPushButton("顯示本次收集")
         self.currentSessionSummaryButton.setEnabled(False)
         self.currentSessionSummaryButton.setToolTip("切換回本程式最新收集的踏板資料")
+        self.loadRideButton = QPushButton("載入歷史騎乘")
+        self.exportReportButton = QPushButton("匯出 HTML 報表")
+        self.exportReportButton.setEnabled(False)
+        self.loadReferenceButton = QPushButton("選取第一次騎乘")
+        FluentThemeManager.set_property(self.loadReferenceButton, "fluentAppearance", "primary")
         actions.addWidget(self.importFitButton)
         actions.addWidget(self.currentSessionSummaryButton)
+        actions.addWidget(self.loadRideButton)
+        actions.addWidget(self.exportReportButton)
+        actions.addWidget(self.loadReferenceButton)
         actions.addStretch()
         layout.addLayout(actions)
-        self.summarySourceLabel = QLabel("尚未有可摘要的踏板資料。", objectName="status")
+        self.summarySourceLabel = QLabel("尚未有騎乘資料。", objectName="status")
         layout.addWidget(self.summarySourceLabel)
+        metricStrip = QHBoxLayout()
+        self.summaryMetricValues = {}
+        for key, title, unit in (("duration", "騎乘時間", "秒"), ("muscles", "有效肌肉", "通道"),
+                                 ("pedal_power", "踏板平均功率", "W"), ("resistance", "訓練台平均阻力", "")):
+            frame = QFrame(objectName="metricCard")
+            column = QVBoxLayout(frame)
+            column.setContentsMargins(12, 8, 12, 8)
+            column.addWidget(QLabel(title, objectName="metricTitle"))
+            value = QLabel("--", objectName="metricValue")
+            value.setAccessibleName(title)
+            column.addWidget(value)
+            if unit:
+                column.addWidget(QLabel(unit, objectName="metricUnit"))
+            metricStrip.addWidget(frame, 1)
+            self.summaryMetricValues[key] = value
+        layout.addLayout(metricStrip)
         self.analysisFtpSpin = QSpinBox()
         self.analysisFtpSpin.setRange(1, 600)
         self.analysisFtpSpin.setSuffix(" W")
@@ -546,6 +661,22 @@ class TrignoWindow(QMainWindow):
         ftpRow.addWidget(QLabel("僅供騎乘訓練指標計算", objectName="muted"))
         ftpRow.addStretch()
         layout.addLayout(ftpRow)
+        self.normalizedCheck = QCheckBox("顯示 normalized RMS（RMS / baseline）")
+        self.normalizedCheck.setToolTip("關閉時顯示 RMS - baseline，單位 mV")
+        options = QHBoxLayout()
+        options.addWidget(self.normalizedCheck)
+        options.addSpacing(18)
+        options.addWidget(QLabel("EMG 相對阻力時間偏移"))
+        self.alignmentOffsetSpin = QDoubleSpinBox()
+        self.alignmentOffsetSpin.setRange(-30, 30)
+        self.alignmentOffsetSpin.setDecimals(2)
+        self.alignmentOffsetSpin.setSingleStep(0.1)
+        self.alignmentOffsetSpin.setSuffix(" 秒")
+        self.alignmentOffsetSpin.setToolTip("有共同可辨識事件時，調整 EMG 相對阻力資料的時間；正值讓 EMG 向後移。")
+        self.alignmentOffsetSpin.setAccessibleName("EMG 相對阻力時間偏移秒數")
+        options.addWidget(self.alignmentOffsetSpin)
+        options.addStretch()
+        layout.addLayout(options)
         self.summaryTabs = QTabWidget()
         summaryPage = QWidget()
         summaryLayout = QVBoxLayout(summaryPage)
@@ -553,8 +684,34 @@ class TrignoWindow(QMainWindow):
         self.summaryDetails = QPlainTextEdit()
         self.summaryDetails.setReadOnly(True)
         self.summaryDetails.setPlaceholderText("完成一次踏板收集，或匯入 Garmin .fit 檔後，摘要會顯示在這裡。")
-        self.summaryDetails.setMinimumHeight(260)
+        self.summaryDetails.setMinimumHeight(150)
+        self.summaryDetails.setMaximumHeight(190)
         summaryLayout.addWidget(self.summaryDetails)
+        pedalMetrics = QHBoxLayout()
+        self.pedalMetricCards = {}
+        for key, title, unit in (("normalized_power_w", "NP", "W"),
+                                 ("intensity_factor", "IF", ""),
+                                 ("peak_5s_w", "最佳 5 秒", "W"),
+                                 ("coverage_percent", "資料涵蓋", "%")):
+            card = QFrame(objectName="metricCard")
+            column = QVBoxLayout(card)
+            column.addWidget(QLabel(title, objectName="metricTitle"))
+            value = QLabel("--", objectName="metricValue")
+            value.setAccessibleName(title)
+            column.addWidget(value)
+            if unit:
+                column.addWidget(QLabel(unit, objectName="metricUnit"))
+            pedalMetrics.addWidget(card, 1)
+            self.pedalMetricCards[key] = value
+        summaryLayout.addLayout(pedalMetrics)
+        summaryLayout.addWidget(QLabel("功率區間 · 依 FTP 與已觀測秒數計算", objectName="sectionTitle"))
+        self.pedalZoneTable = QTableWidget(7, 4)
+        self.pedalZoneTable.setHorizontalHeaderLabels(("區間", "功率範圍", "時間", "佔有效資料"))
+        self.pedalZoneTable.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.pedalZoneTable.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.pedalZoneTable.setAccessibleName("踏板功率區間時間分布")
+        self.pedalZoneTable.setMinimumHeight(210)
+        summaryLayout.addWidget(self.pedalZoneTable)
         self.summaryTabs.addTab(summaryPage, "數值與功率區間")
         chartPage = QWidget()
         chartLayout = QVBoxLayout(chartPage)
@@ -573,8 +730,76 @@ class TrignoWindow(QMainWindow):
         self.balanceAnalysisPlot.setXLink(self.powerAnalysisPlot)
         for plot in (self.powerAnalysisPlot, self.cadenceAnalysisPlot, self.balanceAnalysisPlot):
             plot.showGrid(x=True, y=True, alpha=0.18)
-        chartLayout.addWidget(self.summaryPlots)
+        chartLayout.addWidget(self.summaryPlots, 1)
+        chartLayout.addWidget(QLabel("左右腳估計功率與平衡", objectName="sectionTitle"))
+        self.powerBalanceNote = QLabel(
+            "依總功率與 P715 回報的左右平衡估算，非左右獨立扭力或踩踏相位量測。",
+            objectName="muted",
+        )
+        self.powerBalanceNote.setWordWrap(True)
+        chartLayout.addWidget(self.powerBalanceNote)
+        rings = QHBoxLayout()
+        rings.setSpacing(20)
+        self.leftPowerBalanceRing = PowerBalanceRing("左腳")
+        self.rightPowerBalanceRing = PowerBalanceRing("右腳")
+        rings.addStretch()
+        rings.addWidget(self.leftPowerBalanceRing, 1)
+        rings.addWidget(self.rightPowerBalanceRing, 1)
+        rings.addStretch()
+        chartLayout.addLayout(rings)
         self.summaryTabs.addTab(chartPage, "圖表")
+        ridePage = QWidget()
+        rideLayout = QVBoxLayout(ridePage)
+        self.rideEmptyLabel = QLabel("開始收集資料，或載入一份歷史騎乘分析檔，即可查看肌肉、踏板與阻力摘要。", objectName="muted")
+        self.rideEmptyLabel.setWordWrap(True)
+        rideLayout.addWidget(self.rideEmptyLabel)
+        self.rideMuscleTable = QTableWidget(0, 6)
+        self.rideMuscleTable.setHorizontalHeaderLabels(("肌肉／側別", "平均 RMS", "最大 RMS", "基準比較", "前段 → 後段", "資料狀態"))
+        self.rideMuscleTable.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.rideMuscleTable.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.rideMuscleTable.setAccessibleName("本次騎乘各肌肉 RMS 摘要")
+        rideLayout.addWidget(self.rideMuscleTable, 2)
+        self.rideDetails = QPlainTextEdit()
+        self.rideDetails.setReadOnly(True)
+        self.rideDetails.setAccessibleName("本次騎乘詳細統計與資料品質")
+        rideLayout.addWidget(self.rideDetails, 1)
+        self.ridePlots = pg.GraphicsLayoutWidget()
+        self.ridePlots.setBackground("#ffffff")
+        self.emgRidePlot = self.ridePlots.addPlot(row=0, col=0, title="EMG baseline 差值 / normalized RMS")
+        self.pedalRidePlot = self.ridePlots.addPlot(row=1, col=0, title="踏板功率與踏頻")
+        self.trainerRidePlot = self.ridePlots.addPlot(row=2, col=0, title="阻力指令與回報")
+        for plot in (self.emgRidePlot, self.pedalRidePlot, self.trainerRidePlot):
+            plot.showGrid(x=True, y=True, alpha=0.18)
+        self.trainerRidePlot.setXLink(self.emgRidePlot)
+        self.pedalRidePlot.setLabel("bottom", "踏板接收時間", units="s")
+        self.trainerRidePlot.setLabel("bottom", "騎乘時間", units="s")
+        rideLayout.addWidget(self.ridePlots, 2)
+        self.summaryTabs.insertTab(0, ridePage, "騎乘總覽")
+        comparePage = QWidget()
+        compareLayout = QVBoxLayout(comparePage)
+        self.comparisonStatusLabel = QLabel("選取第一次騎乘，再使用本次或載入歷史騎乘作為第二次。", objectName="muted")
+        self.comparisonStatusLabel.setWordWrap(True)
+        compareLayout.addWidget(self.comparisonStatusLabel)
+        self.comparisonTable = QTableWidget(0, 7)
+        self.comparisonTable.setHorizontalHeaderLabels(("肌肉／側別", "第一次中位 mV", "第二次中位 mV", "差異 mV", "變化 %", "P90 第一次／第二次", "狀態"))
+        self.comparisonTable.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.comparisonTable.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.comparisonTable.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.comparisonTable.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.comparisonTable.setAccessibleName("兩次騎乘肌肉活化比較表")
+        compareLayout.addWidget(self.comparisonTable, 2)
+        self.comparisonPlot = pg.PlotWidget(title="選取肌肉：兩次 RMS 隨各自騎乘時間變化")
+        self.comparisonPlot.setBackground("#ffffff")
+        self.comparisonPlot.setLabel("bottom", "各自騎乘時間", units="s")
+        self.comparisonPlot.setLabel("left", "RMS", units="mV")
+        self.comparisonPlot.showGrid(x=True, y=True, alpha=0.18)
+        self.comparisonPlot.addLegend()
+        compareLayout.addWidget(self.comparisonPlot, 2)
+        self.comparisonNotes = QLabel("RMS 表示肌肉電活動；跨次比較需維持電極位置、姿勢與阻力流程。", objectName="muted")
+        self.comparisonNotes.setWordWrap(True)
+        compareLayout.addWidget(self.comparisonNotes)
+        self.summaryTabs.insertTab(1, comparePage, "兩次騎乘比較")
+        self.summaryTabs.setCurrentIndex(0)
         layout.addWidget(self.summaryTabs, 1)
         note = QLabel("左右功率由總功率與左右平衡估算；FIT 檔若沒有左右平衡欄位，該項目會顯示 --。此頁用於設備資料比對，並非醫療判讀。", objectName="muted")
         note.setWordWrap(True)
@@ -582,7 +807,44 @@ class TrignoWindow(QMainWindow):
         self.importFitButton.clicked.connect(self.importFitSummary)
         self.currentSessionSummaryButton.clicked.connect(self.showCurrentSessionSummary)
         self.analysisFtpSpin.valueChanged.connect(self.refreshSummaryAnalysis)
+        self.normalizedCheck.toggled.connect(self.refreshRideAnalysis)
+        self.alignmentOffsetSpin.valueChanged.connect(self.setAlignmentOffset)
+        self.loadRideButton.clicked.connect(self.loadRideHistory)
+        self.exportReportButton.clicked.connect(self.exportRideReport)
+        self.loadReferenceButton.clicked.connect(self.loadReferenceRide)
+        self.comparisonTable.itemSelectionChanged.connect(self.updateComparisonPlot)
         return tab
+
+    def applySummaryPlotTheme(self, *_args) -> None:
+        tokens = FluentThemeManager.DARK if QApplication.instance().styleHints().colorScheme().name == "Dark" else FluentThemeManager.LIGHT
+        for widget in (self.summaryPlots, self.ridePlots, self.comparisonPlot):
+            widget.setBackground(tokens["surface_background"])
+        for plot in (self.powerAnalysisPlot, self.cadenceAnalysisPlot, self.balanceAnalysisPlot,
+                     self.emgRidePlot, self.pedalRidePlot, self.trainerRidePlot,
+                     self.comparisonPlot.getPlotItem()):
+            for axis_name in ("left", "bottom"):
+                axis = plot.getAxis(axis_name)
+                axis.setPen(tokens["text_secondary"])
+                axis.setTextPen(tokens["text_primary"])
+        if hasattr(self, "plotWidget"):
+            self.plotWidget.setBackground(tokens["surface_background"])
+            for plot, _curve, stats in self.curves.values():
+                stats.setColor(tokens["text_secondary"])
+                for axis_name in ("left", "bottom"):
+                    axis = plot.getAxis(axis_name)
+                    axis.setPen(tokens["text_secondary"])
+                    axis.setTextPen(tokens["text_primary"])
+        if hasattr(self, "leftPowerBalanceRing"):
+            self.leftPowerBalanceRing.setThemeColors(
+                tokens["success"], tokens["border_primary"], tokens["text_primary"],
+            )
+            self.rightPowerBalanceRing.setThemeColors(
+                tokens["brand_background"], tokens["border_primary"], tokens["text_primary"],
+            )
+
+    def onSystemThemeChanged(self, *_args) -> None:
+        FluentThemeManager(QApplication.instance()).apply()
+        self.applySummaryPlotTheme()
 
     def createCollectionTab(self) -> QWidget:
         tab = QWidget()
@@ -717,6 +979,10 @@ class TrignoWindow(QMainWindow):
         self.countdownTimer.setInterval(1000)
         self.countdownTimer.timeout.connect(self.updateCountdown)
         self.remainingSeconds = 0
+        # The calibration clock is display-only.  Sample count, rather than
+        # this wall clock, decides when a calibration is complete.
+        self.countdownMode = "collection"
+        self.countdownStopsStream = True
         self.durationMinutesSpin.valueChanged.connect(self.resetCountdownDisplay)
         self.durationSecondsSpin.valueChanged.connect(self.resetCountdownDisplay)
         self.applyStyles()
@@ -1001,6 +1267,10 @@ class TrignoWindow(QMainWindow):
         if left is not None:
             fields.append(f"左右 {left:.1f}% / {100-left:.1f}%")
         self.pedalTelemetryLabel.setText("踏板功率資訊：" + " · ".join(fields))
+        if self.rideSession is not None:
+            point = {key: data.get(key) for key in ("power_w", "cadence_rpm", "left_balance_percent", "right_balance_percent", "left_power_w", "right_power_w", "crank_revolutions")}
+            point["time_s"] = self.rideTime()
+            add_point(self.rideSession, "pedal", point)
         if self.pedalRecorder:
             try:
                 self.pedalRecorder.append(data)
@@ -1060,6 +1330,14 @@ class TrignoWindow(QMainWindow):
             )
         if data.resistance is not None:
             self.bikeMetricValues["resistance"].setText(f"{data.resistance:g}")
+        if self.rideSession is not None:
+            add_point(self.rideSession, "trainer", {
+                "time_s": self.rideTime(), "resistance_level": self.resistanceSpin.value(),
+                "resistance_native_commanded": self.commandedNativeResistance,
+                "resistance_native_reported": data.resistance, "power_watts": data.powerWatts,
+                "speed_kph": data.speedKph, "cadence_rpm": data.cadenceRpm,
+                "heart_rate_bpm": data.heartRate, "session_distance_meters": sessionDistanceMeters,
+                "energy_kcal": data.energyKcal})
         if self.trainerRecorder:
             try:
                 self.trainerRecorder.append(
@@ -1253,8 +1531,10 @@ class TrignoWindow(QMainWindow):
         baseline = "--" if result["baseline_mv"] is None else f"{result['baseline_mv']:.3f} mV"
         delta = "--" if result["delta_mv"] is None else f"{result['delta_mv']:+.3f} mV"
         percent = "--" if result["percent"] is None else f"{result['percent']:+.1f}%"
+        ratio = "--" if result["percent"] is None else f"{1 + result['percent'] / 100:.2f} 倍"
         if channel < len(self.baselineMetricLabels):
-            self.baselineMetricLabels[channel].setText(f"目前 RMS：{current}\n基準：{baseline}｜差異：{delta}｜變化：{percent}")
+            comparison = f"normalized RMS：{ratio}" if self.normalizedCheck.isChecked() else f"差異：{delta}｜變化：{percent}"
+            self.baselineMetricLabels[channel].setText(f"目前 RMS：{current}\n基準：{baseline}｜{comparison}")
             self.baselineStatusLabels[channel].setText(result["text"])
             self.baselineStatusLabels[channel].setToolTip("狀態是相對基準偏離程度，並非醫療診斷。")
         FluentThemeManager.set_property(self.sensorRows[channel], "emgStatus", result["state"])
@@ -1541,11 +1821,242 @@ class TrignoWindow(QMainWindow):
     def updateSensorStates(self, paired: list[int], active: list[int], serials: dict[int, str]) -> None:
         self.sensorActive = [index + 1 in active for index in range(CHANNEL_COUNT)]
         self.sensorSerials = serials
+        if self.rideSession is not None:
+            self.rideSession["channels"] = {
+                str(slot): {"mapping_name": self.mappingIdentity(slot - 1),
+                            "label": self.mappings[slot - 1].chinese_name,
+                            "sensor_serial": serials.get(slot, "Unknown SID")}
+                for slot in active}
         self.updateSensorRows()
         for index, check in enumerate(self.sensorChecks):
             check.setChecked(self.sensorActive[index])
         if self.calibrationOnly and self.preprocessor is not None and self.calibrationSession is None:
             self.calibrationSession = CalibrationSession(self.currentSampleRate, {index for index, enabled in enumerate(self.sensorActive) if enabled})
+
+    def rideTime(self) -> float:
+        return max(0.0, time.monotonic() - self.rideStartedAt)
+
+    def beginRideAnalysis(self) -> None:
+        baselines = {str(slot): asdict(record) for slot, record in self.baselineManager.records.items()}
+        self.rideSession = new_session(asdict(self.collectionSubject), baselines)
+        self.rideSession["filter"] = asdict(self.filterSettings)
+        self.rideSession["channels"] = {}
+        self.loadedRidePath = None
+        self.collectedRidePath = None
+        self.alignmentOffsetSpin.blockSignals(True)
+        self.alignmentOffsetSpin.setValue(0.0)
+        self.alignmentOffsetSpin.blockSignals(False)
+        self.rideSession["raw_files"] = {
+            name: path.name for name, path in (("emg", self.collectionOutput),
+                ("pedal", self.pedalOutput), ("trainer", self.trainerOutput))
+            if path is not None and (name != "emg" or self.useEmgCheck.isChecked())}
+        self.rideStartedAt = time.monotonic()
+        self.lastEmgAnalysisAt = 0.0
+        self.latestRideSession = self.rideSession
+        self.collectedRideSession = self.rideSession
+        self.currentSessionSummaryButton.setEnabled(True)
+        self.summarySourceLabel.setText("資料來源：本次騎乘，收集中")
+        self.refreshRideAnalysis()
+        self.refreshComparison()
+
+    def finishRideAnalysis(self) -> None:
+        session, self.rideSession = self.rideSession, None
+        if session is None:
+            return
+        self.latestRideSession = session
+        self.collectedRideSession = session
+        self.summarySourceLabel.setText("資料來源：本次騎乘，分析完成")
+        if self.collectionOutput:
+            path = self.collectionOutput.with_suffix(".analysis.json")
+            try:
+                session["aligned_1s"] = analyze(session)["aligned"]
+                save_session(path, session)
+                self.loadedRidePath = path
+                self.collectedRidePath = path
+                self.appendLog(f"騎乘分析已保存：{path.name}")
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, "無法保存分析", str(exc))
+        self.refreshRideAnalysis()
+        self.refreshComparison()
+
+    def refreshLiveRideSummary(self) -> None:
+        if self.rideSession is not None and self.tabs.currentWidget() is self.summaryTab:
+            if self.summaryTabs.currentIndex() == 0:
+                self.refreshRideAnalysis()
+            elif self.summaryTabs.currentIndex() == 1 and self.referenceRideSession is not None:
+                self.refreshComparison()
+            elif self.summaryTabs.currentIndex() in (2, 3) and self.pedalRecorder is not None and self.pedalSummarySource == "current":
+                if len(self.summaryRecords) != len(self.pedalRecorder.records):
+                    self.summaryRecords = list(self.pedalRecorder.records)
+                    self.refreshSummaryAnalysis()
+
+    def refreshRideAnalysis(self) -> None:
+        session = self.rideSession or self.latestRideSession
+        if session is None:
+            return
+        normalized = self.normalizedCheck.isChecked()
+        result = analyze(session, normalized)
+        self.rideEmptyLabel.hide()
+        self.rideDetails.setPlainText("\n".join(summary_lines(result, normalized)))
+        self.rideMuscleTable.setRowCount(len(result["emg"]))
+        for row, (slot, data) in enumerate(result["emg"].items()):
+            channel = session.get("channels", {}).get(slot, {})
+            label = f"S{int(slot):02d} {channel.get('label') or channel.get('mapping_name') or ''}"
+            def fmt(value, suffix="", digits=3):
+                return "--" if value is None else f"{value:.{digits}f}{suffix}"
+            compare_value = fmt(data["comparison"]["mean"], " 倍" if normalized else " mV")
+            phase = f"{fmt(data['early_rms_mv'])} → {fmt(data['late_rms_mv'])} mV"
+            status = "、".join(data["quality"]) or "有效"
+            for column, value in enumerate((label, fmt(data["rms_mv"]["mean"], " mV"),
+                                            fmt(data["rms_mv"]["max"], " mV"), compare_value, phase, status)):
+                self.rideMuscleTable.setItem(row, column, QTableWidgetItem(value))
+        self.summaryMetricValues["duration"].setText(f"{result['duration_s']:.0f}")
+        self.summaryMetricValues["muscles"].setText(str(sum(item["rms_mv"]["count"] > 0 for item in result["emg"].values())))
+        pedal_power = result["pedal"]["power_w"]["mean"]
+        resistance = result["trainer"]["resistance_native_reported"]["mean"]
+        self.summaryMetricValues["pedal_power"].setText("--" if pedal_power is None else f"{pedal_power:.0f}")
+        self.summaryMetricValues["resistance"].setText("--" if resistance is None else f"{resistance:.1f}")
+        self.rideStateLabel.setText("收集中" if self.rideSession is not None else "分析完成")
+        FluentThemeManager.set_property(self.rideStateLabel, "fluentSeverity", "info" if self.rideSession is not None else "success")
+        self.exportReportButton.setEnabled(True)
+        for plot in (self.emgRidePlot, self.pedalRidePlot, self.trainerRidePlot):
+            plot.clear()
+        key = "normalized" if normalized else "delta_mv"
+        for slot in sorted(result["emg"]):
+            rows = [row for row in session["emg"] if str(row.get("slot")) == slot]
+            offset = result["emg_trainer_offset_s"]
+            x = [row["time_s"] + offset for row in rows if row.get(key) is not None]
+            y = [row[key] for row in rows if row.get(key) is not None]
+            if x:
+                stride = max(1, len(x) // 2000)
+                self.emgRidePlot.plot(x[::stride], y[::stride], pen=pg.mkPen(COLORS[(int(slot) - 1) % len(COLORS)], width=2), name=f"S{int(slot):02d}")
+        for key, color in (("power_w", "#c2185b"), ("cadence_rpm", "#f39c12")):
+            rows = [row for row in session["pedal"] if row.get(key) is not None]
+            if rows:
+                stride = max(1, len(rows) // 2000)
+                self.pedalRidePlot.plot([row["time_s"] for row in rows[::stride]], [row[key] for row in rows[::stride]], pen=pg.mkPen(color, width=2))
+        for key, color in (("resistance_native_commanded", "#43a047"), ("resistance_native_reported", "#1684d7")):
+            rows = [row for row in session["trainer"] if row.get(key) is not None]
+            if rows:
+                stride = max(1, len(rows) // 2000)
+                self.trainerRidePlot.plot([row["time_s"] for row in rows[::stride]], [row[key] for row in rows[::stride]], pen=pg.mkPen(color, width=2))
+
+    def loadRideHistory(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "載入歷史騎乘", self.pathEdit.text(), "分析檔 (*.analysis.json)")
+        if not path:
+            return
+        try:
+            self.latestRideSession = load_session(Path(path))
+        except (OSError, ValueError, TypeError) as exc:
+            QMessageBox.warning(self, "無法載入騎乘分析", str(exc))
+            return
+        self.summarySourceLabel.setText(f"歷史騎乘：{Path(path).name}")
+        self.loadedRidePath = Path(path)
+        self.alignmentOffsetSpin.blockSignals(True)
+        self.alignmentOffsetSpin.setValue(float(self.latestRideSession.get("emg_trainer_offset_s", 0)))
+        self.alignmentOffsetSpin.blockSignals(False)
+        self.refreshRideAnalysis()
+        self.refreshComparison()
+        self.summaryTabs.setCurrentIndex(0)
+
+    def setAlignmentOffset(self, value: float) -> None:
+        session = self.rideSession or self.latestRideSession
+        if session is None:
+            return
+        session["emg_trainer_offset_s"] = value
+        self.refreshRideAnalysis()
+        if self.rideSession is None and self.loadedRidePath is not None:
+            try:
+                session["aligned_1s"] = analyze(session)["aligned"]
+                save_session(self.loadedRidePath, session)
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, "無法儲存對齊設定", str(exc))
+
+    def loadReferenceRide(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "選取第一次騎乘", self.pathEdit.text(), "分析檔 (*.analysis.json)")
+        if not path:
+            return
+        try:
+            self.referenceRideSession = load_session(Path(path))
+        except (OSError, ValueError, TypeError) as exc:
+            QMessageBox.warning(self, "無法載入第一次騎乘", str(exc))
+            return
+        self.loadReferenceButton.setText(f"第一次：{Path(path).name}")
+        self.refreshComparison()
+        self.summaryTabs.setCurrentIndex(1)
+
+    def refreshComparison(self) -> None:
+        first, second = self.referenceRideSession, self.rideSession or self.latestRideSession
+        if first is None or second is None:
+            self.comparisonStatusLabel.setText("選取第一次騎乘，再使用本次或載入歷史騎乘作為第二次。")
+            self.comparisonTable.setRowCount(0)
+            self.comparisonPlot.clear()
+            return
+        result = compare_sessions(first, second)
+        self.comparisonStatusLabel.setText("第一次／第二次依相同肌肉、側別、感測器及濾波設定配對。差異 = 第二次 − 第一次。")
+        bilateral = [f"{item['muscle']} 右−左相對活化：{item['first_right_minus_left_percent']:+.1f}% → {item['second_right_minus_left_percent']:+.1f}%"
+                     for item in result["bilateral"]
+                     if item["first_right_minus_left_percent"] is not None and item["second_right_minus_left_percent"] is not None]
+        self.comparisonNotes.setText("\n".join([*bilateral, *result["notes"]]))
+        previous_row = self.comparisonTable.currentRow()
+        self.comparisonTable.blockSignals(True)
+        self.comparisonTable.setRowCount(len(result["channels"]))
+        for row, entry in enumerate(result["channels"]):
+            a, b = entry["first"], entry["second"]
+            def fmt(value, signed=False, digits=3):
+                return "--" if value is None else f"{value:+.{digits}f}" if signed else f"{value:.{digits}f}"
+            cells = (entry["label"], fmt(a["median_mv"]), fmt(b["median_mv"]),
+                     fmt(entry["median_difference_mv"], True), fmt(entry["median_change_percent"], True, 1),
+                     f"{fmt(a['p90_mv'])} / {fmt(b['p90_mv'])}", entry["quality"])
+            for column, value in enumerate(cells):
+                item = QTableWidgetItem(value)
+                if column > 0:
+                    item.setTextAlignment(Qt.AlignCenter)
+                self.comparisonTable.setItem(row, column, item)
+        self.comparisonTable.blockSignals(False)
+        self.comparisonResult = result
+        if result["channels"]:
+            self.comparisonTable.selectRow(max(0, min(previous_row, len(result["channels"]) - 1)))
+            self.updateComparisonPlot()
+        else:
+            self.comparisonPlot.clear()
+
+    def updateComparisonPlot(self) -> None:
+        self.comparisonPlot.clear()
+        first, second = self.referenceRideSession, self.rideSession or self.latestRideSession
+        if first is None or second is None or not hasattr(self, "comparisonResult"):
+            return
+        row = self.comparisonTable.currentRow()
+        entries = self.comparisonResult["channels"]
+        if row < 0 or row >= len(entries):
+            return
+        slot = entries[row]["slot"]
+        tokens = FluentThemeManager.DARK if QApplication.instance().styleHints().colorScheme().name == "Dark" else FluentThemeManager.LIGHT
+        for session, name, color in ((first, "第一次", tokens["text_secondary"]),
+                                     (second, "第二次", tokens["brand_background"])):
+            points = [(sample["time_s"], sample["rms_mv"]) for sample in session.get("emg", [])
+                      if str(sample.get("slot")) == slot and sample.get("rms_mv") is not None]
+            if points:
+                stride = max(1, len(points) // 1500)
+                points = points[::stride]
+                self.comparisonPlot.plot([point[0] for point in points], [point[1] for point in points],
+                                         pen=pg.mkPen(color, width=2), name=name)
+
+    def exportRideReport(self) -> None:
+        session = self.rideSession or self.latestRideSession
+        if session is None:
+            return
+        default = str((self.collectionOutput or Path(self.pathEdit.text()) / "cycling").with_suffix(".html"))
+        path, _ = QFileDialog.getSaveFileName(self, "匯出 HTML 報表", default, "HTML (*.html)")
+        if not path:
+            return
+        try:
+            export_html(Path(path), session, self.normalizedCheck.isChecked(), self.referenceRideSession,
+                        self.analysisFtpSpin.value())
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "報表匯出失敗", str(exc))
+            return
+        self.appendLog(f"HTML 報表已匯出：{Path(path).name}")
 
     def startStream(self) -> None:
         if self.calibrationOnly:
@@ -1601,6 +2112,7 @@ class TrignoWindow(QMainWindow):
             self.infoRecorder = None
             QMessageBox.critical(self, "資訊檔輸出錯誤", str(exc))
             return
+        self.beginRideAnalysis()
         self.emgRateLabel.setText("EMG 頻率：正在向 SDK 查詢…")
         for history in self.histories:
             history.clear()
@@ -1705,6 +2217,7 @@ class TrignoWindow(QMainWindow):
             self.infoRecorder = None
             QMessageBox.critical(self, "資料檔建立失敗", str(exc))
             return
+        self.beginRideAnalysis()
         self.bikeOnlySession = True
         self.beginTrainerRecording()
         self.beginPedalRecording()
@@ -1725,6 +2238,7 @@ class TrignoWindow(QMainWindow):
         self.countdownTimer.stop()
         self.closeTrainerRecording()
         self.closePedalRecording()
+        self.finishRideAnalysis()
         self.bikeOnlySession = False
         self.setStreaming(False)
         self.setEmgStatus("騎乘裝置資料收集完成", "connected")
@@ -1739,7 +2253,10 @@ class TrignoWindow(QMainWindow):
         if text == "串流中" and (not self.calibrationOnly or self.calibrationRecording):
             self.beginTrainerRecording()
             self.beginPedalRecording()
-            if not self.calibrationOnly:
+        if text == "\u4e32\u6d41\u4e2d":
+            if self.calibrationOnly:
+                self.startCalibrationCountdown()
+            else:
                 self.startCountdown()
 
     def beginTrainerRecording(self) -> None:
@@ -1784,6 +2301,9 @@ class TrignoWindow(QMainWindow):
         try:
             self.pedalRecorder = PedalCsvRecorder(self.pedalOutput)
             self.pedalRecorder.start()
+            self.pedalSummarySource = "current"
+            self.summaryRecords = []
+            self.currentSessionSummaryButton.setEnabled(True)
             self.appendLog(f"踏板 CSV 開始輸出：{self.pedalOutput.name}")
         except OSError as exc:
             self.pedalRecorder = None
@@ -1817,20 +2337,42 @@ class TrignoWindow(QMainWindow):
     def setSummaryRecords(self, records: list[dict], source: str) -> None:
         """Render one standardized summary on the persistent summary page."""
         self.summaryRecords = list(records)
+        self.pedalSummarySource = "fit" if "匯入 FIT" in source else "current"
         self.summarySourceLabel.setText(source)
         self.refreshSummaryAnalysis()
 
     def refreshSummaryAnalysis(self) -> None:
         """Refresh the numerical report and time-series plots for the selected source."""
         if not self.summaryRecords:
+            self.summaryDetails.clear()
+            for label in self.pedalMetricCards.values():
+                label.setText("--")
+            self.pedalZoneTable.clearContents()
+            for plot in (self.powerAnalysisPlot, self.cadenceAnalysisPlot, self.balanceAnalysisPlot):
+                plot.clear()
+            self.leftPowerBalanceRing.setValues(None, None)
+            self.rightPowerBalanceRing.setValues(None, None)
             return
         ftp = self.analysisFtpSpin.value()
         self.settings.setValue("analysis/ftp_w", ftp)
         summary = summarize_pedal_records(self.summaryRecords)
+        analysis = analyze_pedal_records(self.summaryRecords, ftp)
+        self.leftPowerBalanceRing.setValues(
+            summary.get("average_left_balance_percent"), summary.get("average_left_power_w"),
+        )
+        self.rightPowerBalanceRing.setValues(
+            summary.get("average_right_balance_percent"), summary.get("average_right_power_w"),
+        )
         self.summaryDetails.setPlainText("\n".join([
             *pedal_summary_lines(summary), "", *pedal_analysis_lines(self.summaryRecords, ftp),
         ]))
-        analysis = analyze_pedal_records(self.summaryRecords, ftp)
+        for key, label in self.pedalMetricCards.items():
+            value = analysis[key]
+            label.setText("--" if value is None else f"{value:.0f}" if key in ("peak_5s_w", "coverage_percent") else f"{value:.2f}" if key == "intensity_factor" else f"{value:.0f}")
+        self.pedalZoneTable.setRowCount(len(analysis["zones"]))
+        for row, zone in enumerate(analysis["zones"]):
+            for column, value in enumerate((zone["name"], zone["bounds"], f"{zone['seconds']} 秒", f"{zone['percent']:.1f}%")):
+                self.pedalZoneTable.setItem(row, column, QTableWidgetItem(value))
         series = analysis["series"]
         x = np.array([point["elapsed_s"] for point in series], dtype=float)
         power = np.array([np.nan if point["power_w"] is None else point["power_w"] for point in series], dtype=float)
@@ -1840,16 +2382,49 @@ class TrignoWindow(QMainWindow):
             plot.clear()
         if not len(x):
             return
-        self.powerAnalysisPlot.plot(x, power, pen=pg.mkPen("#c2185b", width=2), connect="finite")
+        tokens = FluentThemeManager.DARK if QApplication.instance().styleHints().colorScheme().name == "Dark" else FluentThemeManager.LIGHT
+        power_color = QColor(tokens["danger"])
+        power_fill = QColor(power_color)
+        power_fill.setAlpha(64)
+        self.powerAnalysisPlot.plot(
+            x, power, pen=pg.mkPen(power_color, width=2), fillLevel=0,
+            brush=pg.mkBrush(power_fill), connect="finite",
+        )
         average_power = summary.get("average_power_w")
         if average_power is not None:
             self.powerAnalysisPlot.addItem(pg.InfiniteLine(pos=float(average_power), angle=0,
-                                                           pen=pg.mkPen("#616161", style=Qt.DashLine)))
-        self.cadenceAnalysisPlot.plot(x, cadence, pen=pg.mkPen("#f39c12", width=2), connect="finite")
+                                                           pen=pg.mkPen(tokens["text_secondary"], style=Qt.DashLine)))
+        maximum_power = summary.get("maximum_power_w")
+        if maximum_power is not None:
+            self.powerAnalysisPlot.addItem(pg.InfiniteLine(pos=float(maximum_power), angle=0,
+                                                           pen=pg.mkPen(tokens["danger"], style=Qt.DotLine)))
+        if average_power is not None and maximum_power is not None:
+            self.powerAnalysisPlot.setTitle(
+                f"\u529F\u7387 Power \uFF5C \u5E73\u5747 {average_power:.0f} W \uFF5C \u6700\u5927 {maximum_power:.0f} W"
+            )
+        else:
+            self.powerAnalysisPlot.setTitle("\u529F\u7387 Power \uFF5C \u7121\u8DB3\u5920\u7684\u529F\u7387\u8CC7\u6599")
+        cadence_color = QColor(tokens["warning"])
+        cadence_fill = QColor(cadence_color)
+        cadence_fill.setAlpha(64)
+        self.cadenceAnalysisPlot.plot(
+            x, cadence, pen=pg.mkPen(cadence_color, width=2), fillLevel=0,
+            brush=pg.mkBrush(cadence_fill), connect="finite",
+        )
         average_cadence = summary.get("average_cadence_rpm")
         if average_cadence is not None:
             self.cadenceAnalysisPlot.addItem(pg.InfiniteLine(pos=float(average_cadence), angle=0,
-                                                             pen=pg.mkPen("#616161", style=Qt.DashLine)))
+                                                             pen=pg.mkPen(tokens["text_secondary"], style=Qt.DashLine)))
+        maximum_cadence = summary.get("maximum_cadence_rpm")
+        if maximum_cadence is not None:
+            self.cadenceAnalysisPlot.addItem(pg.InfiniteLine(pos=float(maximum_cadence), angle=0,
+                                                             pen=pg.mkPen(tokens["danger"], style=Qt.DotLine)))
+        if average_cadence is not None and maximum_cadence is not None:
+            self.cadenceAnalysisPlot.setTitle(
+                f"\u8E0F\u983B Cadence \uFF5C \u5E73\u5747 {average_cadence:.0f} rpm \uFF5C \u6700\u5927 {maximum_cadence:.0f} rpm"
+            )
+        else:
+            self.cadenceAnalysisPlot.setTitle("\u8E0F\u983B Cadence \uFF5C \u7121\u8DB3\u5920\u7684\u8E0F\u983B\u8CC7\u6599")
         valid = np.isfinite(left)
         if valid.any():
             self.balanceAnalysisPlot.plot(x[valid], left[valid], pen=None, symbol="o", symbolSize=6,
@@ -1858,8 +2433,27 @@ class TrignoWindow(QMainWindow):
                                           symbolBrush="#1684d7", name="右")
 
     def showCurrentSessionSummary(self) -> None:
+        if self.rideSession is not None and self.pedalRecorder is not None:
+            self.setSummaryRecords(self.pedalRecorder.records, "資料來源：本次騎乘踏板即時資料")
+            self.summaryTabs.setCurrentIndex(2)
+            return
+        if self.collectedRideSession is not None:
+            if self.latestPedalRecords:
+                self.summaryRecords = list(self.latestPedalRecords)
+                self.pedalSummarySource = "current"
+                self.refreshSummaryAnalysis()
+            self.latestRideSession = self.collectedRideSession
+            self.loadedRidePath = self.collectedRidePath
+            self.alignmentOffsetSpin.blockSignals(True)
+            self.alignmentOffsetSpin.setValue(float(self.latestRideSession.get("emg_trainer_offset_s", 0)))
+            self.alignmentOffsetSpin.blockSignals(False)
+            self.summarySourceLabel.setText("資料來源：本程式最新收集的騎乘資料")
+            self.refreshRideAnalysis()
+            self.refreshComparison()
+            self.summaryTabs.setCurrentIndex(0)
+            return
         if not self.latestPedalRecords:
-            QMessageBox.information(self, "本次摘要", "本次尚未收集到踏板資料。")
+            QMessageBox.information(self, "本次摘要", "本次尚未收集到騎乘資料。")
             return
         self.currentSessionSummaryButton.setEnabled(True)
         self.setSummaryRecords(self.latestPedalRecords, "資料來源：本程式最新收集的踏板資料")
@@ -1874,6 +2468,7 @@ class TrignoWindow(QMainWindow):
             QMessageBox.warning(self, "無法匯入 FIT", f"讀取 FIT 檔失敗：{exc}")
             return
         self.setSummaryRecords(records, f"資料來源：匯入 FIT — {Path(path).name}")
+        self.summaryTabs.setCurrentIndex(2)
         self.appendLog(f"已匯入 Garmin FIT 摘要：{Path(path).name}（{len(records)} 筆 record）")
 
     def collectionMetadataReady(self, metadata: dict) -> None:
@@ -1910,6 +2505,12 @@ class TrignoWindow(QMainWindow):
         return self.durationMinutesSpin.value() * 60 + self.durationSecondsSpin.value()
 
     def updateCountdownLabel(self) -> None:
+        if self.countdownMode == "calibration":
+            minutes, seconds = divmod(max(0, self.remainingSeconds), 60)
+            suffix = "" if self.remainingSeconds > 0 else "\uFF08\u7B49\u5F85\u5B8C\u6210\u6700\u5F8C\u6A23\u672C\uFF09"
+            self.countdownLabel.setText(f"\u57FA\u6E96\u5012\u6578\uFF1A{minutes:02d}:{seconds:02d}{suffix}")
+            self.countdownLabel.show()
+            return
         if self.remainingSeconds <= 0:
             if self.configuredDurationSeconds() <= 0:
                 self.countdownLabel.hide()
@@ -1927,16 +2528,28 @@ class TrignoWindow(QMainWindow):
             self.updateCountdownLabel()
 
     def startCountdown(self) -> None:
+        self.countdownMode = "collection"
+        self.countdownStopsStream = True
         self.remainingSeconds = self.configuredDurationSeconds()
         self.updateCountdownLabel()
         if self.remainingSeconds > 0:
             self.countdownTimer.start()
+
+    def startCalibrationCountdown(self) -> None:
+        """Show the fixed 20-second countdown without controlling capture."""
+        self.countdownMode = "calibration"
+        self.countdownStopsStream = False
+        self.remainingSeconds = 20
+        self.updateCountdownLabel()
+        self.countdownTimer.start()
 
     def updateCountdown(self) -> None:
         self.remainingSeconds -= 1
         self.updateCountdownLabel()
         if self.remainingSeconds <= 0:
             self.countdownTimer.stop()
+            if not self.countdownStopsStream:
+                return
             self.appendLog("收集時間到，自動停止串流")
             self.stopStream()
 
@@ -1956,9 +2569,25 @@ class TrignoWindow(QMainWindow):
                 if self.calibrationSession.complete:
                     self.finishBaselineCalibration()
             else:
-                for channel, current in self.rmsExtractor.add(filtered).items():
+                rms_values = self.rmsExtractor.add(filtered)
+                for channel, current in rms_values.items():
                     if channel in activeChannels:
                         self.updateBaselineRow(channel, current)
+                if self.rideSession is not None and self.rideTime() - self.lastEmgAnalysisAt >= 0.2:
+                    stamp = self.rideTime()
+                    self.lastEmgAnalysisAt = stamp
+                    self.rideSession["sample_rate_hz"] = self.currentSampleRate
+                    for channel in activeChannels:
+                        current = rms_values.get(channel)
+                        record = self.baselineManager.records.get(channel + 1)
+                        compatible = record is not None and self.baselineManager.compatible(
+                            record, self.mappingIdentity(channel), self.sensorSerials.get(channel + 1, "Unknown SID"),
+                            self.currentSampleRate, self.filterSettings)
+                        comparison = compare_rms(current, record.rms_mv if compatible else None)
+                        if record is not None and not compatible:
+                            comparison["quality"] = "基準不相容"
+                        add_point(self.rideSession, "emg", {"time_s": stamp, "slot": channel + 1,
+                            "rms_mv": current, **comparison})
         self.sampleLabel.setText(f"{len(self.histories[activeChannels[0]]):,} samples in view")
 
     def emgRateReady(self, sampleRate: float, samplesPerFrame: int, frameInterval: float) -> None:
@@ -2024,6 +2653,8 @@ class TrignoWindow(QMainWindow):
         self.countdownTimer.stop()
         self.closeTrainerRecording()
         self.closePedalRecording()
+        if not self.calibrationOnly:
+            self.finishRideAnalysis()
         self.setStreaming(False)
         if self.calibrationOnly:
             self.calibrationOnly = False
@@ -2073,17 +2704,26 @@ class TrignoWindow(QMainWindow):
                 plot.hideAxis("bottom")
             plot.showGrid(x=True, y=True, alpha=0.16)
             plot.setMenuEnabled(False)
-            curve = plot.plot(pen=pg.mkPen(COLORS[channel % len(COLORS)], width=1))
+            color = QColor(COLORS[channel % len(COLORS)])
+            fill = QColor(color)
+            fill.setAlpha(56)
+            curve = plot.plot(
+                pen=pg.mkPen(color, width=1), fillLevel=0, brush=pg.mkBrush(fill),
+            )
             curve.setDownsampling(auto=True, method="peak")
             curve.setClipToView(True)
-            self.curves[channel] = (plot, curve)
+            tokens = FluentThemeManager.DARK if QApplication.instance().styleHints().colorScheme().name == "Dark" else FluentThemeManager.LIGHT
+            stats = pg.TextItem(color=tokens["text_secondary"], anchor=(1, 1))
+            stats.setZValue(10)
+            plot.addItem(stats)
+            self.curves[channel] = (plot, curve, stats)
         self.refreshPlots()
 
     def refreshPlots(self) -> None:
         if not hasattr(self, "plotWidget"):
             return
         duration, count = 10, int(10 * self.currentSampleRate)
-        for channel, (plot, curve) in self.curves.items():
+        for channel, (plot, curve, stats) in self.curves.items():
             values = np.asarray(list(self.histories[channel])[-count:], dtype=np.float32) * 1000
             xAxis = (np.arange(len(values)) - len(values) + 1) / self.currentSampleRate
             limit = 1.0
@@ -2092,6 +2732,15 @@ class TrignoWindow(QMainWindow):
             plot.setXRange(-duration, 0, padding=0)
             plot.setYRange(-limit, limit, padding=0)
             curve.setData(xAxis, values)
+            if len(values):
+                amplitudes = np.abs(values)
+                mean_amplitude = float(np.mean(amplitudes))
+                max_amplitude = float(np.max(amplitudes))
+                stats.setText(f"\u5E73\u5747\u7D55\u5C0D\u632F\u5E45\uFF1A{mean_amplitude:.3f} mV\n\u6700\u5927\u7D55\u5C0D\u632F\u5E45\uFF1A{max_amplitude:.3f} mV")
+                stats.setPos(-0.15, limit * 0.94)
+            else:
+                stats.setText("\u7B49\u5F85 EMG \u6A23\u672C")
+                stats.setPos(-0.15, limit * 0.94)
 
     def pedalReady(self) -> None:
         self.pedalBluetoothReady = True

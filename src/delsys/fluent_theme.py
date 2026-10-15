@@ -72,9 +72,12 @@ class FluentThemeManager(QObject):
         QFrame[fluentRole="surface"], QFrame#panel {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 6px; }}
         QFrame[fluentRole="scanResults"] {{ background: {t['surface_secondary']}; border: 1px solid {t['border_primary']}; border-radius: 4px; }}
         QLabel#title {{ font-size: 20px; font-weight: 600; }} QLabel#sectionTitle {{ font-size: 14px; font-weight: 600; }} QLabel#muted {{ color: {t['text_secondary']}; }}
-        QLineEdit, QComboBox, QSpinBox, QPlainTextEdit {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 4px; padding: 4px 6px; }}
+        QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTableWidget {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 4px; padding: 4px 6px; }}
+        QTableWidget::item {{ padding: 5px; }}
+        QTableWidget::item:selected {{ background: {t['selection_background']}; color: {t['text_primary']}; }}
+        QHeaderView::section {{ background: {t['surface_secondary']}; color: {t['text_primary']}; border: 0; border-bottom: 1px solid {t['border_primary']}; padding: 7px; font-weight: 600; }}
         QLineEdit:hover, QComboBox:hover, QSpinBox:hover {{ border-color: {t['text_secondary']}; }}
-        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QPushButton:focus, QCheckBox:focus {{ border: 2px solid {t['focus_border']}; }}
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus, QTableWidget:focus, QPushButton:focus, QCheckBox:focus {{ border: 2px solid {t['focus_border']}; }}
         QPushButton {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 4px; padding: 4px 8px; min-height: 16px; }}
         QPushButton:hover {{ background: {t['surface_secondary']}; }} QPushButton:pressed {{ background: {t['selection_background']}; }}
         QPushButton[fluentAppearance="primary"], QPushButton#primary {{ background: {t['brand_background']}; color: {t['brand_foreground']}; border-color: {t['brand_background']}; font-weight: 600; }}

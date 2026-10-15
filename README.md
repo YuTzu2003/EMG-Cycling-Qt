@@ -1,32 +1,24 @@
 # EMG Cycling Monitor
 
-Desktop application for collecting Delsys Trigno EMG data and controlling an
-FTMS smart trainer, and a P715 Bluetooth Cycling Power pedal.
+Windows 桌面程式，將 Delsys Trigno EMG、P715 踏板功率計與 FTMS 智慧訓練台資料錄製在同一次騎乘中。程式提供 20 秒 EMG 基準測量、即時 RMS、騎乘摘要、兩次獨立騎乘的肌肉活化比較、歷史紀錄載入及離線 HTML 報表。分析為研究用途；RMS 是肌肉電活動，不能直接當作肌力或診斷。
 
-## Project layout
+## 環境部署
 
-- `src/delsys/gui.py`: application window, settings, and live-collection UI.
-- `src/delsys/emg/`: Trigno protocol, sensor mappings, and EMG workers.
-- `src/delsys/resistance/` and `src/delsys/pedal/`: Bluetooth device services
-  and recording/export code.
+1. 準備 Windows 10/11、Python 3.12 以上、支援 Bluetooth LE 的電腦，並安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/)。
+2. 若要收集 EMG，安裝並啟動 Delsys Trigno SDK Server，確認感測器已配對、啟用且知道 Server IP。只使用踏板／訓練台時不需要啟動 SDK Server。
+3. 在專案根目錄開啟 PowerShell，安裝依賴並啟動：
 
-## Start the GUI
+   ```powershell
+   uv sync
+   uv run emg-cycling
+   ```
 
-```powershell
-uv sync
-uv run emg-cycling
-```
+4. 在「設定」填寫受試者 ID、姓名，勾選本次設備，測試 EMG Server 連線，並掃描／連接 P715 與 FTMS 訓練台。實際設備及 SDK Server 需在本機環境驗證。
 
-## EMG 基準 RMS（Issue #2）
+命令列錄製工具仍可使用 `uv run emg-record --help`。測試指令為 `uv run python -m unittest discover -s tests -v`。
 
-在「編輯感測器／肌肉對應」中可直接查看及手動設定每一通道的基準 RMS（mV），也可按「測量 20 秒基準」：前 10 秒捨棄，後 10 秒使用濾波後的 RMS `sqrt(mean(x²))` 建立基準。即時 EMG 會在後台固定以 20–450 Hz band-pass 濾波，再使用 200 ms 滑動 RMS 與已儲存基準比較；一般測試的 CSV 格式保持不變。
+## 文件
 
-已有原始量測檔時，可按「匯入基準 CSV」選取本程式輸出的 EMG CSV。檔案需包含 `time_seconds` 與可對應目前肌肉名稱的 EMG 欄位，且第一段資料至少連續 20 秒；系統同樣捨棄前 10 秒後建立基準，且不會改寫來源檔案。
+- [系統使用操作說明](SYSTEM_USER_GUIDE.md)：基準測量、騎乘、兩次比較、歷史資料及報表操作。
+- [資料取得、同步與分析方法](DATA_PIPELINE.md)：三種設備的欄位來源、時間對齊、計算公式、資料品質及限制。
 
-正式串流會以相同濾波和 200 ms 滑動 RMS 顯示目前值、基準、帶正負號的差異與百分比。可手動修改基準、設定警告/重點察看偏離門檻、啟用或停用研究用顏色提示；設定保存在使用者 AppConfig 的 `emg_baseline_settings.json`。黃色和紅色僅表示相對偏離程度，動作流程、濾波參數與門檻均須先由臨床人員確認，不能作為診斷。
-
-## Record from the command line
-
-```powershell
-uv run emg-record --help
-```
