@@ -1,7 +1,5 @@
 # EMG Cycling Monitor
 
-Windows 桌面程式，將 Delsys Trigno EMG、P715 踏板功率計與 FTMS 智慧訓練台資料錄製在同一次騎乘中。程式提供 20 秒 EMG 基準測量、即時 RMS、騎乘摘要、兩次獨立騎乘的肌肉活化比較、歷史紀錄載入及離線 HTML 報表。分析為研究用途；RMS 是肌肉電活動，不能直接當作肌力或診斷。
-
 ## 環境部署
 
 1. 準備 Windows 10/11、Python 3.12 以上、支援 Bluetooth LE 的電腦，並安裝 [uv](https://docs.astral.sh/uv/getting-started/installation/)。

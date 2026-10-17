@@ -1,9 +1,6 @@
-"""Small, dependency-free summaries for a recorded Cycling Power session."""
 from __future__ import annotations
-
 import math
 from collections.abc import Iterable, Mapping
-
 
 def _number(record: Mapping, key: str) -> float | None:
     value = record.get(key)
@@ -17,13 +14,7 @@ def _number(record: Mapping, key: str) -> float | None:
 def _values(records: Iterable[Mapping], key: str) -> list[float]:
     return [value for record in records if (value := _number(record, key)) is not None]
 
-
 def summarize_pedal_records(records: Iterable[Mapping]) -> dict[str, float | int | None]:
-    """Return the same basic P715 session measures used by the example dashboard.
-
-    Missing cadence and balance values are excluded rather than converted to
-    zero. Left/right estimates are reported only for active, balanced packets.
-    """
     rows = [record for record in records if isinstance(record, Mapping)]
     timestamps = _values(rows, "timestamp")
     power = _values(rows, "power_w")
@@ -45,7 +36,6 @@ def summarize_pedal_records(records: Iterable[Mapping]) -> dict[str, float | int
 
     def average(values: list[float]) -> float | None:
         return sum(values) / len(values) if values else None
-
     return {
         "sample_count": len(rows),
         "duration_seconds": max(timestamps) - min(timestamps) if len(timestamps) >= 2 else None,
@@ -61,28 +51,17 @@ def summarize_pedal_records(records: Iterable[Mapping]) -> dict[str, float | int
 
 
 def pedal_summary_lines(summary: Mapping[str, float | int | None]) -> list[str]:
-    """Format a human-readable, non-clinical session summary."""
     def value(key: str, unit: str, digits: int = 1) -> str:
         number = summary.get(key)
         return "--" if number is None else f"{float(number):.{digits}f} {unit}"
-
-    lines = [f"資料筆數：{summary['sample_count']}"]
-    lines.append(f"收集時間：{value('duration_seconds', '秒')}")
-    lines.append(f"平均功率：{value('average_power_w', 'W')}　最高功率：{value('maximum_power_w', 'W', 0)}")
-    lines.append(f"平均踏頻：{value('average_cadence_rpm', 'rpm')}　最高踏頻：{value('maximum_cadence_rpm', 'rpm', 0)}")
-    lines.append(f"左右平衡：左 {value('average_left_balance_percent', '%')}　右 {value('average_right_balance_percent', '%')}")
-    lines.append(f"左右估計功率：左 {value('average_left_power_w', 'W')}　右 {value('average_right_power_w', 'W')}")
+    lines = [f"收集：{summary['sample_count']} 筆｜{value('duration_seconds', '秒')}"]
+    lines.append(f"功率：平均 {value('average_power_w', 'W')}｜最高 {value('maximum_power_w', 'W', 0)}")
+    lines.append(f"踏頻：平均 {value('average_cadence_rpm', 'rpm')}｜最高 {value('maximum_cadence_rpm', 'rpm', 0)}")
+    lines.append(f"左右平衡：左 {value('average_left_balance_percent', '%')}｜右 {value('average_right_balance_percent', '%')}")
+    lines.append(f"左右估計功率：左 {value('average_left_power_w', 'W')}｜右 {value('average_right_power_w', 'W')}")
     return lines
 
-
 def analyze_pedal_records(records: Iterable[Mapping], ftp_w: int) -> dict:
-    """Derive the non-clinical cycling measures shown by the example dashboard.
-
-    The P715 packets are irregular.  For NP/IF/TSS and power zones, this
-    builds one-second power bins and carries the last valid cadence across the
-    packets between crank events, matching the dashboard's intent without a
-    pandas dependency.
-    """
     rows = [dict(record) for record in records if isinstance(record, Mapping)]
     rows.sort(key=lambda row: _number(row, "timestamp") if _number(row, "timestamp") is not None else float("inf"))
     timed = [row for row in rows if _number(row, "timestamp") is not None]
@@ -91,7 +70,6 @@ def analyze_pedal_records(records: Iterable[Mapping], ftp_w: int) -> dict:
                 "intensity_factor": None, "tss": None, "energy_kj": None,
                 "observed_seconds": 0, "missing_seconds": 0, "coverage_percent": None,
                 "coasting_seconds": 0, "peak_5s_w": None, "peak_60s_w": None}
-
     start = _number(timed[0], "timestamp") or 0.0
     series: list[dict[str, float | None]] = []
     last_cadence: float | None = None
@@ -128,7 +106,6 @@ def analyze_pedal_records(records: Iterable[Mapping], ftp_w: int) -> dict:
     ftp = max(0, int(ftp_w))
     intensity = normalized / ftp if normalized is not None and ftp else None
     coverage = len(observed) / len(power_1s) * 100
-    # TSS assumes continuous coverage over the whole elapsed ride.
     tss = duration / 3600 * intensity ** 2 * 100 if intensity is not None and coverage >= 95 else None
     limits = [0, ftp * .55, ftp * .75, ftp * .90, ftp * 1.05, ftp * 1.20, ftp * 1.50]
     zone_seconds = [0] * 7
@@ -150,24 +127,14 @@ def analyze_pedal_records(records: Iterable[Mapping], ftp_w: int) -> dict:
             "peak_5s_w": max(full_window_means(5), default=None),
             "peak_60s_w": max(full_window_means(60), default=None)}
 
-
 def pedal_analysis_lines(records: Iterable[Mapping], ftp_w: int) -> list[str]:
     """Format advanced training values with their dependency on user-set FTP."""
     analysis = analyze_pedal_records(records, ftp_w)
     def value(key: str, unit: str, digits: int = 1) -> str:
         number = analysis[key]
         return "--" if number is None else f"{float(number):.{digits}f} {unit}"
-    lines = [f"FTP 設定：{ftp_w} W（可手動調整）",
-             f"Normalized Power (NP)：{value('normalized_power_w', 'W')}",
-             f"強度係數 (IF)：{value('intensity_factor', '', 3).strip()}",
-             f"訓練壓力 (TSS)：{value('tss', '', 1).strip()}",
-             f"機械功（已觀測區間）：{value('energy_kj', 'kJ')}",
-             f"5 秒／60 秒最高平均：{value('peak_5s_w', 'W')}／{value('peak_60s_w', 'W')}",
-             f"資料涵蓋：{analysis['observed_seconds']} 秒／{analysis['observed_seconds'] + analysis['missing_seconds']} 秒（{value('coverage_percent', '%', 0)}）；未收到：{analysis['missing_seconds']} 秒",
-             f"零功率時間（已觀測）：{analysis['coasting_seconds']} 秒", "", "功率區間時間分布（已觀測秒數）："]
-    lines.extend(f"{zone['name']}  {zone['bounds']}：{int(zone['seconds'])} 秒（{float(zone['percent']):.0f}%）" for zone in analysis["zones"])
-    if analysis["normalized_power_w"] is None:
-        lines.append("NP／IF／TSS 需至少連續 30 秒有效功率資料。")
-    elif analysis["tss"] is None:
-        lines.append("資料涵蓋率低於 95%，不顯示全程 TSS。")
+    lines = [f"累積踩踏輸出：{value('energy_kj', 'kJ')}",
+             f"短時間最高平均：5 秒 {value('peak_5s_w', 'W')}｜60 秒 {value('peak_60s_w', 'W')}",
+             f"資料完整度：{analysis['observed_seconds']}／{analysis['observed_seconds'] + analysis['missing_seconds']} 秒（{value('coverage_percent', '%', 0)}）｜未收到 {analysis['missing_seconds']} 秒",
+             f"零功率時間：{analysis['coasting_seconds']} 秒"]
     return lines

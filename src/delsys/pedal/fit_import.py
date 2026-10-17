@@ -1,11 +1,7 @@
-"""Read standard cycling record fields from a compatible FIT file."""
 from __future__ import annotations
-
 import math
 from pathlib import Path
-
 from fit_tool import FitFile
-
 
 def _finite_number(value: object) -> float | None:
     try:
@@ -14,9 +10,7 @@ def _finite_number(value: object) -> float | None:
         return None
     return number if math.isfinite(number) else None
 
-
 def _left_balance(value: object) -> float | None:
-    """Convert FIT's left/right-balance byte to a left-side percentage."""
     number = _finite_number(value)
     if number is None:
         return None
@@ -24,9 +18,7 @@ def _left_balance(value: object) -> float | None:
     percentage = 100 - (raw & 0x7F) if raw & 0x80 else raw & 0x7F
     return float(percentage) if 0 <= percentage <= 100 else None
 
-
 def load_pedal_fit(path: Path) -> list[dict]:
-    """Return power/cadence/balance records suitable for the app's summary."""
     fit = FitFile.from_file(str(path))
     rows: list[dict] = []
     for record in fit.records:

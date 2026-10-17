@@ -40,7 +40,6 @@ def new_session(subject: dict, baselines: dict, sample_rate_hz: float | None = N
             "started_at": datetime.now(timezone.utc).isoformat(),
             "sample_rate_hz": sample_rate_hz, "feature": "causal_filtered_200ms_sliding_rms_mv",
             "clock": "GUI monotonic receipt; approximate across devices",
-            "emg_trainer_offset_s": 0.0,
             "emg": [], "pedal": [], "trainer": [], "raw_files": {}, "warnings": []}
 
 
@@ -155,10 +154,10 @@ def analyze(session: dict, normalized: bool = False) -> dict:
     """Align sparse streams to one-second bins, retaining missing values."""
     streams = {name: sorted(session.get(name, []), key=lambda row: row["time_s"])
                for name in ("emg", "pedal", "trainer")}
-    offset = finite(session.get("emg_trainer_offset_s")) or 0.0
-    aligned_emg = ([{**row, "time_s": float(row["time_s"]) + offset}
-                    for row in streams["emg"] if float(row["time_s"]) + offset >= 0]
-                   if offset else streams["emg"])
+    # EMG and trainer timestamps now retain their recorded timing.  Older
+    # sessions can contain a manual offset, but it is intentionally ignored:
+    # the interface no longer offers manual cross-device time alignment.
+    aligned_emg = streams["emg"]
     aligned_streams = {"emg": aligned_emg, "trainer": streams["trainer"]}
     stream_times = {name: [float(row["time_s"]) for row in rows] for name, rows in aligned_streams.items()}
     emg_channels = defaultdict(list)
@@ -243,7 +242,7 @@ def analyze(session: dict, normalized: bool = False) -> dict:
         warnings.append("EMG 與阻力計沒有可對齊的重疊時間")
     for slot, problems in invalid_by_slot.items():
         warnings.extend(f"S{int(slot):02d}：{problem}" for problem in sorted(problems) if slot.isdigit())
-    return {"duration_s": duration, "emg_trainer_offset_s": offset, "emg": emg_summary, "pedal": pedal,
+    return {"duration_s": duration, "emg_trainer_offset_s": 0.0, "emg": emg_summary, "pedal": pedal,
             "trainer": trainer, "resistance_segments": segments, "load_relationship": load_relationship,
             "aligned": aligned,
             "warnings": sorted(set(warnings))}
@@ -276,7 +275,6 @@ def _fmt(value, unit="", digits=1):
 
 def summary_lines(result: dict, normalized: bool = False) -> list[str]:
     lines = [f"騎乘時間：{_fmt(result['duration_s'], ' 秒', 0)}",
-             f"EMG 相對阻力時間偏移：{result['emg_trainer_offset_s']:+.2f} 秒（手動調整；非硬體同步）",
              "EMG 比較：RMS / baseline" if normalized else "EMG 比較：RMS - baseline（mV）", ""]
     for slot, data in result["emg"].items():
         comparison = data["comparison"]
