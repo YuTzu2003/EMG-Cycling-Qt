@@ -80,25 +80,37 @@ def csvColumnNames(mappings: list[SensorMapping]) -> list[str]:
         name = mapping.english_name.strip() or mapping.chinese_name.strip() or "Unassigned"
         suffix = mapping.abbreviation.upper().rsplit("-", 1)[-1]
         side = f"_{suffix}" if suffix in {"L", "R"} else ""
-        columns.append(f"S{mapping.slot:02d}_{name}{side}")
+        columns.append(f"{'_'.join(name.split())}{side}")
     return columns
 
 def matchesCsvColumn(mapping: SensorMapping, column: str) -> bool:
     english = mapping.english_name.strip()
-    candidates = {csvColumnNames([mapping])[0], f"S{mapping.slot:02d}_{english}",
-                  english, mapping.abbreviation.strip()}
+    suffix = mapping.abbreviation.upper().rsplit("-", 1)[-1]
+    side = f"_{suffix}" if suffix in {"L", "R"} else ""
+    # The canonical name is muscle plus side, so CSV imports are independent
+    # of which Delsys sensor slot recorded that muscle.  The remaining forms
+    # keep historical exports importable.
+    candidates = {
+        csvColumnNames([mapping])[0],
+        f"S{mapping.slot:02d}_{english}{side}",
+        f"S{mapping.slot:02d}_{english}",
+        english,
+        mapping.abbreviation.strip(),
+    }
     return column.strip().casefold() in {candidate.casefold() for candidate in candidates if candidate}
 
 
 def recordingChannelSides(emg_path: Path, columns: list[str],mappings: list[SensorMapping]) -> tuple[dict[str, str], str]:
-    companion = emg_path.with_suffix(".analysis.json")
     saved: dict = {}
-    try:
-        document = json.loads(companion.read_text(encoding="utf-8"))
-        if document.get("raw_files", {}).get("emg") == emg_path.name:
-            saved = document.get("channels", {})
-    except (OSError, ValueError, TypeError):
-        pass
+    from delsys.collection import analysisOutputPath
+    for companion in (analysisOutputPath(emg_path), emg_path.with_suffix(".analysis.json")):
+        try:
+            document = json.loads(companion.read_text(encoding="utf-8"))
+            if document.get("raw_files", {}).get("emg") == emg_path.name:
+                saved = document.get("channels", {})
+                break
+        except (OSError, ValueError, TypeError):
+            continue
     sides: dict[str, str] = {}
     sources = set()
     for column in columns:

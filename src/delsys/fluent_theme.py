@@ -96,6 +96,8 @@ class FluentThemeManager(QObject):
         QTabBar::tab:selected {{ color: {t['text_primary']}; background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-bottom: 2px solid {t['text_primary']}; font-weight: 600; }}
         QFrame#metricCard {{ background: {t['window_background']}; border: 1px solid {t['border_primary']}; border-radius: 6px; }}
         QLabel#metricValue {{ font-size: 20px; font-weight: 600; }} QLabel#metricTitle, QLabel#metricUnit {{ color: {t['text_secondary']}; }}
+        QLabel#countdown {{ font-size: 15px; font-weight: 700; }}
+        QLabel#recordingIndicator {{ color: {t['danger']}; font-size: 15px; font-weight: 700; }}
         QLabel#status, QLabel#connectionIndicator {{ padding: 3px 6px; border-radius: 4px; font-weight: 600; }}
         QLabel[fluentSeverity="info"] {{ color: {t['info']}; }} QLabel[fluentSeverity="success"] {{ color: {t['success']}; }} QLabel[fluentSeverity="warning"] {{ color: {t['warning']}; }} QLabel[fluentSeverity="danger"] {{ color: {t['danger']}; }}
         QLabel#status[fluentSeverity="info"], QLabel#connectionIndicator[fluentSeverity="info"] {{ background: {t['info_surface']}; }}

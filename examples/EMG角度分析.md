@@ -94,7 +94,7 @@ python emg_pedal_sync.py EMG.csv pedal_angles.csv -o emg_synced.csv
 
 # 2) 分析：逐圈 × 角度 × 左右腳，剛開始 vs 快結束
 python emg_angle_analysis.py emg_synced.csv --report sync_report.json --out emg_out --start 5 65 --end 240 300
-#    --left S01_...,S03_...  可手動覆蓋左腳通道；--bins 24；--norm 99
+#    --left Biceps_femoris_L,Vastus_medialis_L  可手動覆蓋左腳通道；--bins 24；--norm 99
 ```
 
 `emg_pedal_sync.py` 做的事：濾波與包絡線 → 在參考通道找每圈的爆發尖峰 → 與角度檔的曲柄事件（圈數跨過整數）配對 → 線性迴歸求 EMG 時間比例 a → 以 a 換算 session 時間、把右/左踏板角內插到每個 EMG 樣本 → 用成對感測器尖峰相差 180° 與文獻模板判左右腳（寫在 sync_report.json 的 `leg_assignment`）。

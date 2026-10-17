@@ -170,7 +170,7 @@ class BaselineManager:
         self.records: dict[int, BaselineRecord] = {}
         self.warning_percent = 20.0
         self.focus_percent = 40.0
-        self.thresholds_enabled = False
+        self.thresholds_enabled = True
         self.protocol = ""
         self.filter_settings = asdict(FilterSettings())
         self.load()
@@ -182,7 +182,7 @@ class BaselineManager:
                 return
             self.warning_percent = float(data.get("warning_percent", 20.0))
             self.focus_percent = float(data.get("focus_percent", 40.0))
-            self.thresholds_enabled = bool(data.get("thresholds_enabled", False))
+            self.thresholds_enabled = True
             self.protocol = str(data.get("protocol", ""))
             self.filter_settings = dict(data.get("filter_settings", asdict(FilterSettings())))
             FilterSettings(**self.filter_settings)
