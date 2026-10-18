@@ -98,12 +98,15 @@ class FluentThemeManager(QObject):
         QLabel#metricValue {{ font-size: 20px; font-weight: 600; }} QLabel#metricTitle, QLabel#metricUnit {{ color: {t['text_secondary']}; }}
         QLabel#countdown {{ font-size: 15px; font-weight: 700; }}
         QLabel#recordingIndicator {{ color: {t['danger']}; font-size: 15px; font-weight: 700; }}
-        QLabel#status, QLabel#connectionIndicator {{ padding: 3px 6px; border-radius: 4px; font-weight: 600; }}
+        QLabel#status {{ padding: 3px 6px; border-radius: 4px; font-weight: 600; }}
+        QLabel#connectionIndicator {{ padding: 3px 7px; border: 1px solid transparent; border-radius: 7px; font-size: 11px; font-weight: 600; }}
         QLabel[fluentSeverity="info"] {{ color: {t['info']}; }} QLabel[fluentSeverity="success"] {{ color: {t['success']}; }} QLabel[fluentSeverity="warning"] {{ color: {t['warning']}; }} QLabel[fluentSeverity="danger"] {{ color: {t['danger']}; }}
         QLabel#status[fluentSeverity="info"], QLabel#connectionIndicator[fluentSeverity="info"] {{ background: {t['info_surface']}; }}
-        QLabel#status[fluentSeverity="success"], QLabel#connectionIndicator[fluentSeverity="success"] {{ background: {t['success_surface']}; }}
+        QLabel#status[fluentSeverity="success"] {{ background: {t['success_surface']}; }}
+        QLabel#connectionIndicator[fluentSeverity="success"] {{ background: {t['success_surface']}; border-color: {t['success']}; }}
         QLabel#status[fluentSeverity="warning"], QLabel#connectionIndicator[fluentSeverity="warning"] {{ background: {t['warning_surface']}; }}
-        QLabel#status[fluentSeverity="danger"], QLabel#connectionIndicator[fluentSeverity="danger"] {{ background: {t['danger_surface']}; }}
+        QLabel#status[fluentSeverity="danger"] {{ background: {t['danger_surface']}; }}
+        QLabel#connectionIndicator[fluentSeverity="danger"] {{ background: {t['danger_surface']}; border-color: {t['danger']}; }}
         QFrame#sensorRow[emgStatus="normal"], QFrame#sensorRow[emgStatus="unknown"] {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; }}
         QFrame#sensorRow[emgStatus="warning"] {{ background: {t['warning_surface']}; border: 1px solid {t['warning']}; }}
         QFrame#sensorRow[emgStatus="focus"] {{ background: {t['danger_surface']}; border: 1px solid {t['danger']}; }}

@@ -30,6 +30,7 @@ from delsys.cycling_bluetooth import CyclingDeviceScanWorker
 from delsys.fluent_theme import FluentThemeManager
 from delsys.session_analysis import (add_point, analyze, compare_rms, export_html,load_session, new_session, peak_envelope,save_session)
 from delsys.session_compare import compare_sessions
+from delsys.storage_db import DatabaseConfig, DatabaseWriter, SecondAggregator, SqlServerStorage, prefixed_id
 
 COLORS = ("#1684d7", "#e95f54", "#7e57c2", "#00897b", "#f39c12", "#5c6bc0", "#43a047", "#c2185b")
 MAPPING_PATH = Path(__file__).resolve().parents[2] / "sensor_mapping.json"
@@ -480,6 +481,7 @@ class TrignoWindow(QMainWindow):
         self.curves: dict[int, tuple[pg.PlotItem, pg.PlotDataItem, pg.TextItem]] = {}
         self.collectionSummary: tuple[int, float, float] | None = None
         self.collectionError: str | None = None
+        self.collectionStoppedEarly = False
         self.collectionOutput: Path | None = None
         self.collectionSubject = SubjectInfo()
         self.infoRecorder: CollectionInfoRecorder | None = None
@@ -497,6 +499,11 @@ class TrignoWindow(QMainWindow):
         self.referenceRideSession: dict | None = None
         self.rideStartedAt = 0.0
         self.lastEmgAnalysisAt = 0.0
+        self.databaseWriter: DatabaseWriter | None = None
+        self.databaseAggregator: SecondAggregator | None = None
+        self.databaseTestId: str | None = None
+        self.databaseStartedAt: datetime | None = None
+        self.activeDatabaseConfig: DatabaseConfig | None = None
         self.bikeOnlySession = False
         self.commandedNativeResistance: float | None = None
         self.currentSampleRate = SAMPLE_RATE
@@ -543,6 +550,7 @@ class TrignoWindow(QMainWindow):
         self.setTrainerConnectionState(False)
         self.setPedalConnectionState(False)
         self.setEmgConnectionState(False)
+        self.setDatabaseConnectionState(False)
 
     def buildUi(self) -> None:
         root = QWidget(objectName="root")
@@ -557,9 +565,11 @@ class TrignoWindow(QMainWindow):
         self.trainerConnectionLabel = QLabel(objectName="connectionIndicator")
         self.pedalConnectionLabel = QLabel(objectName="connectionIndicator")
         self.emgConnectionLabel = QLabel(objectName="connectionIndicator")
+        self.databaseConnectionLabel = QLabel(objectName="connectionIndicator")
         header.addWidget(self.trainerConnectionLabel)
         header.addWidget(self.pedalConnectionLabel)
         header.addWidget(self.emgConnectionLabel)
+        header.addWidget(self.databaseConnectionLabel)
         self.tabs.setCornerWidget(statusCorner, Qt.Corner.TopRightCorner)
         self.resistanceTab = self.createResistanceTab()
         self.trainerTab = self.createTrainerTab()
@@ -753,6 +763,50 @@ class TrignoWindow(QMainWindow):
         scanResultsLayout.addWidget(self.scanResultsScroll)
         layout.addWidget(scanResults)
 
+        database = QFrame()
+        FluentThemeManager.set_property(database, "fluentRole", "surface")
+        databaseLayout = QVBoxLayout(database)
+        databaseLayout.setContentsMargins(14, 12, 14, 12)
+        databaseLayout.setSpacing(6)
+        databaseLayout.addWidget(QLabel("SQL Server 資料庫", objectName="sectionTitle"))
+        self.databaseStatusLabel = QLabel("填入帳密後測試連線，即可載入資料庫。", objectName="muted")
+        databaseLayout.addWidget(self.databaseStatusLabel)
+        self.databaseServerEdit = QLineEdit("localhost")
+        self.databaseUserEdit = QLineEdit("Rehab-User")
+        self.databasePasswordEdit = QLineEdit()
+        self.databasePasswordEdit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.databaseNameCombo = QComboBox()
+        self.databaseNameCombo.setEnabled(False)
+        self.databaseNameCombo.setPlaceholderText("先測試連線以載入資料庫")
+        self.databaseTestButton = QPushButton("測試連線")
+        FluentThemeManager.set_property(self.databaseTestButton, "fluentAppearance", "primary")
+        self.databaseServerEdit.setFixedWidth(160)
+        self.databaseUserEdit.setFixedWidth(130)
+        self.databasePasswordEdit.setFixedWidth(130)
+        self.databaseTestButton.setFixedWidth(96)
+        credentialsRow = QHBoxLayout()
+        credentialsRow.setSpacing(6)
+        credentialsRow.addWidget(QLabel("Server"))
+        credentialsRow.addWidget(self.databaseServerEdit)
+        credentialsRow.addWidget(QLabel("帳號"))
+        credentialsRow.addWidget(self.databaseUserEdit)
+        credentialsRow.addWidget(QLabel("密碼"))
+        credentialsRow.addWidget(self.databasePasswordEdit)
+        credentialsRow.addWidget(self.databaseTestButton)
+        credentialsRow.addStretch()
+        databaseLayout.addLayout(credentialsRow)
+        databaseRow = QHBoxLayout()
+        databaseRow.setSpacing(6)
+        databaseRow.addWidget(QLabel("資料庫"))
+        databaseRow.addWidget(self.databaseNameCombo, 1)
+        databaseLayout.addLayout(databaseRow)
+        self.databaseTestButton.clicked.connect(self.testDatabaseConnection)
+        self.databaseServerEdit.textEdited.connect(self.databaseConnectionEdited)
+        self.databaseUserEdit.textEdited.connect(self.databaseConnectionEdited)
+        self.databasePasswordEdit.textEdited.connect(self.databaseConnectionEdited)
+        self.databaseNameCombo.currentTextChanged.connect(self.databaseConnectionEdited)
+        layout.addWidget(database)
+
         resistance = QFrame()
         FluentThemeManager.set_property(resistance, "fluentRole", "surface")
         resistanceLayout = QVBoxLayout(resistance)
@@ -776,6 +830,111 @@ class TrignoWindow(QMainWindow):
         page.addWidget(scroll, 1)
         page.addWidget(eventLogPanel, 0)
         return tab
+
+    def databaseConfig(self) -> DatabaseConfig:
+        database = self.databaseNameCombo.currentText().strip() or "master"
+        return DatabaseConfig(
+            server=self.databaseServerEdit.text().strip(), database=database,
+            username=self.databaseUserEdit.text().strip(), password=self.databasePasswordEdit.text(),
+        )
+
+    def databaseConnectionEdited(self, *_args) -> None:
+        self.activeDatabaseConfig = None
+        self.databaseStatusLabel.setText("連線資料已變更，請重新測試連線")
+        self.setDatabaseConnectionState(False)
+
+    def testDatabaseConnection(self) -> None:
+        credentials = DatabaseConfig(
+            server=self.databaseServerEdit.text().strip(), database="master",
+            username=self.databaseUserEdit.text().strip(), password=self.databasePasswordEdit.text(),
+        )
+        try:
+            store = SqlServerStorage(credentials)
+            databases = store.list_databases()
+            store.close()
+            if not databases:
+                raise RuntimeError("此帳號沒有可連線的資料庫。")
+            selected = self.databaseNameCombo.currentText()
+            self.databaseNameCombo.clear()
+            self.databaseNameCombo.addItems(databases)
+            self.databaseNameCombo.setEnabled(True)
+            preferred = "RehabPatients-ylh"
+            self.databaseNameCombo.setCurrentText(selected if selected in databases else preferred if preferred in databases else databases[0])
+            config = self.databaseConfig()
+            store = SqlServerStorage(config)
+            name = store.test_connection()
+            store.close()
+        except Exception as exc:
+            self.activeDatabaseConfig = None
+            self.databaseStatusLabel.setText(f"連線失敗：{exc}")
+            self.setDatabaseConnectionState(False)
+            return
+        self.activeDatabaseConfig = config
+        self.databaseStatusLabel.setText(f"已連線：{name}；五張資料表可用")
+        self.setDatabaseConnectionState(True)
+
+    def startDatabaseRecording(self) -> None:
+        config = self.activeDatabaseConfig
+        if config is None:
+            self.appendLog("資料庫未寫入：請先在設定頁測試 SQL Server 連線")
+            return
+        self.databaseTestId = prefixed_id("TEST")
+        self.databaseStartedAt = datetime.now()
+        self.databaseAggregator = SecondAggregator(self.databaseTestId, self.databaseStartedAt)
+        baselines: list[dict] = []
+        for slot, record in self.baselineManager.records.items():
+            mapping = self.mappings[slot - 1]
+            baselines.append({"muscle_name": f"{mapping.chinese_name} ({mapping.abbreviation})", "rms_mv": record.rms_mv,
+                "base_time": 10, "action_type": record.protocol or "基準測試", "yellow_pct": self.baselineManager.warning_percent,
+                "red_pct": self.baselineManager.focus_percent, "quality_status": "有效",
+                "source": record.source, "method": record.method})
+        subject = self.collectionSubject
+        payload = {"test_id": self.databaseTestId, "patient_id": subject.patientId, "name": subject.name,
+            "sex": subject.gender, "action_type": "固定阻力騎乘", "test_time": None,
+            "resistance_level": self.resistanceSpin.value(), "has_baseline": bool(baselines), "notes": "EMG Cycling Monitor",
+            "started_at": self.databaseStartedAt, "analysis_version": "issue10-1", "baselines": baselines}
+        self.databaseWriter = DatabaseWriter(config)
+        self.databaseWriter.connected.connect(lambda name: self.appendLog(f"資料庫已連線：{name}；TestID {self.databaseTestId}"))
+        self.databaseWriter.failed.connect(lambda message: self.appendLog(f"資料庫寫入失敗（CSV 收集未受影響）：{message}"))
+        self.databaseWriter.completed.connect(self.appendLog)
+        self.databaseWriter.start()
+        self.databaseWriter.enqueue("start", payload)
+
+    def databaseAddSample(self, kind: str, time_s: float, sample: dict) -> None:
+        if self.databaseAggregator is None or self.databaseWriter is None:
+            return
+        rows = self.databaseAggregator.add(kind, time_s, sample)
+        if rows:
+            self.databaseWriter.enqueue("rows", (kind, rows))
+
+    def finishDatabaseRecording(self, result: dict | None) -> None:
+        writer, aggregator, test_id = self.databaseWriter, self.databaseAggregator, self.databaseTestId
+        self.databaseWriter = None
+        self.databaseAggregator = None
+        self.databaseTestId = None
+        if writer is None or aggregator is None or test_id is None:
+            return
+        for kind, rows in aggregator.flush_all().items():
+            if rows:
+                writer.enqueue("rows", (kind, rows))
+        pedal = (result or {}).get("pedal", {})
+        trainer = (result or {}).get("trainer", {})
+        def stat(group: dict, key: str, field: str = "mean"):
+            value = group.get(key, {})
+            return value.get(field) if isinstance(value, dict) else None
+        avg_power = stat(pedal, "power_w") if stat(pedal, "power_w") is not None else stat(trainer, "power_watts")
+        max_power = stat(pedal, "power_w", "max") if stat(pedal, "power_w", "max") is not None else stat(trainer, "power_watts", "max")
+        avg_cadence = stat(pedal, "cadence_rpm") if stat(pedal, "cadence_rpm") is not None else stat(trainer, "cadence_rpm")
+        distance_m = stat(trainer, "session_distance_meters", "max")
+        elapsed = int(round(self.rideTime()))
+        status = "失敗" if self.collectionError else ("中斷" if self.collectionStoppedEarly else "完成")
+        writer.enqueue("finish", {"test_id": test_id, "test_time": elapsed, "status": status,
+            "avg_power_w": avg_power, "max_power_w": max_power,
+            "avg_cadence_rpm": avg_cadence, "distance_km": None if distance_m is None else distance_m / 1000,
+            "left_balance_pct": stat(pedal, "left_balance_percent"),
+            "right_balance_pct": None if stat(pedal, "left_balance_percent") is None else 100 - stat(pedal, "left_balance_percent"),
+            "notes": self.collectionError or "", "ended_at": datetime.now()})
+        writer.enqueue("stop")
 
     def createResistanceTab(self) -> QWidget:
         tab = QWidget()
@@ -1649,6 +1808,10 @@ class TrignoWindow(QMainWindow):
             point = {key: data.get(key) for key in ("power_w", "cadence_rpm", "left_balance_percent", "right_balance_percent", "left_power_w", "right_power_w", "crank_revolutions")}
             point["time_s"] = self.rideTime()
             add_point(self.rideSession, "pedal", point)
+            # P715 standard Cycling Power packets provide total power and balance;
+            # this application derives left/right watts from those two measurements.
+            point["status"] = "估計（總功率 × 平衡）" if data.get("left_power_w") is not None else "僅總功率／踏頻"
+            self.databaseAddSample("pedal", point["time_s"], point)
         if self.pedalRecorder:
             try:
                 self.pedalRecorder.append(data)
@@ -1707,13 +1870,18 @@ class TrignoWindow(QMainWindow):
         if data.resistance is not None:
             self.bikeMetricValues["resistance"].setText(f"{data.resistance:g}")
         if self.rideSession is not None:
-            add_point(self.rideSession, "trainer", {
+            point = {
                 "time_s": self.rideTime(), "resistance_level": self.resistanceSpin.value(),
                 "resistance_native_commanded": self.commandedNativeResistance,
                 "resistance_native_reported": data.resistance, "power_watts": data.powerWatts,
                 "speed_kph": data.speedKph, "cadence_rpm": data.cadenceRpm,
                 "heart_rate_bpm": data.heartRate, "session_distance_meters": sessionDistanceMeters,
-                "energy_kcal": data.energyKcal})
+                "energy_kcal": data.energyKcal}
+            add_point(self.rideSession, "trainer", point)
+            self.databaseAddSample("trainer", point["time_s"], {
+                "distance_km": None if sessionDistanceMeters is None else sessionDistanceMeters / 1000,
+                "speed_kph": data.speedKph, "power_w": data.powerWatts, "cadence_rpm": data.cadenceRpm,
+                "resistance_level": data.resistance, "quality_status": "有效"})
         if self.trainerRecorder:
             try:
                 self.trainerRecorder.append(data,self.resistanceSpin.value(),self.commandedNativeResistance,sessionDistanceMeters,)
@@ -1819,6 +1987,9 @@ class TrignoWindow(QMainWindow):
 
     def setTrainerConnectionState(self, connected: bool) -> None:
         self.setConnectionIndicator(self.trainerConnectionLabel, "阻力計", connected)
+
+    def setDatabaseConnectionState(self, connected: bool) -> None:
+        self.setConnectionIndicator(self.databaseConnectionLabel, "資料庫", connected)
 
     def setEmgConnectionState(self, tested: bool) -> None:
         """Record whether the Trigno SDK test has succeeded."""
@@ -2179,6 +2350,8 @@ class TrignoWindow(QMainWindow):
         session, self.rideSession = self.rideSession, None
         if session is None:
             return
+        result = analyze(session)
+        self.finishDatabaseRecording(result)
         self.latestRideSession = session
         self.collectedRideSession = session
         self.angleEmgPath = self.collectionOutput if self.collectionOutput and self.collectionOutput.is_file() else None
@@ -2187,7 +2360,7 @@ class TrignoWindow(QMainWindow):
         if self.collectionOutput:
             path = analysisOutputPath(self.collectionOutput)
             try:
-                session["aligned_1s"] = analyze(session)["aligned"]
+                session["aligned_1s"] = result["aligned"]
                 save_session(path, session)
                 self.appendLog(f"騎乘分析已保存：{path.name}")
             except (OSError, ValueError) as exc:
@@ -2698,6 +2871,8 @@ class TrignoWindow(QMainWindow):
             QMessageBox.critical(self, "資訊檔輸出錯誤", str(exc))
             return
         self.beginRideAnalysis()
+        self.collectionStoppedEarly = False
+        self.startDatabaseRecording()
         self.emgRateLabel.setText("EMG 頻率：正在向 SDK 查詢…")
         for history in self.histories:
             history.clear()
@@ -2802,6 +2977,8 @@ class TrignoWindow(QMainWindow):
             QMessageBox.critical(self, "資料檔建立失敗", str(exc))
             return
         self.beginRideAnalysis()
+        self.collectionStoppedEarly = False
+        self.startDatabaseRecording()
         self.bikeOnlySession = True
         self.beginTrainerRecording()
         self.beginPedalRecording()
@@ -2810,6 +2987,8 @@ class TrignoWindow(QMainWindow):
         self.startCountdown()
 
     def stopStream(self) -> None:
+        if self.remainingSeconds > 0:
+            self.collectionStoppedEarly = True
         if self.bikeOnlySession:
             self.finishBikeOnlySession()
             return
@@ -3158,6 +3337,21 @@ class TrignoWindow(QMainWindow):
                             comparison["quality"] = "基準不相容"
                         add_point(self.rideSession, "emg", {"time_s": stamp, "slot": channel + 1,
                             "rms_mv": current, **comparison})
+                        mapping = self.mappings[channel]
+                        percent = comparison.get("percent")
+                        alert = "NONE"
+                        if isinstance(percent, (int, float)):
+                            if abs(percent) >= self.baselineManager.focus_percent:
+                                alert = "RED"
+                            elif abs(percent) >= self.baselineManager.warning_percent:
+                                alert = "YELLOW"
+                            else:
+                                alert = "NORMAL"
+                        self.databaseAddSample("emg", stamp, {
+                            "muscle_name": f"{mapping.chinese_name} ({mapping.abbreviation})",
+                            "rms_mv": current, "base_rms_mv": record.rms_mv if compatible and record else None,
+                            "deviation_pct": percent, "alert_status": alert,
+                            "quality_status": comparison.get("quality", "有效")})
         self.sampleLabel.setText(f"{len(self.histories[activeChannels[0]]):,} samples in view")
 
     def emgRateReady(self, sampleRate: float, samplesPerFrame: int, frameInterval: float) -> None:
@@ -3448,6 +3642,13 @@ class TrignoWindow(QMainWindow):
             self.pedalWorker.stopWorker()
             if not self.pedalWorker.wait(6000):
                 self.appendLog("Pedal worker is still stopping; close delayed")
+                event.ignore()
+                QTimer.singleShot(150, self.close)
+                return
+        if self.databaseWriter and self.databaseWriter.isRunning():
+            self.databaseWriter.enqueue("stop")
+            if not self.databaseWriter.wait(5000):
+                self.appendLog("Database writer is still stopping; close delayed")
                 event.ignore()
                 QTimer.singleShot(150, self.close)
                 return
