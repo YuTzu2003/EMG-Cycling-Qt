@@ -31,6 +31,17 @@ def _number(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def quality_code(value: object, default: str = "UNKNOWN") -> str:
+    """Translate display text to stable English database quality codes."""
+    text = str(value or "").strip()
+    codes = {
+        "有效": "VALID", "無基準值": "NO_BASELINE", "基準值過低": "BASELINE_TOO_LOW",
+        "基準不相容": "BASELINE_INCOMPATIBLE", "EMG 資料不足": "INSUFFICIENT_DATA",
+        "估計（總功率 × 平衡）": "VALID", "僅總功率／踏頻": "VALID",
+    }
+    return codes.get(text, text if text.isupper() else default)
+
+
 @dataclass(frozen=True)
 class DatabaseConfig:
     server: str
@@ -105,23 +116,21 @@ class SqlServerStorage:
         cursor.execute(
             """INSERT INTO dbo.Sessions
             (TestID, PatientID, Name, Sex, ActionType, TestTime, ResistanceLevel,
-             HasBaseline, Status, Notes, CreatedAt, StartedAt, AnalysisVersion)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             HasBaseline, Status, Notes, CreatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             payload["test_id"], payload["patient_id"], payload.get("name"), payload.get("sex"),
             payload.get("action_type"), payload.get("test_time"), payload.get("resistance_level"),
             bool(payload.get("has_baseline")), "進行中", payload.get("notes"), payload["started_at"],
-            payload["started_at"], payload.get("analysis_version", "issue10-1"),
         )
         for item in payload.get("baselines", []):
             cursor.execute(
                 """INSERT INTO dbo.TestBaselines
                 (BaseID, TestID, MuscleName, BaseTime, ActionType, BaseRMSmV,
-                 YellowDeviationPct, RedDeviationPct, QualityStatus, CreatedAt, BaselineSource, BaselineMethod)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 YellowDeviationPct, RedDeviationPct, QualityStatus, CreatedAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 prefixed_id("BASE"), payload["test_id"], item["muscle_name"], item.get("base_time"),
                 item.get("action_type"), item.get("rms_mv"), item.get("yellow_pct"),
-                item.get("red_pct"), item.get("quality_status"), payload["started_at"],
-                item.get("source"), item.get("method"),
+                item.get("red_pct"), quality_code(item.get("quality_status"), "VALID"), payload["started_at"],
             )
         self.connection.commit()
 
@@ -160,15 +169,27 @@ class SqlServerStorage:
         cursor = self._cursor()
         cursor.execute(
             """UPDATE dbo.Sessions SET TestTime=?, Status=?, AvgPowerW=?, MaxPowerW=?,
-            AvgCadenceRPM=?, TotalDistanceKm=?, AvgLeftBalancePct=?, AvgRightBalancePct=?, Notes=?, EndedAt=?
+            AvgCadenceRPM=?, TotalDistanceKm=?, AvgLeftBalancePct=?, AvgRightBalancePct=?, Notes=?
             WHERE TestID=?""",
             payload.get("test_time"), payload.get("status"), payload.get("avg_power_w"),
             payload.get("max_power_w"), payload.get("avg_cadence_rpm"), payload.get("distance_km"),
             payload.get("left_balance_pct"), payload.get("right_balance_pct"), payload.get("notes"),
-            payload.get("ended_at"),
             payload["test_id"],
         )
         self.connection.commit()
+
+    def discard_session(self, test_id: str) -> None:
+        """Permanently remove every database row belonging to one rejected test."""
+        cursor = self._cursor()
+        try:
+            # Remove detail rows first so this also works with future TestID
+            # foreign-key constraints.
+            for table in ("EMGData", "PedalData", "TrainerData", "TestBaselines", "Sessions"):
+                cursor.execute(f"DELETE FROM dbo.{table} WHERE TestID=?", test_id)
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def list_sessions(self, patient_id: str, limit: int = 100) -> list[dict[str, Any]]:
         cursor = self._cursor()
@@ -234,7 +255,7 @@ class SecondAggregator:
                         "BaseRMSmV": _number(last.get("base_rms_mv")),
                         "DeviationPct": _number(last.get("deviation_pct")),
                         "AlertStatus": last.get("alert_status", "NONE"),
-                        "QualityStatus": last.get("quality_status", "有效"),
+                        "QualityStatus": quality_code(last.get("quality_status"), "UNKNOWN"),
                         "RecordedAt": self.started_at + timedelta(seconds=second)})
             else:
                 last = samples[-1]
@@ -247,12 +268,11 @@ class SecondAggregator:
                     base.update({"TotalPowerW": average("power_w"), "LeftPowerW": average("left_power_w"),
                         "RightPowerW": average("right_power_w"), "LeftBalancePct": average("left_balance_percent"),
                         "RightBalancePct": average("right_balance_percent"), "CadenceRPM": average("cadence_rpm"),
-                        "Status": last.get("status", "有效")})
+                        "QualityStatus": quality_code(last.get("quality_status"), "UNKNOWN")})
                 else:
                     base.update({"DistanceKm": _number(last.get("distance_km")), "SpeedKmh": average("speed_kph"),
                         "PowerW": average("power_w"), "CadenceRPM": average("cadence_rpm"),
-                        "ResistanceLevel": _number(last.get("resistance_level")),
-                        "QualityStatus": last.get("quality_status", "有效")})
+                        "QualityStatus": quality_code(last.get("quality_status"), "VALID")})
                 result.append(base)
         return result
 
@@ -276,6 +296,7 @@ class DatabaseWriter(QThread):
         try:
             store.connect()
             self.connected.emit(store.test_connection())
+            completed_message = "資料庫已完成儲存"
             while True:
                 command, payload = self.queue.get()
                 if command == "start":
@@ -284,9 +305,12 @@ class DatabaseWriter(QThread):
                     store.write_rows(payload[0], payload[1])
                 elif command == "finish":
                     store.finish_session(payload)
+                elif command == "discard":
+                    store.discard_session(str(payload))
+                    completed_message = "資料庫：已刪除本次測試資料"
                 elif command == "stop":
                     break
-            self.completed.emit("資料庫已完成儲存")
+            self.completed.emit(completed_message)
         except Exception as exc:
             try:
                 if store.connection is not None:

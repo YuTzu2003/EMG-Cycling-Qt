@@ -38,7 +38,7 @@ CREATE TABLE [dbo].[PedalData](
 	[LeftBalancePct] [decimal](10, 2) NULL,
 	[RightBalancePct] [decimal](10, 2) NULL,
 	[CadenceRPM] [float] NULL,
-	[Status] [nvarchar](50) NULL,
+	[QualityStatus] [nvarchar](50) NULL,
 	[RecordedAt] [datetime] NULL,
  CONSTRAINT [PK_PedalData] PRIMARY KEY CLUSTERED 
 (
@@ -110,7 +110,6 @@ CREATE TABLE [dbo].[TrainerData](
 	[SpeedKmh] [float] NULL,
 	[PowerW] [float] NULL,
 	[CadenceRPM] [float] NULL,
-	[ResistanceLevel] [decimal](10, 2) NULL,
 	[QualityStatus] [nvarchar](20) NULL,
 	[RecordedAt] [datetime] NULL,
  CONSTRAINT [PK_TrainerData] PRIMARY KEY CLUSTERED 

@@ -19,6 +19,4 @@
 
 - [系統使用操作說明](SYSTEM_USER_GUIDE.md)：基準測量、騎乘、兩次比較、歷史資料及報表操作。
 - [資料取得、同步與分析方法](DATA_PIPELINE.md)：三種設備的欄位來源、時間對齊、計算公式、資料品質及限制。
-- [SQL Server 資料庫與 SSMS 建置](database/README.md)：資料表設計、建庫腳本及後續匯入順序。
-- [資料庫功能 Issue 草案](docs/ISSUE_SQL_SERVER_DATABASE.md)：桌面匯入與手機查詢的分階段需求、驗收條件。
-
+- [SQL Server 資料表設計](RehabPatients.sql)：以既有五張表的欄位定義作為資料庫寫入依據。
