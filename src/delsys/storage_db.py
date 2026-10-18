@@ -1,11 +1,4 @@
-"""SQL Server storage for one-second rehabilitation test summaries.
-
-Raw EMG and BLE samples remain in the existing CSV files.  This module stores
-only measured one-second aggregates so it can be used by the desktop app and
-later by an API without changing the clinical collection path.
-"""
 from __future__ import annotations
-
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from queue import Queue
@@ -13,13 +6,10 @@ from threading import Lock
 from typing import Any
 from uuid import uuid4
 import math
-
 from PySide6.QtCore import QThread, Signal
-
 
 def prefixed_id(prefix: str) -> str:
     return f"{prefix}-{uuid4()}"
-
 
 def _number(value: object) -> float | None:
     if isinstance(value, bool):
@@ -41,7 +31,6 @@ def quality_code(value: object, default: str = "UNKNOWN") -> str:
     }
     return codes.get(text, text if text.isupper() else default)
 
-
 @dataclass(frozen=True)
 class DatabaseConfig:
     server: str
@@ -51,7 +40,6 @@ class DatabaseConfig:
 
     def is_complete(self) -> bool:
         return bool(self.server.strip() and self.username.strip() and self.password)
-
     def connection_string(self) -> str:
         def escape(value: str) -> str:
             return "{" + value.replace("}", "}}") + "}"
@@ -62,10 +50,7 @@ class DatabaseConfig:
 
 
 class SqlServerStorage:
-    """Synchronous repository.  Use through ``DatabaseWriter`` in the UI."""
-
     required_tables = {"Sessions", "TestBaselines", "EMGData", "PedalData", "TrainerData"}
-
     def __init__(self, config: DatabaseConfig) -> None:
         self.config = config
         self.connection: Any | None = None
@@ -106,22 +91,16 @@ class SqlServerStorage:
     def list_databases(self) -> list[str]:
         """Return only online databases this SQL login can access."""
         cursor = self._cursor()
-        rows = cursor.execute(
-            "SELECT name FROM sys.databases WHERE state_desc='ONLINE' AND HAS_DBACCESS(name)=1 ORDER BY name"
-        ).fetchall()
+        rows = cursor.execute("SELECT name FROM sys.databases WHERE state_desc='ONLINE' AND HAS_DBACCESS(name)=1 ORDER BY name").fetchall()
         return [str(row[0]) for row in rows]
 
     def start_session(self, payload: dict[str, Any]) -> None:
         cursor = self._cursor()
-        cursor.execute(
-            """INSERT INTO dbo.Sessions
-            (TestID, PatientID, Name, Sex, ActionType, TestTime, ResistanceLevel,
-             HasBaseline, Status, Notes, CreatedAt)
+        cursor.execute("""INSERT INTO dbo.Sessions(TestID, PatientID, Name, Sex, ActionType, TestTime, ResistanceLevel, HasBaseline, Status, Notes, CreatedAt)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             payload["test_id"], payload["patient_id"], payload.get("name"), payload.get("sex"),
             payload.get("action_type"), payload.get("test_time"), payload.get("resistance_level"),
-            bool(payload.get("has_baseline")), "進行中", payload.get("notes"), payload["started_at"],
-        )
+            bool(payload.get("has_baseline")), "進行中", payload.get("notes"), payload["started_at"], )
         for item in payload.get("baselines", []):
             cursor.execute(
                 """INSERT INTO dbo.TestBaselines
@@ -179,11 +158,8 @@ class SqlServerStorage:
         self.connection.commit()
 
     def discard_session(self, test_id: str) -> None:
-        """Permanently remove every database row belonging to one rejected test."""
         cursor = self._cursor()
         try:
-            # Remove detail rows first so this also works with future TestID
-            # foreign-key constraints.
             for table in ("EMGData", "PedalData", "TrainerData", "TestBaselines", "Sessions"):
                 cursor.execute(f"DELETE FROM dbo.{table} WHERE TestID=?", test_id)
             self.connection.commit()
@@ -199,6 +175,43 @@ class SqlServerStorage:
             FROM dbo.Sessions WHERE PatientID=? ORDER BY CreatedAt DESC""", limit, patient_id).fetchall()
         keys = ("test_id", "patient_id", "name", "created_at", "status", "resistance_level",
                 "avg_power_w", "avg_cadence_rpm", "left_balance_pct", "right_balance_pct", "test_time")
+        return [dict(zip(keys, row)) for row in rows]
+
+    def list_patients_with_emg(self) -> list[dict[str, Any]]:
+        """Return patients that have at least one stored EMG RMS measurement."""
+        cursor = self._cursor()
+        rows = cursor.execute(
+            """SELECT s.PatientID, MAX(s.Name) AS Name, COUNT(DISTINCT s.TestID) AS TestCount
+            FROM dbo.Sessions AS s
+            WHERE EXISTS (SELECT 1 FROM dbo.EMGData AS e WHERE e.TestID=s.TestID AND e.AvgRMSmV IS NOT NULL)
+            GROUP BY s.PatientID ORDER BY s.PatientID"""
+        ).fetchall()
+        return [dict(zip(("patient_id", "name", "test_count"), row)) for row in rows]
+
+    def list_emg_sessions(self, patient_id: str) -> list[dict[str, Any]]:
+        """Return usable stored RMS sessions for one patient, newest first."""
+        cursor = self._cursor()
+        rows = cursor.execute(
+            """SELECT s.TestID, s.CreatedAt, s.TestTime, s.ResistanceLevel, s.Status, COUNT(e.EMGDataID) AS RmsRows
+            FROM dbo.Sessions AS s
+            INNER JOIN dbo.EMGData AS e ON e.TestID=s.TestID AND e.AvgRMSmV IS NOT NULL
+            WHERE s.PatientID=?
+            GROUP BY s.TestID, s.CreatedAt, s.TestTime, s.ResistanceLevel, s.Status
+            ORDER BY s.CreatedAt DESC""", patient_id
+        ).fetchall()
+        keys = ("test_id", "created_at", "test_time", "resistance_level", "status", "rms_rows")
+        return [dict(zip(keys, row)) for row in rows]
+
+    def load_emg_rms_series(self, test_id: str) -> list[dict[str, Any]]:
+        """Load measured one-second RMS only; no baseline normalization or interpolation."""
+        cursor = self._cursor()
+        rows = cursor.execute(
+            """SELECT MuscleName, TimeOffsetSec, AvgRMSmV, QualityStatus
+            FROM dbo.EMGData
+            WHERE TestID=? AND AvgRMSmV IS NOT NULL
+            ORDER BY MuscleName, TimeOffsetSec""", test_id
+        ).fetchall()
+        keys = ("muscle_name", "time_s", "rms_mv", "quality_status")
         return [dict(zip(keys, row)) for row in rows]
 
     def compare_same_resistance(self, patient_id: str, resistance_level: float, limit: int = 20) -> list[dict[str, Any]]:

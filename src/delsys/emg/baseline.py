@@ -165,8 +165,11 @@ class CalibrationSession:
 
 
 class BaselineManager:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, restore_records: bool = True,
+                 persist_records: bool = True) -> None:
         self.path = path
+        self.restore_records = restore_records
+        self.persist_records = persist_records
         self.records: dict[int, BaselineRecord] = {}
         self.warning_percent = 20.0
         self.focus_percent = 40.0
@@ -183,10 +186,11 @@ class BaselineManager:
             self.warning_percent = float(data.get("warning_percent", 20.0))
             self.focus_percent = float(data.get("focus_percent", 40.0))
             self.thresholds_enabled = True
-            self.protocol = str(data.get("protocol", ""))
+            self.protocol = str(data.get("protocol", "")) if self.restore_records else ""
             self.filter_settings = dict(data.get("filter_settings", asdict(FilterSettings())))
             FilterSettings(**self.filter_settings)
-            self.records = {int(item["slot"]): BaselineRecord(**item) for item in data.get("baselines", [])}
+            self.records = ({int(item["slot"]): BaselineRecord(**item) for item in data.get("baselines", [])}
+                            if self.restore_records else {})
             self._validate_thresholds()
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
             self.records = {}
@@ -201,7 +205,7 @@ class BaselineManager:
         data = {"version": SETTINGS_VERSION, "warning_percent": self.warning_percent,
                 "focus_percent": self.focus_percent, "thresholds_enabled": self.thresholds_enabled,
                 "protocol": self.protocol, "filter_settings": self.filter_settings,
-                "baselines": [asdict(record) for record in self.records.values()]}
+                "baselines": [asdict(record) for record in self.records.values()] if self.persist_records else []}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle, temporary = tempfile.mkstemp(prefix=self.path.stem, suffix=".tmp", dir=self.path.parent)
         try:

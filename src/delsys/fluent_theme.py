@@ -70,6 +70,10 @@ class FluentThemeManager(QObject):
         QTabWidget::pane {{ background: {t['window_background']}; border: 1px solid {t['border_primary']}; border-radius: 6px; top: -1px; }}
         QLabel {{ background: transparent; }}
         QFrame[fluentRole="surface"], QFrame#panel {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 6px; }}
+        QFrame[comparisonRole="summary"] {{ background: {t['surface_secondary']}; border: 1px solid {t['border_primary']}; border-radius: 8px; }}
+        QFrame[comparisonRole="card"] {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 8px; }}
+        QLabel#comparisonSeriesA {{ color: {t['brand_background']}; font-weight: 700; }}
+        QLabel#comparisonSeriesB {{ color: {t['danger']}; font-weight: 700; }}
         QFrame[fluentRole="scanResults"] {{ background: {t['surface_secondary']}; border: 1px solid {t['border_primary']}; border-radius: 4px; }}
         QLabel#title {{ font-size: 20px; font-weight: 600; }} QLabel#sectionTitle {{ font-size: 14px; font-weight: 600; }} QLabel#muted {{ color: {t['text_secondary']}; }}
         QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTableWidget {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 4px; padding: 4px 6px; }}

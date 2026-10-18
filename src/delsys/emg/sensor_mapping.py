@@ -16,7 +16,27 @@ class SensorMapping:
         return f"{self.chinese_name} · {self.english_name}{suffix}"
 
 def defaultMappings() -> list[SensorMapping]:
-    return [SensorMapping(slot, "未指定", "Unassigned", "") for slot in range(1, CHANNEL_COUNT + 1)]
+    # Physical sensor order supplied for the 16-channel lower-limb setup.
+    # This is also the fallback if sensor_mapping.json is missing or invalid.
+    names = (
+        ("右股內側肌", "Vastus medialis", "VM-R"),
+        ("右股直肌", "Rectus femoris", "RF-R"),
+        ("右股外側肌", "Vastus lateralis", "VL-R"),
+        ("左股內側肌", "Vastus medialis", "VM-L"),
+        ("左股直肌", "Rectus femoris", "RF-L"),
+        ("左股外側肌", "Vastus lateralis", "VL-L"),
+        ("右脛前肌", "Tibialis anterior", "TA-R"),
+        ("左脛前肌", "Tibialis anterior", "TA-L"),
+        ("", "", ""),
+        ("右股二頭肌", "Biceps femoris", "BF-R"),
+        ("左股二頭肌", "Biceps femoris", "BF-L"),
+        ("右比目魚肌", "Soleus", "SOL-R"),
+        ("右腓腸肌", "Gastrocnemius", "GAS-R"),
+        ("左比目魚肌", "Soleus", "SOL-L"),
+        ("", "", ""),
+        ("左腓腸肌", "Gastrocnemius", "GAS-L"),
+    )
+    return [SensorMapping(slot, *names[slot - 1]) for slot in range(1, CHANNEL_COUNT + 1)]
 
 def loadMappings(path: Path) -> list[SensorMapping]:
     if not path.is_file():
