@@ -7,14 +7,14 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QRectF, QSettings, QStandardPaths, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen, QPalette
+from PySide6.QtCore import QPointF, QRectF, QSettings, QStandardPaths, QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPalette
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget, QInputDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QDoubleSpinBox, QToolButton, QStyle, QGraphicsProxyWidget,)
 from delsys.collection import CollectionInfoRecorder, SubjectInfo, analysisOutputPath, infoOutputPath
 from delsys.emg.body_map import BodyMapPanel
-from delsys.emg.sensor_mapping import (SensorMapping,duplicateMappingSlots,loadMappings,saveMappings,matchesCsvColumn,recordingChannelSides,)
+from delsys.emg.sensor_mapping import (SensorMapping, duplicateMappingSlots, loadMappings, saveMappings, matchesCsvColumn, recordingChannelSides)
 from delsys.emg.trigno import CHANNEL_COUNT, SAMPLE_RATE
 from delsys.emg.baseline import BaselineManager, CalibrationSession, EMGPreprocessor, FilterSettings, RMSFeatureExtractor, load_raw_emg_csv
 from delsys.emg.workers import ConnectionWorker, StreamWorker
@@ -69,6 +69,86 @@ class AngleExportWorker(QThread):
             self.completed.emit(str(self.directory))
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class PolarAngleProfileWidget(QWidget):
+    """Read-only polar view of early and late EMG activation by pedal angle."""
+
+    def __init__(self, title: str, start_angles, start_values, end_angles, end_values, parent=None) -> None:
+        super().__init__(parent)
+        self.title = title
+        self.start_angles = np.asarray(start_angles, dtype=float)
+        self.start_values = np.asarray(start_values, dtype=float)
+        self.end_angles = np.asarray(end_angles, dtype=float)
+        self.end_values = np.asarray(end_values, dtype=float)
+        self.setMinimumSize(280, 280)
+        self.setAccessibleName(f"圓形踩踏角度圖：{title}")
+
+    @staticmethod
+    def _point(center: QPointF, radius: float, angle: float, value: float) -> QPointF:
+        theta = np.deg2rad(angle)
+        scale = max(0.0, min(1.0, value / 100.0))
+        return QPointF(center.x() + radius * scale * np.sin(theta),
+                       center.y() - radius * scale * np.cos(theta))
+
+    def _draw_curve(self, painter: QPainter, center: QPointF, radius: float,
+                    angles: np.ndarray, values: np.ndarray, color: str) -> None:
+        if len(angles) == 0:
+            return
+        path = QPainterPath()
+        valid_points = [self._point(center, radius, angle, value)
+                        for angle, value in zip(angles, values, strict=False)
+                        if np.isfinite(value)]
+        if len(valid_points) < 2:
+            return
+        path.moveTo(valid_points[0])
+        for point in valid_points[1:]:
+            path.lineTo(point)
+        path.lineTo(valid_points[0])
+        painter.setPen(QPen(QColor(color), 2.2))
+        painter.drawPath(path)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        background = self.palette().color(QPalette.ColorRole.Base)
+        text = self.palette().color(QPalette.ColorRole.Text)
+        muted = self.palette().color(QPalette.ColorRole.Mid)
+        painter.fillRect(self.rect(), background)
+
+        title_rect = self.rect().adjusted(10, 8, -10, 0)
+        painter.setPen(text)
+        title_font = QFont(self.font())
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.drawText(title_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                         self.fontMetrics().elidedText(self.title, Qt.TextElideMode.ElideRight, title_rect.width()))
+
+        bounds = self.rect().adjusted(28, 38, -28, -30)
+        radius = max(10.0, min(bounds.width(), bounds.height()) / 2.0 - 12.0)
+        center = QPointF(bounds.center().x(), bounds.center().y())
+        painter.setPen(QPen(muted, 1))
+        for fraction, label in ((.25, "25"), (.5, "50"), (.75, "75"), (1.0, "100")):
+            painter.drawEllipse(center, radius * fraction, radius * fraction)
+            painter.drawText(QPointF(center.x() + 4, center.y() - radius * fraction + 12), label)
+        for angle in range(0, 360, 45):
+            theta = np.deg2rad(angle)
+            outer = QPointF(center.x() + radius * np.sin(theta), center.y() - radius * np.cos(theta))
+            painter.drawLine(center, outer)
+            label_point = QPointF(center.x() + (radius + 14) * np.sin(theta),
+                                  center.y() - (radius + 14) * np.cos(theta))
+            label_rect = QRectF(label_point.x() - 16, label_point.y() - 9, 32, 18)
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, f"{angle}°")
+        self._draw_curve(painter, center, radius, self.start_angles, self.start_values, "#1684d7")
+        self._draw_curve(painter, center, radius, self.end_angles, self.end_values, "#d13438")
+        painter.setPen(QPen(QColor("#1684d7"), 3))
+        painter.drawLine(10, self.height() - 13, 26, self.height() - 13)
+        painter.setPen(text)
+        painter.drawText(31, self.height() - 8, "前段")
+        painter.setPen(QPen(QColor("#d13438"), 3))
+        painter.drawLine(76, self.height() - 13, 92, self.height() - 13)
+        painter.setPen(text)
+        painter.drawText(97, self.height() - 8, "後段")
 
 class EMGAnalysisImportWorker(QThread):
     completed = Signal(object, str)
@@ -270,6 +350,7 @@ class MappingEditorDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
 
     def mappings(self) -> list[SensorMapping]:
         return [
@@ -1052,13 +1133,9 @@ class TrignoWindow(QMainWindow):
         self.exportReportButton = QPushButton("匯出 HTML 報表")
         self.exportReportButton.setEnabled(False)
         FluentThemeManager.set_property(self.exportReportButton, "fluentAppearance", "success")
-        self.loadReferenceButton = QPushButton("選取比較基準")
-        self.loadReferenceButton.setToolTip("選取第一次騎乘，作為兩次騎乘比較的基準資料")
-        FluentThemeManager.set_property(self.loadReferenceButton, "fluentAppearance", "warning")
         actions.addWidget(self.currentSessionSummaryButton)
         actions.addWidget(self.importEmgAnalysisButton)
         actions.addWidget(self.importFitButton)
-        actions.addWidget(self.loadReferenceButton)
         actions.addWidget(self.exportReportButton)
         heading.addLayout(actions)
         heading.addSpacing(12)
@@ -1441,6 +1518,234 @@ class TrignoWindow(QMainWindow):
         angleDetailLayout.addWidget(self.angleCurvePlot, 1)
         angleDetailLayout.addWidget(QLabel("藍線＝前段，紅線＝後段；垂直虛線＝各段峰值相位。肌電訊號強度不等於施力大小。", objectName="muted"))
         self.angleViews.addTab(angleDetailPage, "肌肉細節")
+
+        # A single in-app report keeps the important PPT-style findings in the
+        # same place as the plots and source data.  It is deliberately plain
+        # text: users can select/copy it into a clinical note without needing
+        # an external report generator.
+        angleReportPage = QWidget()
+        angleReportLayout = QVBoxLayout(angleReportPage)
+        angleReportLayout.setContentsMargins(8, 8, 8, 8)
+        angleReportLayout.addWidget(QLabel("完整分析報告", objectName="sectionTitle"))
+        self.angleReportTabs = QTabWidget()
+        reportChartsPage = QScrollArea()
+        reportChartsPage.setWidgetResizable(True)
+        reportChartsContent = QWidget()
+        reportChartsContent.setMinimumHeight(700)
+        reportChartsLayout = QVBoxLayout(reportChartsContent)
+        reportChartsLayout.setContentsMargins(8, 8, 8, 8)
+        reportChartsLayout.setSpacing(18)
+        reportChartsLayout.addWidget(QLabel("每個肌肉一組直向長條；藍色為左腳、橘色為右腳。", objectName="muted"))
+        self.angleReportRmsPlot = pg.PlotWidget(title="RMS 變化（後段比前段）")
+        self.angleReportRmsPlot.setLabel("bottom", "RMS 變化", units="%")
+        self.angleReportRmsPlot.setMinimumHeight(300)
+        reportChartsLayout.addWidget(self.angleReportRmsPlot, 1)
+        self.angleReportMdfPlot = pg.PlotWidget(title="MDF 變化（後段減前段）")
+        self.angleReportMdfPlot.setLabel("bottom", "MDF 變化", units="Hz")
+        self.angleReportMdfPlot.setMinimumHeight(300)
+        reportChartsLayout.addWidget(self.angleReportMdfPlot, 1)
+        reportChartsPage.setWidget(reportChartsContent)
+        self.angleReportChartTabs = QTabWidget()
+        self.angleReportChartTabs.addTab(reportChartsPage, "疲勞摘要")
+
+        fatigueTrendsPage = QScrollArea()
+        fatigueTrendsPage.setWidgetResizable(True)
+        fatigueTrendsContent = QWidget()
+        # Four full-height plots need more space than a typical report tab.
+        # Keep the page scrollable instead of clipping the lower two plots.
+        fatigueTrendsContent.setMinimumHeight(760)
+        fatigueTrendsLayout = QVBoxLayout(fatigueTrendsContent)
+        fatigueTrendsLayout.setContentsMargins(8, 8, 8, 8)
+        fatigueTrendControls = QHBoxLayout()
+        fatigueTrendControls.addWidget(QLabel("肌肉", objectName="sectionTitle"))
+        self.angleReportFatigueMuscleCombo = QComboBox()
+        self.angleReportFatigueMuscleCombo.setMinimumWidth(260)
+        self.angleReportFatigueMuscleCombo.setAccessibleName("PPT 逐圈疲勞趨勢肌肉選擇")
+        fatigueTrendControls.addWidget(self.angleReportFatigueMuscleCombo)
+        fatigueTrendControls.addStretch(1)
+        fatigueTrendsLayout.addLayout(fatigueTrendControls)
+        fatigueTrendsLayout.addWidget(QLabel("每條線為一側肌肉，以 9 圈移動平均顯示逐圈變化。", objectName="muted"))
+        fatigueTrendGrid = QGridLayout()
+        self.angleReportRmsTrendPlot = pg.PlotWidget(title="逐圈 RMS 趨勢：左右腳疊圖")
+        self.angleReportMdfTrendPlot = pg.PlotWidget(title="逐圈 MDF 趨勢：左右腳疊圖")
+        self.angleReportFatigueTrendPlots = (
+            self.angleReportRmsTrendPlot, self.angleReportMdfTrendPlot,
+        )
+        for plot in self.angleReportFatigueTrendPlots:
+            plot.setMinimumHeight(330)
+            plot.setLabel("bottom", "踩踏圈數")
+            plot.showGrid(x=True, y=True, alpha=.16)
+            plot.addLegend(offset=(8, 8), colCount=2)
+        self.angleReportRmsTrendPlot.setLabel("left", "RMS", units="µV")
+        self.angleReportMdfTrendPlot.setLabel("left", "MDF", units="Hz")
+        fatigueTrendGrid.addWidget(self.angleReportRmsTrendPlot, 0, 0)
+        fatigueTrendGrid.addWidget(self.angleReportMdfTrendPlot, 1, 0)
+        fatigueTrendsLayout.addLayout(fatigueTrendGrid, 1)
+        fatigueTrendsPage.setWidget(fatigueTrendsContent)
+        self.angleReportChartTabs.addTab(fatigueTrendsPage, "逐圈疲勞趨勢")
+
+        reportProfilesPage = QWidget()
+        reportProfilesLayout = QVBoxLayout(reportProfilesPage)
+        reportProfilesLayout.setContentsMargins(8, 8, 8, 8)
+        profileControls = QHBoxLayout()
+        profileControls.addWidget(QLabel("肌肉", objectName="sectionTitle"))
+        self.angleReportProfileMuscleCombo = QComboBox()
+        self.angleReportProfileMuscleCombo.setMinimumWidth(260)
+        self.angleReportProfileMuscleCombo.setAccessibleName("PPT 肌肉角度曲線肌肉選擇")
+        profileControls.addWidget(self.angleReportProfileMuscleCombo)
+        profileControls.addStretch(1)
+        reportProfilesLayout.addLayout(profileControls)
+        reportProfilesLayout.addWidget(QLabel("每個肌肉的左、右腳並排；藍線為前段、紅線為後段。", objectName="muted"))
+        self.angleReportProfileScroll = QScrollArea()
+        self.angleReportProfileScroll.setWidgetResizable(True)
+        self.angleReportProfiles = pg.GraphicsLayoutWidget()
+        self.angleReportProfiles.setMinimumHeight(1620)
+        self.angleReportProfiles.setBackground("#ffffff")
+        self.angleReportProfileScroll.setWidget(self.angleReportProfiles)
+        reportProfilesLayout.addWidget(self.angleReportProfileScroll, 1)
+        self.angleReportChartTabs.addTab(reportProfilesPage, "肌肉角度曲線")
+
+        polarPage = QWidget()
+        polarLayout = QVBoxLayout(polarPage)
+        polarLayout.setContentsMargins(8, 8, 8, 8)
+        polarControls = QHBoxLayout()
+        polarControls.addWidget(QLabel("肌肉", objectName="sectionTitle"))
+        self.angleReportPolarMuscleCombo = QComboBox()
+        self.angleReportPolarMuscleCombo.setMinimumWidth(260)
+        self.angleReportPolarMuscleCombo.setAccessibleName("圓形踩踏角度圖肌肉選擇")
+        polarControls.addWidget(self.angleReportPolarMuscleCombo)
+        polarControls.addStretch(1)
+        polarLayout.addLayout(polarControls)
+        polarLayout.addWidget(QLabel(
+            "0° 位於正上方，角度順時針增加；半徑是各肌肉自身相對活化（%）。藍線為前段，紅線為後段。",
+            objectName="muted"
+        ))
+        self.angleReportPolarScroll = QScrollArea()
+        self.angleReportPolarScroll.setWidgetResizable(True)
+        self.angleReportPolarContent = QWidget()
+        self.angleReportPolarGrid = QGridLayout(self.angleReportPolarContent)
+        self.angleReportPolarGrid.setContentsMargins(10, 10, 10, 10)
+        self.angleReportPolarGrid.setSpacing(14)
+        self.angleReportPolarScroll.setWidget(self.angleReportPolarContent)
+        polarLayout.addWidget(self.angleReportPolarScroll, 1)
+        self.angleReportChartTabs.addTab(polarPage, "圓形角度圖")
+
+        reportCyclesPage = QWidget()
+        reportCyclesLayout = QVBoxLayout(reportCyclesPage)
+        reportCyclesLayout.setContentsMargins(8, 8, 8, 8)
+        cycleControls = QHBoxLayout()
+        cycleControls.addWidget(QLabel("肌肉", objectName="sectionTitle"))
+        self.angleReportCycleMuscleCombo = QComboBox()
+        self.angleReportCycleMuscleCombo.setMinimumWidth(260)
+        self.angleReportCycleMuscleCombo.setAccessibleName("PPT 逐圈 8 角度肌肉選擇")
+        cycleControls.addWidget(self.angleReportCycleMuscleCombo)
+        cycleControls.addWidget(QLabel("踩踏角度", objectName="sectionTitle"))
+        self.angleReportCycleAngleCombo = QComboBox()
+        self.angleReportCycleAngleCombo.setMinimumWidth(130)
+        self.angleReportCycleAngleCombo.setAccessibleName("逐圈活化踩踏角度選擇")
+        self.angleReportCycleAngleCombo.addItem("全部角度", None)
+        for angle in range(0, 360, 45):
+            self.angleReportCycleAngleCombo.addItem(f"{angle}°", angle)
+        cycleControls.addWidget(self.angleReportCycleAngleCombo)
+        cycleControls.addStretch()
+        reportCyclesLayout.addLayout(cycleControls)
+        self.angleReportCycleHelpLabel = QLabel(
+            "可選擇單一角度來比較左、右腳逐圈變化；「全部角度」顯示 0°、45°、90°…315°。已以 5 圈移動平均平滑，淡藍為前段、淡紅為後段。",
+            objectName="muted"
+        )
+        reportCyclesLayout.addWidget(self.angleReportCycleHelpLabel)
+        cyclePlots = QHBoxLayout()
+        self.angleReportCycleLeftPlot = pg.PlotWidget(title="左腳")
+        self.angleReportCycleRightPlot = pg.PlotWidget(title="右腳")
+        for plot in (self.angleReportCycleLeftPlot, self.angleReportCycleRightPlot):
+            plot.setMinimumHeight(410)
+            plot.setLabel("left", "相對活化", units="%")
+            plot.setLabel("bottom", "踩踏圈數")
+            plot.showGrid(x=True, y=True, alpha=.16)
+            plot.addLegend(offset=(8, 8), colCount=4)
+        cyclePlots.addWidget(self.angleReportCycleLeftPlot, 1)
+        cyclePlots.addWidget(self.angleReportCycleRightPlot, 1)
+        reportCyclesLayout.addLayout(cyclePlots, 1)
+        self.angleReportChartTabs.addTab(reportCyclesPage, "逐圈 8 角度")
+
+        reportValuesPage = QWidget()
+        reportValuesLayout = QVBoxLayout(reportValuesPage)
+        reportValuesLayout.setContentsMargins(8, 8, 8, 8)
+        valueControls = QHBoxLayout()
+        valueControls.addWidget(QLabel("肌肉", objectName="sectionTitle"))
+        self.angleReportPhaseMuscleCombo = QComboBox()
+        self.angleReportPhaseMuscleCombo.setMinimumWidth(260)
+        self.angleReportPhaseMuscleCombo.setAccessibleName("PPT 前後段 8 角度表格肌肉選擇")
+        valueControls.addWidget(self.angleReportPhaseMuscleCombo)
+        valueControls.addStretch()
+        reportValuesLayout.addLayout(valueControls)
+        reportValuesLayout.addWidget(QLabel("每個角度為 ±15° 視窗平均；Δ = 後段 − 前段。", objectName="muted"))
+        self.angleReportPhaseTable = QTableWidget(0, 7)
+        self.angleReportPhaseTable.setHorizontalHeaderLabels(("踩踏角度", "左前段", "左後段", "左 Δ", "右前段", "右後段", "右 Δ"))
+        self.angleReportPhaseTable.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.angleReportPhaseTable.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.angleReportPhaseTable.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.angleReportPhaseTable.setMinimumHeight(360)
+        self.angleReportPhaseTable.setAccessibleName("PPT 前後段 8 角度比較表")
+        reportValuesLayout.addWidget(self.angleReportPhaseTable, 1)
+        self.angleReportChartTabs.addTab(reportValuesPage, "前後段表格")
+        self.angleReportTabs.addTab(self.angleReportChartTabs, "圖表分析")
+
+        reportTextPage = QWidget()
+        reportTextLayout = QVBoxLayout(reportTextPage)
+        reportTextLayout.setContentsMargins(8, 8, 8, 8)
+        self.angleReportDetailsScroll = QScrollArea()
+        self.angleReportDetailsScroll.setWidgetResizable(True)
+        reportTextContent = QWidget()
+        reportTextContentLayout = QVBoxLayout(reportTextContent)
+        reportTextContentLayout.setContentsMargins(4, 4, 4, 4)
+        reportTextContentLayout.setSpacing(8)
+
+        def report_table(headers: tuple[str, ...], accessible_name: str) -> QTableWidget:
+            table = QTableWidget(0, len(headers))
+            table.setHorizontalHeaderLabels(headers)
+            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            table.setAlternatingRowColors(True)
+            table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            table.setAccessibleName(accessible_name)
+            return table
+
+        reportTextContentLayout.addWidget(QLabel("【測試與同步】", objectName="sectionTitle"))
+        self.angleReportSyncTable = report_table(("項目", "數值"), "踩踏角度測試與同步表格")
+        self.angleReportSyncTable.setMinimumHeight(190)
+        reportTextContentLayout.addWidget(self.angleReportSyncTable)
+        reportTextContentLayout.addWidget(QLabel("【通道與貼片對應】", objectName="sectionTitle"))
+        self.angleReportMappingTable = report_table(("肌肉 / 部位", "通道"), "踩踏角度通道對應表格")
+        self.angleReportMappingTable.setMinimumHeight(360)
+        reportTextContentLayout.addWidget(self.angleReportMappingTable)
+        reportTextContentLayout.addWidget(QLabel("【重點結果】", objectName="sectionTitle"))
+        self.angleReportHighlightsTable = report_table(("項目", "結果"), "踩踏角度重點結果表格")
+        self.angleReportHighlightsTable.setMinimumHeight(150)
+        reportTextContentLayout.addWidget(self.angleReportHighlightsTable)
+        reportTextContentLayout.addWidget(QLabel("【通道前後段數值】", objectName="sectionTitle"))
+        self.angleReportChannelTable = QTableWidget(0, 6)
+        self.angleReportChannelTable.setHorizontalHeaderLabels((
+            "肌肉 / 通道", "RMS 前→後 (µV)", "RMS %",
+            "MDF 前→後 (Hz)", "峰值角度變化", "判讀提示",
+        ))
+        self.angleReportChannelTable.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.angleReportChannelTable.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.angleReportChannelTable.setAlternatingRowColors(True)
+        self.angleReportChannelTable.setMinimumHeight(300)
+        self.angleReportChannelTable.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.angleReportChannelTable.setAccessibleName("通道前後段數值表格")
+        reportTextContentLayout.addWidget(self.angleReportChannelTable)
+        reportTextContentLayout.addWidget(QLabel("【判讀限制】", objectName="sectionTitle"))
+        self.angleReportLimitationsTable = report_table(("注意事項",), "踩踏角度判讀限制表格")
+        self.angleReportLimitationsTable.setMinimumHeight(150)
+        reportTextContentLayout.addWidget(self.angleReportLimitationsTable)
+        reportTextContentLayout.addStretch()
+        self.angleReportDetailsScroll.setWidget(reportTextContent)
+        reportTextLayout.addWidget(self.angleReportDetailsScroll, 1)
+        self.angleReportTabs.addTab(reportTextPage, "數值與判讀")
+        angleReportLayout.addWidget(self.angleReportTabs, 1)
+        self.angleViews.addTab(angleReportPage, "完整報告")
         angleLayout.addWidget(self.angleViews, 1)
         self.summaryTabs.insertTab(2, anglePage, "踩踏角度分析")
         self.angleEmgButton.clicked.connect(self.chooseAngleEmg)
@@ -1450,9 +1755,23 @@ class TrignoWindow(QMainWindow):
         self.angleMuscleCombo.currentIndexChanged.connect(self.refreshAngleCurve)
         self.anglePhaseSpin.valueChanged.connect(self.refreshAnglePhase)
         self.angleComparisonTable.itemSelectionChanged.connect(self.showSelectedAngleMuscle)
+        self.angleReportCycleMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportCycleTrends)
+        self.angleReportCycleAngleCombo.currentIndexChanged.connect(self.refreshAngleReportCycleTrends)
+        self.angleReportPhaseMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportPhaseTable)
+        self.angleReportFatigueMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportFatigueTrends)
+        self.angleReportProfileMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportProfiles)
+        self.angleReportPolarMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportPolarProfiles)
         self.angleAutoScaleCheck.toggled.connect(lambda checked: self.angleScaleSpin.setEnabled(not checked))
         self.angleAutoOffsetCheck.toggled.connect(lambda checked: self.angleOffsetSpin.setEnabled(not checked))
         self.angleAdvancedToggle.toggled.connect(self.setAngleAdvancedVisible)
+        self.lockAnalysisPlots(
+            self.powerAnalysisPlot, self.cadenceAnalysisPlot, self.balanceAnalysisPlot,
+            self.rmsAverageBarPlot, self.rmsPeakBarPlot, self.emgEnvelopePlot,
+            self.anglePhasePlot, self.angleHeatPlot,
+            self.angleCurvePlot, self.angleReportRmsPlot, self.angleReportMdfPlot,
+            self.angleReportCycleLeftPlot, self.angleReportCycleRightPlot,
+            *self.angleReportFatigueTrendPlots,
+        )
         self.summaryTabs.setCurrentIndex(0)
         layout.addWidget(self.summaryTabs, 1)
         self.importFitButton.clicked.connect(self.importFitSummary)
@@ -1461,23 +1780,34 @@ class TrignoWindow(QMainWindow):
         self.analysisFtpSpin.valueChanged.connect(self.refreshSummaryAnalysis)
         self.envelopeMuscleCombo.currentIndexChanged.connect(self.refreshRideAnalysis)
         self.exportReportButton.clicked.connect(self.exportRideReport)
-        self.loadReferenceButton.setText("資料庫 RMS 比較")
-        self.loadReferenceButton.setToolTip("使用資料庫中的兩次 EMG RMS 紀錄進行比較")
-        self.loadReferenceButton.clicked.connect(self.openDatabaseComparison)
         self.databaseCompareReloadButton.clicked.connect(self.loadDatabaseComparisonPatients)
         self.databaseComparePatientCombo.currentIndexChanged.connect(self.loadDatabaseComparisonSessions)
         self.databaseCompareRunButton.clicked.connect(self.refreshDatabaseComparison)
         return tab
 
+    @staticmethod
+    def lockAnalysisPlots(*plots) -> None:
+        """Keep report charts readable; body-map zoom remains intentionally separate."""
+        for plot in plots:
+            item = plot.getPlotItem() if hasattr(plot, "getPlotItem") else plot
+            item.setMouseEnabled(x=False, y=False)
+            item.setMenuEnabled(False)
+
     def applySummaryPlotTheme(self, *_args) -> None:
         tokens = FluentThemeManager.DARK if QApplication.instance().styleHints().colorScheme().name == "Dark" else FluentThemeManager.LIGHT
         for widget in (self.summaryPlots, self.ridePlots, self.angleCurvePlot,
-                       self.angleHeatPlot, self.anglePhasePlot):
+                       self.angleHeatPlot, self.anglePhasePlot, self.angleReportRmsPlot,
+                       self.angleReportMdfPlot, self.angleReportProfiles,
+                       self.angleReportCycleLeftPlot, self.angleReportCycleRightPlot,
+                       *self.angleReportFatigueTrendPlots):
             widget.setBackground(tokens["surface_background"])
         for plot in (self.powerAnalysisPlot, self.cadenceAnalysisPlot, self.balanceAnalysisPlot,
                      self.rmsAverageBarPlot, self.rmsPeakBarPlot, self.emgEnvelopePlot,
                      self.angleCurvePlot.getPlotItem(),
-                     self.angleHeatPlot.getPlotItem(), self.anglePhasePlot.getPlotItem()):
+                     self.angleHeatPlot.getPlotItem(), self.anglePhasePlot.getPlotItem(),
+                     self.angleReportRmsPlot.getPlotItem(), self.angleReportMdfPlot.getPlotItem(),
+                     self.angleReportCycleLeftPlot.getPlotItem(), self.angleReportCycleRightPlot.getPlotItem(),
+                     *(plot.getPlotItem() for plot in self.angleReportFatigueTrendPlots)):
             for axis_name in ("left", "bottom"):
                 axis = plot.getAxis(axis_name)
                 axis.setPen(tokens["text_secondary"])
@@ -2738,10 +3068,6 @@ class TrignoWindow(QMainWindow):
         self.importEmgAnalysisButton.setEnabled(True)
         self.emgAnalysisImportWorker = None
 
-    def openDatabaseComparison(self) -> None:
-        self.tabs.setCurrentWidget(self.comparisonTab)
-        self.loadDatabaseComparisonPatients()
-
     def _comparisonStore(self) -> SqlServerStorage | None:
         if self.activeDatabaseConfig is None:
             self.comparisonStatusLabel.setText("請先到「設定」頁輸入 SQL Server 帳密並完成測試連線。")
@@ -3109,7 +3435,9 @@ class TrignoWindow(QMainWindow):
         self.angleMuscleCombo.blockSignals(True)
         self.angleMuscleCombo.clear()
         for entry in summary.itertuples():
-            self.angleMuscleCombo.addItem(f"{entry.location_zh} · {entry.channel_label}", entry.channel)
+            self.angleMuscleCombo.addItem(
+                f"{entry.location_zh} ({entry.muscle}) · {entry.channel_label}", entry.channel
+            )
         self.angleMuscleCombo.blockSignals(False)
         self.refreshAngleCurve()
         self.angleComparisonTable.setRowCount(len(summary))
@@ -3136,7 +3464,501 @@ class TrignoWindow(QMainWindow):
         self.angleHeatPhaseLine = pg.InfiniteLine(pos=self.anglePhaseSpin.value(), angle=90,pen=pg.mkPen("#555555", width=2, style=Qt.DashLine),)
         self.angleHeatPlot.addItem(self.angleHeatPhaseLine)
         self.refreshAnglePhase()
+        self.refreshAngleReport()
         self.angleExportButton.setEnabled(True)
+
+    def refreshAngleReport(self) -> None:
+        """Present the reproducible, PPT-style numerical findings in Qt."""
+        if self.angleAnalysisResult is None:
+            self.clearAngleReportTables()
+            return
+        result = self.angleAnalysisResult
+        summary = result["summary"].copy()
+        sync, settings = result["sync"], result["settings"]
+        if summary.empty:
+            self.clearAngleReportTables()
+            return
+
+        ordered = summary.sort_values(["side", "location_zh", "channel_label"])
+        top_rms = summary.loc[summary.rms_change_percent.idxmax()]
+        lowest_mdf = summary.loc[summary.mdf_change_hz.idxmin()]
+        rms_up = int((summary.rms_change_percent > 0).sum())
+        mdf_down = int((summary.mdf_change_hz < 0).sum())
+        phase_name = sync["angle_label"]
+        calibration = "已校正角度" if sync["angle_calibrated"] else "相對踩踏相位"
+        lines = [
+            "踩踏角度 EMG 完整分析報告",
+            "=" * 38,
+            "",
+            "【測試與同步】",
+            f"角度基準：{phase_name}（{calibration}）",
+            f"有效踩踏圈：{sync['valid_cycles']} 圈",
+            f"前段：{settings['start'][0]:g}–{settings['start'][1]:g} 秒；後段：{settings['end'][0]:g}–{settings['end'][1]:g} 秒",
+            f"EMG 時鐘比例：{sync['scale']:.5f}；起點偏移：{sync['offset_s']:+.3f} 秒",
+            f"側別來源：{sync.get('side_source', '目前設定')}",
+            "",
+            "【通道與貼片對應】",
+        ]
+        for entry in ordered.itertuples():
+            lines.append(f"{entry.location_zh}：{entry.channel_label}")
+
+        lines.extend([
+            "",
+            "【重點結果】",
+            f"RMS 上升通道：{rms_up}/{len(summary)}；MDF 下降通道：{mdf_down}/{len(summary)}。",
+            f"最大 RMS 變化：{top_rms.location_zh} ({top_rms.channel_label}) "
+            f"{top_rms.rms_change_percent:+.1f}% ({top_rms.rms_uv_start:.1f} → {top_rms.rms_uv_end:.1f} µV)。",
+            f"最大 MDF 下降：{lowest_mdf.location_zh} ({lowest_mdf.channel_label}) "
+            f"{lowest_mdf.mdf_change_hz:+.1f} Hz ({lowest_mdf.mdf_start:.1f} → {lowest_mdf.mdf_end:.1f} Hz)。",
+            "",
+            "【通道前後段數值】",
+            "請參照下方表格。",
+        ])
+
+        weak = ordered[ordered.norm_uv < 10]
+        lines.extend(["", "【判讀限制】"])
+        if not sync["angle_calibrated"]:
+            lines.append("目前為相對踩踏相位；若要解釋 TDC 絕對角度，需加入可重現的影片或曲柄同步校正。")
+        lines.append("每條肌肉以自身 99 百分位正規化；可比較同一肌肉的時間變化，不可跨肌肉排名出力。")
+        lines.append("EMG 振幅不等於肌力、力矩或踩踏效率；必須與踏板功率、動作影片一起解釋。")
+        if not weak.empty:
+            labels = "、".join(f"{row.location_zh} ({row.channel_label})" for row in weak.itertuples())
+            lines.append(f"訊號偏弱、需謹慎解讀：{labels}。")
+        self.setAngleReportTableRows(self.angleReportSyncTable, (
+            ("角度基準", f"{phase_name}（{calibration}）"),
+            ("有效踩踏圈", f"{sync['valid_cycles']} 圈"),
+            ("分析區間", f"前段 {settings['start'][0]:g}–{settings['start'][1]:g} 秒；後段 {settings['end'][0]:g}–{settings['end'][1]:g} 秒"),
+            ("EMG 時鐘同步", f"比例 {sync['scale']:.5f}；起點偏移 {sync['offset_s']:+.3f} 秒"),
+            ("側別來源", sync.get("side_source", "目前設定")),
+        ))
+        self.setAngleReportTableRows(
+            self.angleReportMappingTable,
+            tuple((entry.location_zh, entry.channel_label) for entry in ordered.itertuples()),
+        )
+        self.setAngleReportTableRows(self.angleReportHighlightsTable, (
+            ("RMS 上升通道", f"{rms_up}/{len(summary)}"),
+            ("MDF 下降通道", f"{mdf_down}/{len(summary)}"),
+            ("最大 RMS 變化",
+             f"{top_rms.location_zh} ({top_rms.channel_label}) {top_rms.rms_change_percent:+.1f}% "
+             f"({top_rms.rms_uv_start:.1f} → {top_rms.rms_uv_end:.1f} µV)"),
+            ("最大 MDF 下降",
+             f"{lowest_mdf.location_zh} ({lowest_mdf.channel_label}) {lowest_mdf.mdf_change_hz:+.1f} Hz "
+             f"({lowest_mdf.mdf_start:.1f} → {lowest_mdf.mdf_end:.1f} Hz)"),
+        ))
+        limitations = []
+        if not sync["angle_calibrated"]:
+            limitations.append(("目前為相對踩踏相位；若要解釋 TDC 絕對角度，需加入可重現的影片或曲柄同步校正。",))
+        limitations.append(("每條肌肉以自身 99 百分位正規化；可比較同一肌肉的時間變化，不可跨肌肉排名出力。",))
+        limitations.append(("EMG 振幅不等於肌力、力矩或踩踏效率；必須與踩板功率、動作影片一起解釋。",))
+        if not weak.empty:
+            labels = "、".join(f"{row.location_zh} ({row.channel_label})" for row in weak.itertuples())
+            limitations.append((f"訊號偏弱、需謹慎解讀：{labels}。",))
+        self.setAngleReportTableRows(self.angleReportLimitationsTable, limitations)
+        self.refreshAngleReportChannelTable(ordered)
+        self.refreshAngleReportCharts(ordered)
+        self.refreshAngleReportProfiles()
+        self.refreshAngleReportPolarProfiles()
+
+    def clearAngleReportTables(self) -> None:
+        for table in (self.angleReportSyncTable, self.angleReportMappingTable,
+                      self.angleReportHighlightsTable, self.angleReportChannelTable,
+                      self.angleReportLimitationsTable):
+            table.clearContents()
+            table.setRowCount(0)
+        if hasattr(self, "angleReportPolarGrid"):
+            self.clearAngleReportPolarProfiles()
+
+    @staticmethod
+    def setAngleReportTableRows(table: QTableWidget, rows) -> None:
+        table.clearContents()
+        table.setRowCount(len(rows))
+        for row_index, values in enumerate(rows):
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row_index, column, item)
+        table.resizeRowsToContents()
+        content_height = table.horizontalHeader().height() + sum(
+            table.rowHeight(row) for row in range(table.rowCount())
+        ) + 6
+        table.setMinimumHeight(max(110, content_height))
+
+    def refreshAngleReportChannelTable(self, ordered) -> None:
+        """Present each channel's early/late measurements in readable columns."""
+        table = self.angleReportChannelTable
+        table.clearContents()
+        table.setRowCount(len(ordered))
+        for row_index, entry in enumerate(ordered.itertuples()):
+            rms_up = entry.rms_change_percent > 0
+            mdf_down = entry.mdf_change_hz < 0
+            if rms_up and mdf_down:
+                interpretation = "RMS↑、MDF↓：疲勞相關趨勢"
+            elif rms_up:
+                interpretation = "RMS↑；MDF未下降"
+            elif mdf_down:
+                interpretation = "MDF↓；RMS未上升"
+            else:
+                interpretation = "前後變化不一致"
+            values = (
+                f"{entry.location_zh} / {entry.channel_label}",
+                f"{entry.rms_uv_start:.1f} → {entry.rms_uv_end:.1f}",
+                f"{entry.rms_change_percent:+.1f}%",
+                f"{entry.mdf_start:.1f} → {entry.mdf_end:.1f}",
+                f"{entry.peak_angle_shift:+.0f}°",
+                interpretation,
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if column else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row_index, column, item)
+        table.resizeRowsToContents()
+        content_height = table.horizontalHeader().height() + sum(
+            table.rowHeight(row) for row in range(table.rowCount())
+        ) + 6
+        table.setMinimumHeight(max(110, content_height))
+
+    def refreshAngleReportCharts(self, ordered) -> None:
+        """Draw PPT-style grouped columns: one muscle, left/right side by side."""
+        muscle_order = ("RF", "VM", "VL", "BF", "GAS", "SOL", "TA")
+        groups = [muscle for muscle in muscle_order if muscle in set(ordered.muscle)]
+        groups.extend(muscle for muscle in ordered.muscle.dropna().unique() if muscle not in groups)
+        if not groups:
+            return
+        labels, left_rows, right_rows = [], [], []
+        for muscle in groups:
+            pair = ordered[ordered.muscle == muscle]
+            exemplar = pair.iloc[0]
+            muscle_name = exemplar.location_zh[1:] if len(exemplar.location_zh) > 1 else exemplar.location_zh
+            # The x axis groups left/right bars by anatomy; retain the
+            # conventional EMG abbreviation so GAS/SOL/etc. are explicit.
+            labels.append(f"{muscle_name}\n({muscle})")
+            left_rows.append(pair[pair.side == "L"].iloc[0] if not pair[pair.side == "L"].empty else None)
+            right_rows.append(pair[pair.side == "R"].iloc[0] if not pair[pair.side == "R"].empty else None)
+        positions = np.arange(len(groups), dtype=float)
+        chart_specs = (
+            (self.angleReportRmsPlot, "rms_change_percent", "RMS 變化（%）", "%"),
+            (self.angleReportMdfPlot, "mdf_change_hz", "MDF 變化（Hz）", " Hz"),
+        )
+        for plot, column, axis_label, unit in chart_specs:
+            plot.clear()
+            left_values = np.array([float(getattr(entry, column)) if entry is not None else np.nan for entry in left_rows])
+            right_values = np.array([float(getattr(entry, column)) if entry is not None else np.nan for entry in right_rows])
+            plot.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen("#6b7280", width=1)))
+            plot.addItem(pg.BarGraphItem(x=positions - .19, height=left_values, width=.34,
+                                         brush=pg.mkBrush("#1684d7"), pen=pg.mkPen("#1684d7")))
+            plot.addItem(pg.BarGraphItem(x=positions + .19, height=right_values, width=.34,
+                                         brush=pg.mkBrush("#d97706"), pen=pg.mkPen("#d97706")))
+            # Write the signed change directly above/below every bar.  The
+            # colours retain the left/right convention used by the chart.
+            for x_values, values, color in ((positions - .19, left_values, "#0969ad"),
+                                            (positions + .19, right_values, "#a45100")):
+                for x, value in zip(x_values, values, strict=True):
+                    if not np.isfinite(value):
+                        continue
+                    label = pg.TextItem(f"{value:+.1f}{unit}", color=color, anchor=(.5, 1.15 if value >= 0 else -.15))
+                    label.setFont(QFont("Segoe UI", 8))
+                    label.setPos(float(x), float(value))
+                    plot.addItem(label)
+            plot.setLabel("left", axis_label)
+            plot.getAxis("bottom").setTicks([list(zip(positions, labels, strict=True))])
+            plot.getAxis("bottom").setHeight(42)
+            all_values = np.r_[left_values, right_values]
+            lower, upper = float(np.nanmin(all_values)), float(np.nanmax(all_values))
+            # Extra space keeps the signed labels inside the plot area.
+            padding = max(3.0, (upper - lower) * .22)
+            plot.setYRange(min(0, lower - padding), max(0, upper + padding), padding=0)
+            plot.setXRange(-.7, len(groups) - .3, padding=0)
+            plot.showGrid(x=False, y=True, alpha=.18)
+
+    def refreshAngleReportFatigueTrends(self) -> None:
+        """Match PPT slides 26/27 with separate left/right cycle trends."""
+        plots = self.angleReportFatigueTrendPlots
+        for plot in plots:
+            plot.clear()
+            if plot.getPlotItem().legend is None:
+                plot.addLegend(offset=(8, 8), colCount=2)
+            else:
+                plot.getPlotItem().legend.clear()
+        if self.angleAnalysisResult is None:
+            return
+        cycles = self.angleAnalysisResult["cycles"]
+        if cycles.empty:
+            return
+        selected_muscle = self.angleReportFatigueMuscleCombo.currentData()
+        metric_plots = (("rms_uv", plots[0]), ("mdf_hz", plots[1]))
+        for metric, plot in metric_plots:
+            metric_zh = "RMS" if metric == "rms_uv" else "MDF"
+            for side, side_zh, color in (("L", "左腳", "#1684d7"), ("R", "右腳", "#d97706")):
+                subset = cycles[cycles.side == side]
+                if selected_muscle:
+                    subset = subset[subset.muscle == selected_muscle]
+                if subset.empty:
+                    continue
+                row = subset.sort_values("time_s")
+                values = row[metric].to_numpy(float)
+                # Same smoothing window as the PPT trends: 9 pedal cycles.
+                smoothed = row[metric].rolling(9, min_periods=3, center=True).mean().to_numpy(float)
+                x = np.arange(1, len(values) + 1, dtype=float)
+                plot.plot(x, smoothed, pen=pg.mkPen(color, width=2), name=side_zh)
+            muscle_label = selected_muscle or "全部肌肉"
+            plot.setTitle(f"{muscle_label}：逐圈 {metric_zh} 趨勢（藍：左腳；橘：右腳；9 圈移動平均）")
+
+    def refreshAngleReportProfiles(self) -> None:
+        """Create PPT-like early/late angle profiles, paired by muscle and side."""
+        if self.angleAnalysisResult is None:
+            return
+        result = self.angleAnalysisResult
+        summary, profiles = result["summary"], result["profiles"]
+        self.angleReportProfiles.clear()
+        muscle_order = ("RF", "VM", "VL", "BF", "GAS", "SOL", "TA")
+        available = [muscle for muscle in muscle_order if muscle in set(summary.muscle)]
+        available.extend(muscle for muscle in summary.muscle.dropna().unique() if muscle not in available)
+        selected_profile = self.angleReportProfileMuscleCombo.currentData()
+        self.angleReportProfileMuscleCombo.blockSignals(True)
+        self.angleReportProfileMuscleCombo.clear()
+        for muscle in available:
+            exemplar = summary[summary.muscle == muscle].iloc[0]
+            label = exemplar.location_zh[1:] if len(exemplar.location_zh) > 1 else exemplar.location_zh
+            self.angleReportProfileMuscleCombo.addItem(f"{label} ({muscle})", muscle)
+        if selected_profile is not None:
+            index = self.angleReportProfileMuscleCombo.findData(selected_profile)
+            if index >= 0:
+                self.angleReportProfileMuscleCombo.setCurrentIndex(index)
+        self.angleReportProfileMuscleCombo.blockSignals(False)
+        selected_profile = self.angleReportProfileMuscleCombo.currentData()
+        shown_muscles = [selected_profile] if selected_profile else available[:1]
+        for row, muscle in enumerate(shown_muscles):
+            for col, side in enumerate(("L", "R")):
+                matches = summary[(summary.muscle == muscle) & (summary.side == side)]
+                if matches.empty:
+                    continue
+                entry = matches.iloc[0]
+                plot = self.angleReportProfiles.addPlot(row=row, col=col)
+                plot.setTitle(
+                    f"{entry.location_zh} {entry.channel_label}  |  RMS {entry.rms_change_percent:+.1f}%"
+                )
+                for phase, color, label in (("start", "#1684d7", "前段"),
+                                            ("end", "#d13438", "後段")):
+                    curve = profiles[(profiles.channel == entry.channel) & (profiles.phase == phase)]
+                    plot.plot(curve.angle_bin_center.to_numpy(float), curve.mean_percent.to_numpy(float),
+                              pen=pg.mkPen(color, width=2), name=label if row == 0 and col == 0 else None)
+                plot.setXRange(0, 360, padding=0)
+                plot.setYRange(0, 105, padding=0)
+                plot.setLabel("bottom", "踩踏角度", units="°")
+                if col == 0:
+                    plot.setLabel("left", "相對活化", units="%")
+                plot.showGrid(x=True, y=True, alpha=.16)
+                self.lockAnalysisPlots(plot)
+        self.angleReportProfiles.setMinimumHeight(420)
+        self.applySummaryPlotTheme()
+        selected = self.angleReportCycleMuscleCombo.currentData()
+        selected_table = self.angleReportPhaseMuscleCombo.currentData()
+        selected_fatigue = self.angleReportFatigueMuscleCombo.currentData()
+        self.angleReportCycleMuscleCombo.blockSignals(True)
+        self.angleReportPhaseMuscleCombo.blockSignals(True)
+        self.angleReportFatigueMuscleCombo.blockSignals(True)
+        self.angleReportCycleMuscleCombo.clear()
+        self.angleReportPhaseMuscleCombo.clear()
+        self.angleReportFatigueMuscleCombo.clear()
+        for muscle in available:
+            exemplar = summary[summary.muscle == muscle].iloc[0]
+            label = exemplar.location_zh[1:] if len(exemplar.location_zh) > 1 else exemplar.location_zh
+            self.angleReportCycleMuscleCombo.addItem(f"{label} ({muscle})", muscle)
+            self.angleReportPhaseMuscleCombo.addItem(f"{label} ({muscle})", muscle)
+            self.angleReportFatigueMuscleCombo.addItem(f"{label} ({muscle})", muscle)
+        if selected is not None:
+            index = self.angleReportCycleMuscleCombo.findData(selected)
+            if index >= 0:
+                self.angleReportCycleMuscleCombo.setCurrentIndex(index)
+        if selected_table is not None:
+            index = self.angleReportPhaseMuscleCombo.findData(selected_table)
+            if index >= 0:
+                self.angleReportPhaseMuscleCombo.setCurrentIndex(index)
+        if selected_fatigue is not None:
+            index = self.angleReportFatigueMuscleCombo.findData(selected_fatigue)
+            if index >= 0:
+                self.angleReportFatigueMuscleCombo.setCurrentIndex(index)
+        self.angleReportCycleMuscleCombo.blockSignals(False)
+        self.angleReportPhaseMuscleCombo.blockSignals(False)
+        self.angleReportFatigueMuscleCombo.blockSignals(False)
+        self.refreshAngleReportCycleTrends()
+        self.refreshAngleReportPhaseTable()
+        self.refreshAngleReportFatigueTrends()
+
+    def clearAngleReportPolarProfiles(self) -> None:
+        while self.angleReportPolarGrid.count():
+            item = self.angleReportPolarGrid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def refreshAngleReportPolarProfiles(self) -> None:
+        """Show the export's polar angle view directly in the Qt report."""
+        self.clearAngleReportPolarProfiles()
+        if self.angleAnalysisResult is None:
+            return
+        summary = self.angleAnalysisResult["summary"]
+        profiles = self.angleAnalysisResult["profiles"]
+        if summary.empty:
+            return
+        muscle_order = ("RF", "VM", "VL", "BF", "GAS", "SOL", "TA")
+        available = [muscle for muscle in muscle_order if muscle in set(summary.muscle)]
+        available.extend(muscle for muscle in summary.muscle.dropna().unique() if muscle not in available)
+
+        selected = self.angleReportPolarMuscleCombo.currentData()
+        self.angleReportPolarMuscleCombo.blockSignals(True)
+        self.angleReportPolarMuscleCombo.clear()
+        self.angleReportPolarMuscleCombo.addItem("所有肌肉", None)
+        for muscle in available:
+            exemplar = summary[summary.muscle == muscle].iloc[0]
+            label = exemplar.location_zh[1:] if len(exemplar.location_zh) > 1 else exemplar.location_zh
+            self.angleReportPolarMuscleCombo.addItem(f"{label} ({muscle})", muscle)
+        if selected is not None:
+            index = self.angleReportPolarMuscleCombo.findData(selected)
+            if index >= 0:
+                self.angleReportPolarMuscleCombo.setCurrentIndex(index)
+        self.angleReportPolarMuscleCombo.blockSignals(False)
+
+        selected = self.angleReportPolarMuscleCombo.currentData()
+        entries = summary[summary.muscle == selected] if selected else summary
+        entries = entries.sort_values(["side", "location_zh", "channel_label"])
+        for index, entry in enumerate(entries.itertuples()):
+            start = profiles[(profiles.channel == entry.channel) & (profiles.phase == "start")]
+            end = profiles[(profiles.channel == entry.channel) & (profiles.phase == "end")]
+            if start.empty or end.empty:
+                continue
+            chart = PolarAngleProfileWidget(
+                f"{entry.location_zh} · {entry.channel_label}",
+                start.angle_bin_center.to_numpy(float), start.mean_percent.to_numpy(float),
+                end.angle_bin_center.to_numpy(float), end.mean_percent.to_numpy(float),
+            )
+            self.angleReportPolarGrid.addWidget(chart, index // 3, index % 3)
+
+    def refreshAngleReportCycleTrends(self) -> None:
+        """Match PPT slides 6/8/10/12/14/16/18: eight phase trends per side."""
+        for plot in (self.angleReportCycleLeftPlot, self.angleReportCycleRightPlot):
+            plot.clear()
+            if plot.getPlotItem().legend is None:
+                plot.addLegend(offset=(8, 8), colCount=4)
+            else:
+                plot.getPlotItem().legend.clear()
+        if self.angleAnalysisResult is None:
+            return
+        muscle = self.angleReportCycleMuscleCombo.currentData()
+        if not muscle:
+            return
+        result = self.angleAnalysisResult
+        cycles, summary = result["cycles"], result["summary"]
+        settings = result["settings"]
+        bins = int(settings["bins"])
+        bin_centers = (np.arange(bins) + .5) * 360 / bins
+        bin_columns = [f"bin_{index}" for index in range(bins)]
+        target_angles = tuple(range(0, 360, 45))
+        selected_angle = self.angleReportCycleAngleCombo.currentData()
+        displayed_angles = target_angles if selected_angle is None else (int(selected_angle),)
+        line_colors = ("#1684d7", "#e95f54", "#7e57c2", "#00897b",
+                       "#f39c12", "#5c6bc0", "#43a047", "#c2185b")
+        for side, plot, side_zh in (("L", self.angleReportCycleLeftPlot, "左腳"),
+                                    ("R", self.angleReportCycleRightPlot, "右腳")):
+            matches = summary[(summary.muscle == muscle) & (summary.side == side)]
+            if matches.empty:
+                plot.setTitle(f"{side_zh}：無此肌肉資料")
+                continue
+            entry = matches.iloc[0]
+            rows = cycles[cycles.channel == entry.channel].sort_values("cycle").reset_index(drop=True)
+            angle_title = "逐圈 8 角度活化" if selected_angle is None else f"{int(selected_angle)}°逐圈活化"
+            plot.setTitle(f"{entry.location_zh} {entry.channel_label} — {angle_title}（5 圈移動平均）")
+            x = np.arange(1, len(rows) + 1, dtype=float)
+            start_count = int((rows.phase == "start").sum())
+            end_indices = np.flatnonzero(rows.phase.to_numpy() == "end")
+            if start_count:
+                start_region = pg.LinearRegionItem((1, start_count), orientation="vertical", movable=False,
+                                                   brush=pg.mkBrush(22, 132, 215, 24), pen=None)
+                start_region.setZValue(-10)
+                plot.addItem(start_region)
+            if len(end_indices):
+                end_region = pg.LinearRegionItem((int(end_indices[0]) + 1, len(rows)), orientation="vertical", movable=False,
+                                                 brush=pg.mkBrush(209, 52, 56, 24), pen=None)
+                end_region.setZValue(-10)
+                plot.addItem(end_region)
+            for angle, color in zip(target_angles, line_colors, strict=True):
+                if angle not in displayed_angles:
+                    continue
+                distance = np.abs((bin_centers - angle + 180) % 360 - 180)
+                columns = [column for column, keep in zip(bin_columns, distance <= 15 + 1e-9, strict=True) if keep]
+                values = rows[columns].mean(axis=1).to_numpy(float)
+                weights = np.convolve(np.ones(len(values)), np.ones(5), mode="same")
+                smoothed = np.convolve(values, np.ones(5), mode="same") / weights
+                plot.plot(x, smoothed, pen=pg.mkPen(color, width=2), name=f"{angle}°")
+            plot.setXRange(1, max(2, len(rows)), padding=.02)
+            plot.setYRange(0, 105, padding=0)
+            plot.showGrid(x=True, y=True, alpha=.16)
+            self.lockAnalysisPlots(plot)
+
+    def refreshAngleReportPhaseTable(self) -> None:
+        """Match PPT slides 7/9/11/13/15/17/19 with an eight-angle table."""
+        table = self.angleReportPhaseTable
+        table.clearContents()
+        if self.angleAnalysisResult is None:
+            table.setRowCount(0)
+            return
+        muscle = self.angleReportPhaseMuscleCombo.currentData()
+        if not muscle:
+            table.setRowCount(0)
+            return
+        result = self.angleAnalysisResult
+        summary, profiles = result["summary"], result["profiles"]
+        bins = int(result["settings"]["bins"])
+        centers = (np.arange(bins) + .5) * 360 / bins
+        target_angles = tuple(range(0, 360, 45))
+        by_side = {
+            side: summary[(summary.muscle == muscle) & (summary.side == side)].iloc[0]
+            if not summary[(summary.muscle == muscle) & (summary.side == side)].empty else None
+            for side in ("L", "R")
+        }
+
+        def phase_value(entry, phase: str, angle: int) -> float | None:
+            if entry is None:
+                return None
+            curve = profiles[(profiles.channel == entry.channel) & (profiles.phase == phase)]
+            if curve.empty:
+                return None
+            distance = np.abs((curve.angle_bin_center.to_numpy(float) - angle + 180) % 360 - 180)
+            values = curve.mean_percent.to_numpy(float)[distance <= 15 + 1e-9]
+            return float(np.mean(values)) if len(values) else None
+
+        table.setRowCount(len(target_angles) + 2)
+        for row, angle in enumerate(target_angles):
+            left_start = phase_value(by_side["L"], "start", angle)
+            left_end = phase_value(by_side["L"], "end", angle)
+            right_start = phase_value(by_side["R"], "start", angle)
+            right_end = phase_value(by_side["R"], "end", angle)
+            values = (
+                f"{angle}° (±15°)",
+                f"{left_start:.1f}%" if left_start is not None else "—",
+                f"{left_end:.1f}%" if left_end is not None else "—",
+                f"{left_end - left_start:+.1f}%" if left_start is not None and left_end is not None else "—",
+                f"{right_start:.1f}%" if right_start is not None else "—",
+                f"{right_end:.1f}%" if right_end is not None else "—",
+                f"{right_end - right_start:+.1f}%" if right_start is not None and right_end is not None else "—",
+            )
+            for column, value in enumerate(values):
+                table.setItem(row, column, QTableWidgetItem(value))
+
+        for row, label, start_key, end_key, unit in (
+            (len(target_angles), "RMS", "rms_uv_start", "rms_uv_end", " µV"),
+            (len(target_angles) + 1, "MDF", "mdf_start", "mdf_end", " Hz"),
+        ):
+            values = [label]
+            for side in ("L", "R"):
+                entry = by_side[side]
+                if entry is None:
+                    values.extend(("—", "—", "—"))
+                    continue
+                start, end = float(getattr(entry, start_key)), float(getattr(entry, end_key))
+                values.extend((f"{start:.1f}{unit}", f"{end:.1f}{unit}", f"{end - start:+.1f}{unit}"))
+            for column, value in enumerate(values):
+                table.setItem(row, column, QTableWidgetItem(value))
 
     def refreshAnglePhase(self) -> None:
         """Show the direct, phase-specific answer before the detailed plots."""
