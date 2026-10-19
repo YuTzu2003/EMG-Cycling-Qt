@@ -8,13 +8,13 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QRectF, QSettings, QStandardPaths, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget, QInputDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QDoubleSpinBox, QToolButton,)
 from delsys.collection import CollectionInfoRecorder, SubjectInfo, infoOutputPath
 from delsys.emg.body_map import BodyMapPanel
-from delsys.emg.sensor_mapping import (SensorMapping,duplicateMappingSlots,loadMappings,saveMappings,matchesCsvColumn,recordingChannelSides,)
+from delsys.emg.sensor_mapping import (SensorMapping,duplicateMappingSlots,futureMeasurementMappings,loadMappings,saveMappings,matchesCsvColumn,recordingChannelSides,test2LegacyMappings,)
 from delsys.emg.trigno import CHANNEL_COUNT, SAMPLE_RATE
 from delsys.emg.baseline import BaselineManager, CalibrationSession, EMGPreprocessor, FilterSettings, RMSFeatureExtractor, load_raw_emg_csv
 from delsys.emg.workers import ConnectionWorker, StreamWorker
@@ -255,11 +255,30 @@ class MappingEditorDialog(QDialog):
             self._initialBaselines.append(initial)
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
+        presets = QHBoxLayout()
+        legacyButton = QPushButton("還原 Test2 舊版對照")
+        legacyButton.setToolTip("用於既有 Test2 資料：S01/02 是股二頭肌、S03/04 是股內側肌。")
+        legacyButton.clicked.connect(lambda: self.applyPreset(test2LegacyMappings()))
+        futureButton = QPushButton("套用新版（之後測量）")
+        futureButton.setToolTip("只在開始之後的新測量前套用。Test2 舊資料請保留或切回舊版對照。")
+        futureButton.clicked.connect(lambda: self.applyPreset(futureMeasurementMappings()))
+        presets.addWidget(legacyButton)
+        presets.addWidget(futureButton)
+        presets.addStretch(1)
+        layout.addLayout(presets)
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
         buttons.button(QDialogButtonBox.Save).setText("儲存並套用")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def applyPreset(self, mappings: list[SensorMapping]) -> None:
+        """Replace only anatomy fields; baseline RMS values stay untouched."""
+        for edits, mapping in zip(self.edits, mappings, strict=True):
+            chinese, english, abbreviation = edits
+            chinese.setText(mapping.chinese_name)
+            english.setText(mapping.english_name)
+            abbreviation.setText(mapping.abbreviation)
 
     def mappings(self) -> list[SensorMapping]:
         return [
@@ -1030,6 +1049,209 @@ class TrignoWindow(QMainWindow):
         angleDetailLayout.addWidget(self.angleCurvePlot, 1)
         angleDetailLayout.addWidget(QLabel("藍線＝前段，紅線＝後段；垂直虛線＝各段峰值相位。肌電訊號強度不等於施力大小。", objectName="muted"))
         self.angleViews.addTab(angleDetailPage, "肌肉細節")
+
+        # A single in-app report keeps the important PPT-style findings in the
+        # same place as the plots and source data.  It is deliberately plain
+        # text: users can select/copy it into a clinical note without needing
+        # an external report generator.
+        angleReportPage = QWidget()
+        angleReportLayout = QVBoxLayout(angleReportPage)
+        angleReportLayout.setContentsMargins(8, 8, 8, 8)
+        angleReportLayout.addWidget(QLabel("\u5b8c\u6574\u5206\u6790\u5831\u544a", objectName="sectionTitle"))
+        self.angleReportTabs = QTabWidget()
+        reportChartsPage = QScrollArea()
+        reportChartsPage.setWidgetResizable(True)
+        reportChartsContent = QWidget()
+        reportChartsContent.setMinimumHeight(700)
+        reportChartsLayout = QVBoxLayout(reportChartsContent)
+        reportChartsLayout.setContentsMargins(8, 8, 8, 8)
+        reportChartsLayout.setSpacing(18)
+        reportChartsLayout.addWidget(QLabel("\u6bcf\u500b\u808c\u8089\u4e00\u7d44\u76f4\u5411\u9577\u689d\uff1b\u85cd\u8272\u70ba\u5de6\u8173\u3001\u6a58\u8272\u70ba\u53f3\u8173\u3002", objectName="muted"))
+        self.angleReportRmsPlot = pg.PlotWidget(title="RMS \u8b8a\u5316\uff08\u5f8c\u6bb5\u6bd4\u524d\u6bb5\uff09")
+        self.angleReportRmsPlot.setLabel("bottom", "RMS \u8b8a\u5316", units="%")
+        self.angleReportRmsPlot.setMinimumHeight(300)
+        reportChartsLayout.addWidget(self.angleReportRmsPlot, 1)
+        self.angleReportMdfPlot = pg.PlotWidget(title="MDF \u8b8a\u5316\uff08\u5f8c\u6bb5\u6e1b\u524d\u6bb5\uff09")
+        self.angleReportMdfPlot.setLabel("bottom", "MDF \u8b8a\u5316", units="Hz")
+        self.angleReportMdfPlot.setMinimumHeight(300)
+        reportChartsLayout.addWidget(self.angleReportMdfPlot, 1)
+        reportChartsPage.setWidget(reportChartsContent)
+        self.angleReportChartTabs = QTabWidget()
+        self.angleReportChartTabs.addTab(reportChartsPage, "\u75b2\u52de\u6458\u8981")
+
+        fatigueTrendsPage = QScrollArea()
+        fatigueTrendsPage.setWidgetResizable(True)
+        fatigueTrendsContent = QWidget()
+        # Four full-height plots need more space than a typical report tab.
+        # Keep the page scrollable instead of clipping the lower two plots.
+        fatigueTrendsContent.setMinimumHeight(760)
+        fatigueTrendsLayout = QVBoxLayout(fatigueTrendsContent)
+        fatigueTrendsLayout.setContentsMargins(8, 8, 8, 8)
+        fatigueTrendControls = QHBoxLayout()
+        fatigueTrendControls.addWidget(QLabel("\u808c\u8089", objectName="sectionTitle"))
+        self.angleReportFatigueMuscleCombo = QComboBox()
+        self.angleReportFatigueMuscleCombo.setMinimumWidth(260)
+        self.angleReportFatigueMuscleCombo.setAccessibleName("PPT \u9010\u5708\u75b2\u52de\u8da8\u52e2\u808c\u8089\u9078\u64c7")
+        fatigueTrendControls.addWidget(self.angleReportFatigueMuscleCombo)
+        fatigueTrendControls.addStretch(1)
+        fatigueTrendsLayout.addLayout(fatigueTrendControls)
+        fatigueTrendsLayout.addWidget(QLabel("\u6bcf\u689d\u7dda\u70ba\u4e00\u5074\u808c\u8089\uff0c\u4ee5 9 \u5708\u79fb\u52d5\u5e73\u5747\u986f\u793a\u9010\u5708\u8b8a\u5316\u3002", objectName="muted"))
+        fatigueTrendGrid = QGridLayout()
+        self.angleReportRmsTrendPlot = pg.PlotWidget(title="\u9010\u5708 RMS \u8da8\u52e2\uff1a\u5de6\u53f3\u8173\u758a\u5716")
+        self.angleReportMdfTrendPlot = pg.PlotWidget(title="\u9010\u5708 MDF \u8da8\u52e2\uff1a\u5de6\u53f3\u8173\u758a\u5716")
+        self.angleReportFatigueTrendPlots = (
+            self.angleReportRmsTrendPlot, self.angleReportMdfTrendPlot,
+        )
+        for plot in self.angleReportFatigueTrendPlots:
+            plot.setMinimumHeight(330)
+            plot.setLabel("bottom", "\u8e29\u8e0f\u5708\u6578")
+            plot.showGrid(x=True, y=True, alpha=.16)
+            plot.addLegend(offset=(8, 8), colCount=2)
+        self.angleReportRmsTrendPlot.setLabel("left", "RMS", units="\u00b5V")
+        self.angleReportMdfTrendPlot.setLabel("left", "MDF", units="Hz")
+        fatigueTrendGrid.addWidget(self.angleReportRmsTrendPlot, 0, 0)
+        fatigueTrendGrid.addWidget(self.angleReportMdfTrendPlot, 1, 0)
+        fatigueTrendsLayout.addLayout(fatigueTrendGrid, 1)
+        fatigueTrendsPage.setWidget(fatigueTrendsContent)
+        self.angleReportChartTabs.addTab(fatigueTrendsPage, "\u9010\u5708\u75b2\u52de\u8da8\u52e2")
+
+        reportProfilesPage = QWidget()
+        reportProfilesLayout = QVBoxLayout(reportProfilesPage)
+        reportProfilesLayout.setContentsMargins(8, 8, 8, 8)
+        profileControls = QHBoxLayout()
+        profileControls.addWidget(QLabel("\u808c\u8089", objectName="sectionTitle"))
+        self.angleReportProfileMuscleCombo = QComboBox()
+        self.angleReportProfileMuscleCombo.setMinimumWidth(260)
+        self.angleReportProfileMuscleCombo.setAccessibleName("PPT \u808c\u8089\u89d2\u5ea6\u66f2\u7dda\u808c\u8089\u9078\u64c7")
+        profileControls.addWidget(self.angleReportProfileMuscleCombo)
+        profileControls.addStretch(1)
+        reportProfilesLayout.addLayout(profileControls)
+        reportProfilesLayout.addWidget(QLabel("\u6bcf\u500b\u808c\u8089\u7684\u5de6\u3001\u53f3\u8173\u4e26\u6392\uff1b\u85cd\u7dda\u70ba\u524d\u6bb5\u3001\u7d05\u7dda\u70ba\u5f8c\u6bb5\u3002", objectName="muted"))
+        self.angleReportProfileScroll = QScrollArea()
+        self.angleReportProfileScroll.setWidgetResizable(True)
+        self.angleReportProfiles = pg.GraphicsLayoutWidget()
+        self.angleReportProfiles.setMinimumHeight(1620)
+        self.angleReportProfiles.setBackground("#ffffff")
+        self.angleReportProfileScroll.setWidget(self.angleReportProfiles)
+        reportProfilesLayout.addWidget(self.angleReportProfileScroll, 1)
+        self.angleReportChartTabs.addTab(reportProfilesPage, "\u808c\u8089\u89d2\u5ea6\u66f2\u7dda")
+
+        reportCyclesPage = QWidget()
+        reportCyclesLayout = QVBoxLayout(reportCyclesPage)
+        reportCyclesLayout.setContentsMargins(8, 8, 8, 8)
+        cycleControls = QHBoxLayout()
+        cycleControls.addWidget(QLabel("\u808c\u8089", objectName="sectionTitle"))
+        self.angleReportCycleMuscleCombo = QComboBox()
+        self.angleReportCycleMuscleCombo.setMinimumWidth(260)
+        self.angleReportCycleMuscleCombo.setAccessibleName("PPT \u9010\u5708 8 \u89d2\u5ea6\u808c\u8089\u9078\u64c7")
+        cycleControls.addWidget(self.angleReportCycleMuscleCombo)
+        cycleControls.addWidget(QLabel("\u8e29\u8e0f\u89d2\u5ea6", objectName="sectionTitle"))
+        self.angleReportCycleAngleCombo = QComboBox()
+        self.angleReportCycleAngleCombo.setMinimumWidth(130)
+        self.angleReportCycleAngleCombo.setAccessibleName("\u9010\u5708\u6d3b\u5316\u8e29\u8e0f\u89d2\u5ea6\u9078\u64c7")
+        self.angleReportCycleAngleCombo.addItem("\u5168\u90e8\u89d2\u5ea6", None)
+        for angle in range(0, 360, 45):
+            self.angleReportCycleAngleCombo.addItem(f"{angle}\u00b0", angle)
+        cycleControls.addWidget(self.angleReportCycleAngleCombo)
+        cycleControls.addStretch()
+        reportCyclesLayout.addLayout(cycleControls)
+        self.angleReportCycleHelpLabel = QLabel(
+            "\u53ef\u9078\u64c7\u55ae\u4e00\u89d2\u5ea6\u4f86\u6bd4\u8f03\u5de6\u3001\u53f3\u8173\u9010\u5708\u8b8a\u5316\uff1b\u300c\u5168\u90e8\u89d2\u5ea6\u300d\u986f\u793a 0\u00b0\u300145\u00b0\u300190\u00b0\u2026315\u00b0\u3002\u5df2\u4ee5 5 \u5708\u79fb\u52d5\u5e73\u5747\u5e73\u6ed1\uff0c\u6de1\u85cd\u70ba\u524d\u6bb5\u3001\u6de1\u7d05\u70ba\u5f8c\u6bb5\u3002",
+            objectName="muted"
+        )
+        reportCyclesLayout.addWidget(self.angleReportCycleHelpLabel)
+        cyclePlots = QHBoxLayout()
+        self.angleReportCycleLeftPlot = pg.PlotWidget(title="\u5de6\u8173")
+        self.angleReportCycleRightPlot = pg.PlotWidget(title="\u53f3\u8173")
+        for plot in (self.angleReportCycleLeftPlot, self.angleReportCycleRightPlot):
+            plot.setMinimumHeight(410)
+            plot.setLabel("left", "\u76f8\u5c0d\u6d3b\u5316", units="%")
+            plot.setLabel("bottom", "\u8e29\u8e0f\u5708\u6578")
+            plot.showGrid(x=True, y=True, alpha=.16)
+            plot.addLegend(offset=(8, 8), colCount=4)
+        cyclePlots.addWidget(self.angleReportCycleLeftPlot, 1)
+        cyclePlots.addWidget(self.angleReportCycleRightPlot, 1)
+        reportCyclesLayout.addLayout(cyclePlots, 1)
+        self.angleReportChartTabs.addTab(reportCyclesPage, "\u9010\u5708 8 \u89d2\u5ea6")
+
+        reportValuesPage = QWidget()
+        reportValuesLayout = QVBoxLayout(reportValuesPage)
+        reportValuesLayout.setContentsMargins(8, 8, 8, 8)
+        valueControls = QHBoxLayout()
+        valueControls.addWidget(QLabel("\u808c\u8089", objectName="sectionTitle"))
+        self.angleReportPhaseMuscleCombo = QComboBox()
+        self.angleReportPhaseMuscleCombo.setMinimumWidth(260)
+        self.angleReportPhaseMuscleCombo.setAccessibleName("PPT \u524d\u5f8c\u6bb5 8 \u89d2\u5ea6\u8868\u683c\u808c\u8089\u9078\u64c7")
+        valueControls.addWidget(self.angleReportPhaseMuscleCombo)
+        valueControls.addStretch()
+        reportValuesLayout.addLayout(valueControls)
+        reportValuesLayout.addWidget(QLabel("\u6bcf\u500b\u89d2\u5ea6\u70ba \u00b115\u00b0 \u8996\u7a97\u5e73\u5747\uff1b\u0394 = \u5f8c\u6bb5 \u2212 \u524d\u6bb5\u3002", objectName="muted"))
+        self.angleReportPhaseTable = QTableWidget(0, 7)
+        self.angleReportPhaseTable.setHorizontalHeaderLabels(("\u8e29\u8e0f\u89d2\u5ea6", "\u5de6\u524d\u6bb5", "\u5de6\u5f8c\u6bb5", "\u5de6 \u0394", "\u53f3\u524d\u6bb5", "\u53f3\u5f8c\u6bb5", "\u53f3 \u0394"))
+        self.angleReportPhaseTable.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.angleReportPhaseTable.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.angleReportPhaseTable.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.angleReportPhaseTable.setMinimumHeight(360)
+        self.angleReportPhaseTable.setAccessibleName("PPT \u524d\u5f8c\u6bb5 8 \u89d2\u5ea6\u6bd4\u8f03\u8868")
+        reportValuesLayout.addWidget(self.angleReportPhaseTable, 1)
+        self.angleReportChartTabs.addTab(reportValuesPage, "\u524d\u5f8c\u6bb5\u8868\u683c")
+        self.angleReportTabs.addTab(self.angleReportChartTabs, "\u5716\u8868\u5206\u6790")
+
+        reportTextPage = QWidget()
+        reportTextLayout = QVBoxLayout(reportTextPage)
+        reportTextLayout.setContentsMargins(8, 8, 8, 8)
+        self.angleReportDetailsScroll = QScrollArea()
+        self.angleReportDetailsScroll.setWidgetResizable(True)
+        reportTextContent = QWidget()
+        reportTextContentLayout = QVBoxLayout(reportTextContent)
+        reportTextContentLayout.setContentsMargins(4, 4, 4, 4)
+        reportTextContentLayout.setSpacing(8)
+
+        def report_table(headers: tuple[str, ...], accessible_name: str) -> QTableWidget:
+            table = QTableWidget(0, len(headers))
+            table.setHorizontalHeaderLabels(headers)
+            table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+            table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+            table.setAlternatingRowColors(True)
+            table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            table.setAccessibleName(accessible_name)
+            return table
+
+        reportTextContentLayout.addWidget(QLabel("\u3010\u6e2c\u8a66\u8207\u540c\u6b65\u3011", objectName="sectionTitle"))
+        self.angleReportSyncTable = report_table(("\u9805\u76ee", "\u6578\u503c"), "\u8e29\u8e0f\u89d2\u5ea6\u6e2c\u8a66\u8207\u540c\u6b65\u8868\u683c")
+        self.angleReportSyncTable.setMinimumHeight(190)
+        reportTextContentLayout.addWidget(self.angleReportSyncTable)
+        reportTextContentLayout.addWidget(QLabel("\u3010\u901a\u9053\u8207\u8cbc\u7247\u5c0d\u61c9\u3011", objectName="sectionTitle"))
+        self.angleReportMappingTable = report_table(("\u808c\u8089 / \u90e8\u4f4d", "\u901a\u9053"), "\u8e29\u8e0f\u89d2\u5ea6\u901a\u9053\u5c0d\u61c9\u8868\u683c")
+        self.angleReportMappingTable.setMinimumHeight(360)
+        reportTextContentLayout.addWidget(self.angleReportMappingTable)
+        reportTextContentLayout.addWidget(QLabel("\u3010\u91cd\u9ede\u7d50\u679c\u3011", objectName="sectionTitle"))
+        self.angleReportHighlightsTable = report_table(("\u9805\u76ee", "\u7d50\u679c"), "\u8e29\u8e0f\u89d2\u5ea6\u91cd\u9ede\u7d50\u679c\u8868\u683c")
+        self.angleReportHighlightsTable.setMinimumHeight(150)
+        reportTextContentLayout.addWidget(self.angleReportHighlightsTable)
+        reportTextContentLayout.addWidget(QLabel("\u3010\u901a\u9053\u524d\u5f8c\u6bb5\u6578\u503c\u3011", objectName="sectionTitle"))
+        self.angleReportChannelTable = QTableWidget(0, 6)
+        self.angleReportChannelTable.setHorizontalHeaderLabels((
+            "\u808c\u8089 / \u901a\u9053", "RMS \u524d\u2192\u5f8c (\u00b5V)", "RMS %",
+            "MDF \u524d\u2192\u5f8c (Hz)", "\u5cf0\u503c\u89d2\u5ea6\u8b8a\u5316", "\u5224\u8b80\u63d0\u793a",
+        ))
+        self.angleReportChannelTable.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.angleReportChannelTable.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.angleReportChannelTable.setAlternatingRowColors(True)
+        self.angleReportChannelTable.setMinimumHeight(300)
+        self.angleReportChannelTable.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.angleReportChannelTable.setAccessibleName("\u901a\u9053\u524d\u5f8c\u6bb5\u6578\u503c\u8868\u683c")
+        reportTextContentLayout.addWidget(self.angleReportChannelTable)
+        reportTextContentLayout.addWidget(QLabel("\u3010\u5224\u8b80\u9650\u5236\u3011", objectName="sectionTitle"))
+        self.angleReportLimitationsTable = report_table(("\u6ce8\u610f\u4e8b\u9805",), "\u8e29\u8e0f\u89d2\u5ea6\u5224\u8b80\u9650\u5236\u8868\u683c")
+        self.angleReportLimitationsTable.setMinimumHeight(150)
+        reportTextContentLayout.addWidget(self.angleReportLimitationsTable)
+        reportTextContentLayout.addStretch()
+        self.angleReportDetailsScroll.setWidget(reportTextContent)
+        reportTextLayout.addWidget(self.angleReportDetailsScroll, 1)
+        self.angleReportTabs.addTab(reportTextPage, "\u6578\u503c\u8207\u5224\u8b80")
+        angleReportLayout.addWidget(self.angleReportTabs, 1)
+        self.angleViews.addTab(angleReportPage, "\u5b8c\u6574\u5831\u544a")
         angleLayout.addWidget(self.angleViews, 1)
         self.summaryTabs.insertTab(2, anglePage, "踩踏角度分析")
         self.angleEmgButton.clicked.connect(self.chooseAngleEmg)
@@ -1039,9 +1261,22 @@ class TrignoWindow(QMainWindow):
         self.angleMuscleCombo.currentIndexChanged.connect(self.refreshAngleCurve)
         self.anglePhaseSpin.valueChanged.connect(self.refreshAnglePhase)
         self.angleComparisonTable.itemSelectionChanged.connect(self.showSelectedAngleMuscle)
+        self.angleReportCycleMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportCycleTrends)
+        self.angleReportCycleAngleCombo.currentIndexChanged.connect(self.refreshAngleReportCycleTrends)
+        self.angleReportPhaseMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportPhaseTable)
+        self.angleReportFatigueMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportFatigueTrends)
+        self.angleReportProfileMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportProfiles)
         self.angleAutoScaleCheck.toggled.connect(lambda checked: self.angleScaleSpin.setEnabled(not checked))
         self.angleAutoOffsetCheck.toggled.connect(lambda checked: self.angleOffsetSpin.setEnabled(not checked))
         self.angleAdvancedToggle.toggled.connect(self.setAngleAdvancedVisible)
+        self.lockAnalysisPlots(
+            self.powerAnalysisPlot, self.cadenceAnalysisPlot, self.balanceAnalysisPlot,
+            self.rmsAverageBarPlot, self.rmsPeakBarPlot, self.emgEnvelopePlot,
+            self.comparisonPlot, self.anglePhasePlot, self.angleHeatPlot,
+            self.angleCurvePlot, self.angleReportRmsPlot, self.angleReportMdfPlot,
+            self.angleReportCycleLeftPlot, self.angleReportCycleRightPlot,
+            *self.angleReportFatigueTrendPlots,
+        )
         self.summaryTabs.setCurrentIndex(0)
         layout.addWidget(self.summaryTabs, 1)
         self.importFitButton.clicked.connect(self.importFitSummary)
@@ -1054,15 +1289,29 @@ class TrignoWindow(QMainWindow):
         self.comparisonTable.itemSelectionChanged.connect(self.updateComparisonPlot)
         return tab
 
+    @staticmethod
+    def lockAnalysisPlots(*plots) -> None:
+        """Keep report charts readable; body-map zoom remains intentionally separate."""
+        for plot in plots:
+            item = plot.getPlotItem() if hasattr(plot, "getPlotItem") else plot
+            item.setMouseEnabled(x=False, y=False)
+            item.setMenuEnabled(False)
+
     def applySummaryPlotTheme(self, *_args) -> None:
         tokens = FluentThemeManager.DARK if QApplication.instance().styleHints().colorScheme().name == "Dark" else FluentThemeManager.LIGHT
         for widget in (self.summaryPlots, self.ridePlots, self.comparisonPlot, self.angleCurvePlot,
-                       self.angleHeatPlot, self.anglePhasePlot):
+                       self.angleHeatPlot, self.anglePhasePlot, self.angleReportRmsPlot,
+                       self.angleReportMdfPlot, self.angleReportProfiles,
+                       self.angleReportCycleLeftPlot, self.angleReportCycleRightPlot,
+                       *self.angleReportFatigueTrendPlots):
             widget.setBackground(tokens["surface_background"])
         for plot in (self.powerAnalysisPlot, self.cadenceAnalysisPlot, self.balanceAnalysisPlot,
                      self.rmsAverageBarPlot, self.rmsPeakBarPlot, self.emgEnvelopePlot,
                      self.comparisonPlot.getPlotItem(), self.angleCurvePlot.getPlotItem(),
-                     self.angleHeatPlot.getPlotItem(), self.anglePhasePlot.getPlotItem()):
+                     self.angleHeatPlot.getPlotItem(), self.anglePhasePlot.getPlotItem(),
+                     self.angleReportRmsPlot.getPlotItem(), self.angleReportMdfPlot.getPlotItem(),
+                     self.angleReportCycleLeftPlot.getPlotItem(), self.angleReportCycleRightPlot.getPlotItem(),
+                     *(plot.getPlotItem() for plot in self.angleReportFatigueTrendPlots)):
             for axis_name in ("left", "bottom"):
                 axis = plot.getAxis(axis_name)
                 axis.setPen(tokens["text_secondary"])
@@ -2338,7 +2587,9 @@ class TrignoWindow(QMainWindow):
         self.angleMuscleCombo.blockSignals(True)
         self.angleMuscleCombo.clear()
         for entry in summary.itertuples():
-            self.angleMuscleCombo.addItem(f"{entry.location_zh} · {entry.channel_label}", entry.channel)
+            self.angleMuscleCombo.addItem(
+                f"{entry.location_zh} ({entry.muscle}) · {entry.channel_label}", entry.channel
+            )
         self.angleMuscleCombo.blockSignals(False)
         self.refreshAngleCurve()
         self.angleComparisonTable.setRowCount(len(summary))
@@ -2365,7 +2616,449 @@ class TrignoWindow(QMainWindow):
         self.angleHeatPhaseLine = pg.InfiniteLine(pos=self.anglePhaseSpin.value(), angle=90,pen=pg.mkPen("#555555", width=2, style=Qt.DashLine),)
         self.angleHeatPlot.addItem(self.angleHeatPhaseLine)
         self.refreshAnglePhase()
+        self.refreshAngleReport()
         self.angleExportButton.setEnabled(True)
+
+    def refreshAngleReport(self) -> None:
+        """Present the reproducible, PPT-style numerical findings in Qt."""
+        if self.angleAnalysisResult is None:
+            self.clearAngleReportTables()
+            return
+        result = self.angleAnalysisResult
+        summary = result["summary"].copy()
+        sync, settings = result["sync"], result["settings"]
+        if summary.empty:
+            self.clearAngleReportTables()
+            return
+
+        ordered = summary.sort_values(["side", "location_zh", "channel_label"])
+        top_rms = summary.loc[summary.rms_change_percent.idxmax()]
+        lowest_mdf = summary.loc[summary.mdf_change_hz.idxmin()]
+        rms_up = int((summary.rms_change_percent > 0).sum())
+        mdf_down = int((summary.mdf_change_hz < 0).sum())
+        phase_name = sync["angle_label"]
+        calibration = "\u5df2\u6821\u6b63\u89d2\u5ea6" if sync["angle_calibrated"] else "\u76f8\u5c0d\u8e29\u8e0f\u76f8\u4f4d"
+        lines = [
+            "\u8e29\u8e0f\u89d2\u5ea6 EMG \u5b8c\u6574\u5206\u6790\u5831\u544a",
+            "=" * 38,
+            "",
+            "\u3010\u6e2c\u8a66\u8207\u540c\u6b65\u3011",
+            f"\u89d2\u5ea6\u57fa\u6e96\uff1a{phase_name}\uff08{calibration}\uff09",
+            f"\u6709\u6548\u8e29\u8e0f\u5708\uff1a{sync['valid_cycles']} \u5708",
+            f"\u524d\u6bb5\uff1a{settings['start'][0]:g}\u2013{settings['start'][1]:g} \u79d2\uff1b\u5f8c\u6bb5\uff1a{settings['end'][0]:g}\u2013{settings['end'][1]:g} \u79d2",
+            f"EMG \u6642\u9418\u6bd4\u4f8b\uff1a{sync['scale']:.5f}\uff1b\u8d77\u9ede\u504f\u79fb\uff1a{sync['offset_s']:+.3f} \u79d2",
+            f"\u5074\u5225\u4f86\u6e90\uff1a{sync.get('side_source', '\u76ee\u524d\u8a2d\u5b9a')}",
+            "",
+            "\u3010\u901a\u9053\u8207\u8cbc\u7247\u5c0d\u61c9\u3011",
+        ]
+        for entry in ordered.itertuples():
+            lines.append(f"{entry.location_zh}\uff1a{entry.channel_label}")
+
+        lines.extend([
+            "",
+            "\u3010\u91cd\u9ede\u7d50\u679c\u3011",
+            f"RMS \u4e0a\u5347\u901a\u9053\uff1a{rms_up}/{len(summary)}\uff1bMDF \u4e0b\u964d\u901a\u9053\uff1a{mdf_down}/{len(summary)}\u3002",
+            f"\u6700\u5927 RMS \u8b8a\u5316\uff1a{top_rms.location_zh} ({top_rms.channel_label}) "
+            f"{top_rms.rms_change_percent:+.1f}% ({top_rms.rms_uv_start:.1f} \u2192 {top_rms.rms_uv_end:.1f} \u00b5V)\u3002",
+            f"\u6700\u5927 MDF \u4e0b\u964d\uff1a{lowest_mdf.location_zh} ({lowest_mdf.channel_label}) "
+            f"{lowest_mdf.mdf_change_hz:+.1f} Hz ({lowest_mdf.mdf_start:.1f} \u2192 {lowest_mdf.mdf_end:.1f} Hz)\u3002",
+            "",
+            "\u3010\u901a\u9053\u524d\u5f8c\u6bb5\u6578\u503c\u3011",
+            "\u8acb\u53c3\u7167\u4e0b\u65b9\u8868\u683c\u3002",
+        ])
+
+        weak = ordered[ordered.norm_uv < 10]
+        lines.extend(["", "\u3010\u5224\u8b80\u9650\u5236\u3011"])
+        if not sync["angle_calibrated"]:
+            lines.append("\u76ee\u524d\u70ba\u76f8\u5c0d\u8e29\u8e0f\u76f8\u4f4d\uff1b\u82e5\u8981\u89e3\u91cb TDC \u7d55\u5c0d\u89d2\u5ea6\uff0c\u9700\u52a0\u5165\u53ef\u91cd\u73fe\u7684\u5f71\u7247\u6216\u66f2\u67c4\u540c\u6b65\u6821\u6b63\u3002")
+        lines.append("\u6bcf\u689d\u808c\u8089\u4ee5\u81ea\u8eab 99 \u767e\u5206\u4f4d\u6b63\u898f\u5316\uff1b\u53ef\u6bd4\u8f03\u540c\u4e00\u808c\u8089\u7684\u6642\u9593\u8b8a\u5316\uff0c\u4e0d\u53ef\u8de8\u808c\u8089\u6392\u540d\u51fa\u529b\u3002")
+        lines.append("EMG \u632f\u5e45\u4e0d\u7b49\u65bc\u808c\u529b\u3001\u529b\u77e9\u6216\u8e29\u8e0f\u6548\u7387\uff1b\u5fc5\u9808\u8207\u8e0f\u677f\u529f\u7387\u3001\u52d5\u4f5c\u5f71\u7247\u4e00\u8d77\u89e3\u91cb\u3002")
+        if not weak.empty:
+            labels = "\u3001".join(f"{row.location_zh} ({row.channel_label})" for row in weak.itertuples())
+            lines.append(f"\u8a0a\u865f\u504f\u5f31\u3001\u9700\u8b39\u614e\u89e3\u8b80\uff1a{labels}\u3002")
+        self.setAngleReportTableRows(self.angleReportSyncTable, (
+            ("\u89d2\u5ea6\u57fa\u6e96", f"{phase_name}\uff08{calibration}\uff09"),
+            ("\u6709\u6548\u8e29\u8e0f\u5708", f"{sync['valid_cycles']} \u5708"),
+            ("\u5206\u6790\u5340\u9593", f"\u524d\u6bb5 {settings['start'][0]:g}\u2013{settings['start'][1]:g} \u79d2\uff1b\u5f8c\u6bb5 {settings['end'][0]:g}\u2013{settings['end'][1]:g} \u79d2"),
+            ("EMG \u6642\u9418\u540c\u6b65", f"\u6bd4\u4f8b {sync['scale']:.5f}\uff1b\u8d77\u9ede\u504f\u79fb {sync['offset_s']:+.3f} \u79d2"),
+            ("\u5074\u5225\u4f86\u6e90", sync.get("side_source", "\u76ee\u524d\u8a2d\u5b9a")),
+        ))
+        self.setAngleReportTableRows(
+            self.angleReportMappingTable,
+            tuple((entry.location_zh, entry.channel_label) for entry in ordered.itertuples()),
+        )
+        self.setAngleReportTableRows(self.angleReportHighlightsTable, (
+            ("RMS \u4e0a\u5347\u901a\u9053", f"{rms_up}/{len(summary)}"),
+            ("MDF \u4e0b\u964d\u901a\u9053", f"{mdf_down}/{len(summary)}"),
+            ("\u6700\u5927 RMS \u8b8a\u5316",
+             f"{top_rms.location_zh} ({top_rms.channel_label}) {top_rms.rms_change_percent:+.1f}% "
+             f"({top_rms.rms_uv_start:.1f} \u2192 {top_rms.rms_uv_end:.1f} \u00b5V)"),
+            ("\u6700\u5927 MDF \u4e0b\u964d",
+             f"{lowest_mdf.location_zh} ({lowest_mdf.channel_label}) {lowest_mdf.mdf_change_hz:+.1f} Hz "
+             f"({lowest_mdf.mdf_start:.1f} \u2192 {lowest_mdf.mdf_end:.1f} Hz)"),
+        ))
+        limitations = []
+        if not sync["angle_calibrated"]:
+            limitations.append(("\u76ee\u524d\u70ba\u76f8\u5c0d\u8e29\u8e0f\u76f8\u4f4d\uff1b\u82e5\u8981\u89e3\u91cb TDC \u7d55\u5c0d\u89d2\u5ea6\uff0c\u9700\u52a0\u5165\u53ef\u91cd\u73fe\u7684\u5f71\u7247\u6216\u66f2\u67c4\u540c\u6b65\u6821\u6b63\u3002",))
+        limitations.append(("\u6bcf\u689d\u808c\u8089\u4ee5\u81ea\u8eab 99 \u767e\u5206\u4f4d\u6b63\u898f\u5316\uff1b\u53ef\u6bd4\u8f03\u540c\u4e00\u808c\u8089\u7684\u6642\u9593\u8b8a\u5316\uff0c\u4e0d\u53ef\u8de8\u808c\u8089\u6392\u540d\u51fa\u529b\u3002",))
+        limitations.append(("EMG \u632f\u5e45\u4e0d\u7b49\u65bc\u808c\u529b\u3001\u529b\u77e9\u6216\u8e29\u8e0f\u6548\u7387\uff1b\u5fc5\u9808\u8207\u8e29\u677f\u529f\u7387\u3001\u52d5\u4f5c\u5f71\u7247\u4e00\u8d77\u89e3\u91cb\u3002",))
+        if not weak.empty:
+            labels = "\u3001".join(f"{row.location_zh} ({row.channel_label})" for row in weak.itertuples())
+            limitations.append((f"\u8a0a\u865f\u504f\u5f31\u3001\u9700\u8b39\u614e\u89e3\u8b80\uff1a{labels}\u3002",))
+        self.setAngleReportTableRows(self.angleReportLimitationsTable, limitations)
+        self.refreshAngleReportChannelTable(ordered)
+        self.refreshAngleReportCharts(ordered)
+        self.refreshAngleReportProfiles()
+
+    def clearAngleReportTables(self) -> None:
+        for table in (self.angleReportSyncTable, self.angleReportMappingTable,
+                      self.angleReportHighlightsTable, self.angleReportChannelTable,
+                      self.angleReportLimitationsTable):
+            table.clearContents()
+            table.setRowCount(0)
+
+    @staticmethod
+    def setAngleReportTableRows(table: QTableWidget, rows) -> None:
+        table.clearContents()
+        table.setRowCount(len(rows))
+        for row_index, values in enumerate(rows):
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row_index, column, item)
+        table.resizeRowsToContents()
+        content_height = table.horizontalHeader().height() + sum(
+            table.rowHeight(row) for row in range(table.rowCount())
+        ) + 6
+        table.setMinimumHeight(max(110, content_height))
+
+    def refreshAngleReportChannelTable(self, ordered) -> None:
+        """Present each channel's early/late measurements in readable columns."""
+        table = self.angleReportChannelTable
+        table.clearContents()
+        table.setRowCount(len(ordered))
+        for row_index, entry in enumerate(ordered.itertuples()):
+            rms_up = entry.rms_change_percent > 0
+            mdf_down = entry.mdf_change_hz < 0
+            if rms_up and mdf_down:
+                interpretation = "RMS\u2191\u3001MDF\u2193\uff1a\u75b2\u52de\u76f8\u95dc\u8da8\u52e2"
+            elif rms_up:
+                interpretation = "RMS\u2191\uff1bMDF\u672a\u4e0b\u964d"
+            elif mdf_down:
+                interpretation = "MDF\u2193\uff1bRMS\u672a\u4e0a\u5347"
+            else:
+                interpretation = "\u524d\u5f8c\u8b8a\u5316\u4e0d\u4e00\u81f4"
+            values = (
+                f"{entry.location_zh} / {entry.channel_label}",
+                f"{entry.rms_uv_start:.1f} \u2192 {entry.rms_uv_end:.1f}",
+                f"{entry.rms_change_percent:+.1f}%",
+                f"{entry.mdf_start:.1f} \u2192 {entry.mdf_end:.1f}",
+                f"{entry.peak_angle_shift:+.0f}\u00b0",
+                interpretation,
+            )
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter if column else Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row_index, column, item)
+        table.resizeRowsToContents()
+        content_height = table.horizontalHeader().height() + sum(
+            table.rowHeight(row) for row in range(table.rowCount())
+        ) + 6
+        table.setMinimumHeight(max(110, content_height))
+
+    def refreshAngleReportCharts(self, ordered) -> None:
+        """Draw PPT-style grouped columns: one muscle, left/right side by side."""
+        muscle_order = ("RF", "VM", "VL", "BF", "GAS", "SOL", "TA")
+        groups = [muscle for muscle in muscle_order if muscle in set(ordered.muscle)]
+        groups.extend(muscle for muscle in ordered.muscle.dropna().unique() if muscle not in groups)
+        if not groups:
+            return
+        labels, left_rows, right_rows = [], [], []
+        for muscle in groups:
+            pair = ordered[ordered.muscle == muscle]
+            exemplar = pair.iloc[0]
+            muscle_name = exemplar.location_zh[1:] if len(exemplar.location_zh) > 1 else exemplar.location_zh
+            # The x axis groups left/right bars by anatomy; retain the
+            # conventional EMG abbreviation so GAS/SOL/etc. are explicit.
+            labels.append(f"{muscle_name}\n({muscle})")
+            left_rows.append(pair[pair.side == "L"].iloc[0] if not pair[pair.side == "L"].empty else None)
+            right_rows.append(pair[pair.side == "R"].iloc[0] if not pair[pair.side == "R"].empty else None)
+        positions = np.arange(len(groups), dtype=float)
+        chart_specs = (
+            (self.angleReportRmsPlot, "rms_change_percent", "RMS \u8b8a\u5316\uff08%\uff09", "%"),
+            (self.angleReportMdfPlot, "mdf_change_hz", "MDF \u8b8a\u5316\uff08Hz\uff09", " Hz"),
+        )
+        for plot, column, axis_label, unit in chart_specs:
+            plot.clear()
+            left_values = np.array([float(getattr(entry, column)) if entry is not None else np.nan for entry in left_rows])
+            right_values = np.array([float(getattr(entry, column)) if entry is not None else np.nan for entry in right_rows])
+            plot.addItem(pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen("#6b7280", width=1)))
+            plot.addItem(pg.BarGraphItem(x=positions - .19, height=left_values, width=.34,
+                                         brush=pg.mkBrush("#1684d7"), pen=pg.mkPen("#1684d7")))
+            plot.addItem(pg.BarGraphItem(x=positions + .19, height=right_values, width=.34,
+                                         brush=pg.mkBrush("#d97706"), pen=pg.mkPen("#d97706")))
+            # Write the signed change directly above/below every bar.  The
+            # colours retain the left/right convention used by the chart.
+            for x_values, values, color in ((positions - .19, left_values, "#0969ad"),
+                                            (positions + .19, right_values, "#a45100")):
+                for x, value in zip(x_values, values, strict=True):
+                    if not np.isfinite(value):
+                        continue
+                    label = pg.TextItem(f"{value:+.1f}{unit}", color=color, anchor=(.5, 1.15 if value >= 0 else -.15))
+                    label.setFont(QFont("Segoe UI", 8))
+                    label.setPos(float(x), float(value))
+                    plot.addItem(label)
+            plot.setLabel("left", axis_label)
+            plot.getAxis("bottom").setTicks([list(zip(positions, labels, strict=True))])
+            plot.getAxis("bottom").setHeight(42)
+            all_values = np.r_[left_values, right_values]
+            lower, upper = float(np.nanmin(all_values)), float(np.nanmax(all_values))
+            # Extra space keeps the signed labels inside the plot area.
+            padding = max(3.0, (upper - lower) * .22)
+            plot.setYRange(min(0, lower - padding), max(0, upper + padding), padding=0)
+            plot.setXRange(-.7, len(groups) - .3, padding=0)
+            plot.showGrid(x=False, y=True, alpha=.18)
+
+    def refreshAngleReportFatigueTrends(self) -> None:
+        """Match PPT slides 26/27 with separate left/right cycle trends."""
+        plots = self.angleReportFatigueTrendPlots
+        for plot in plots:
+            plot.clear()
+            if plot.getPlotItem().legend is None:
+                plot.addLegend(offset=(8, 8), colCount=2)
+            else:
+                plot.getPlotItem().legend.clear()
+        if self.angleAnalysisResult is None:
+            return
+        cycles = self.angleAnalysisResult["cycles"]
+        if cycles.empty:
+            return
+        selected_muscle = self.angleReportFatigueMuscleCombo.currentData()
+        metric_plots = (("rms_uv", plots[0]), ("mdf_hz", plots[1]))
+        for metric, plot in metric_plots:
+            metric_zh = "RMS" if metric == "rms_uv" else "MDF"
+            for side, side_zh, color in (("L", "\u5de6\u8173", "#1684d7"), ("R", "\u53f3\u8173", "#d97706")):
+                subset = cycles[cycles.side == side]
+                if selected_muscle:
+                    subset = subset[subset.muscle == selected_muscle]
+                if subset.empty:
+                    continue
+                row = subset.sort_values("time_s")
+                values = row[metric].to_numpy(float)
+                # Same smoothing window as the PPT trends: 9 pedal cycles.
+                smoothed = row[metric].rolling(9, min_periods=3, center=True).mean().to_numpy(float)
+                x = np.arange(1, len(values) + 1, dtype=float)
+                plot.plot(x, smoothed, pen=pg.mkPen(color, width=2), name=side_zh)
+            muscle_label = selected_muscle or "\u5168\u90e8\u808c\u8089"
+            plot.setTitle(f"{muscle_label}\uff1a\u9010\u5708 {metric_zh} \u8da8\u52e2\uff08\u85cd\uff1a\u5de6\u8173\uff1b\u6a58\uff1a\u53f3\u8173\uff1b9 \u5708\u79fb\u52d5\u5e73\u5747\uff09")
+
+    def refreshAngleReportProfiles(self) -> None:
+        """Create PPT-like early/late angle profiles, paired by muscle and side."""
+        if self.angleAnalysisResult is None:
+            return
+        result = self.angleAnalysisResult
+        summary, profiles = result["summary"], result["profiles"]
+        self.angleReportProfiles.clear()
+        muscle_order = ("RF", "VM", "VL", "BF", "GAS", "SOL", "TA")
+        available = [muscle for muscle in muscle_order if muscle in set(summary.muscle)]
+        available.extend(muscle for muscle in summary.muscle.dropna().unique() if muscle not in available)
+        selected_profile = self.angleReportProfileMuscleCombo.currentData()
+        self.angleReportProfileMuscleCombo.blockSignals(True)
+        self.angleReportProfileMuscleCombo.clear()
+        for muscle in available:
+            exemplar = summary[summary.muscle == muscle].iloc[0]
+            label = exemplar.location_zh[1:] if len(exemplar.location_zh) > 1 else exemplar.location_zh
+            self.angleReportProfileMuscleCombo.addItem(f"{label} ({muscle})", muscle)
+        if selected_profile is not None:
+            index = self.angleReportProfileMuscleCombo.findData(selected_profile)
+            if index >= 0:
+                self.angleReportProfileMuscleCombo.setCurrentIndex(index)
+        self.angleReportProfileMuscleCombo.blockSignals(False)
+        selected_profile = self.angleReportProfileMuscleCombo.currentData()
+        shown_muscles = [selected_profile] if selected_profile else available[:1]
+        for row, muscle in enumerate(shown_muscles):
+            for col, side in enumerate(("L", "R")):
+                matches = summary[(summary.muscle == muscle) & (summary.side == side)]
+                if matches.empty:
+                    continue
+                entry = matches.iloc[0]
+                plot = self.angleReportProfiles.addPlot(row=row, col=col)
+                plot.setTitle(
+                    f"{entry.location_zh} {entry.channel_label}  |  RMS {entry.rms_change_percent:+.1f}%"
+                )
+                for phase, color, label in (("start", "#1684d7", "\u524d\u6bb5"),
+                                            ("end", "#d13438", "\u5f8c\u6bb5")):
+                    curve = profiles[(profiles.channel == entry.channel) & (profiles.phase == phase)]
+                    plot.plot(curve.angle_bin_center.to_numpy(float), curve.mean_percent.to_numpy(float),
+                              pen=pg.mkPen(color, width=2), name=label if row == 0 and col == 0 else None)
+                plot.setXRange(0, 360, padding=0)
+                plot.setYRange(0, 105, padding=0)
+                plot.setLabel("bottom", "\u8e29\u8e0f\u89d2\u5ea6", units="\u00b0")
+                if col == 0:
+                    plot.setLabel("left", "\u76f8\u5c0d\u6d3b\u5316", units="%")
+                plot.showGrid(x=True, y=True, alpha=.16)
+                self.lockAnalysisPlots(plot)
+        self.angleReportProfiles.setMinimumHeight(420)
+        self.applySummaryPlotTheme()
+        selected = self.angleReportCycleMuscleCombo.currentData()
+        selected_table = self.angleReportPhaseMuscleCombo.currentData()
+        selected_fatigue = self.angleReportFatigueMuscleCombo.currentData()
+        self.angleReportCycleMuscleCombo.blockSignals(True)
+        self.angleReportPhaseMuscleCombo.blockSignals(True)
+        self.angleReportFatigueMuscleCombo.blockSignals(True)
+        self.angleReportCycleMuscleCombo.clear()
+        self.angleReportPhaseMuscleCombo.clear()
+        self.angleReportFatigueMuscleCombo.clear()
+        for muscle in available:
+            exemplar = summary[summary.muscle == muscle].iloc[0]
+            label = exemplar.location_zh[1:] if len(exemplar.location_zh) > 1 else exemplar.location_zh
+            self.angleReportCycleMuscleCombo.addItem(f"{label} ({muscle})", muscle)
+            self.angleReportPhaseMuscleCombo.addItem(f"{label} ({muscle})", muscle)
+            self.angleReportFatigueMuscleCombo.addItem(f"{label} ({muscle})", muscle)
+        if selected is not None:
+            index = self.angleReportCycleMuscleCombo.findData(selected)
+            if index >= 0:
+                self.angleReportCycleMuscleCombo.setCurrentIndex(index)
+        if selected_table is not None:
+            index = self.angleReportPhaseMuscleCombo.findData(selected_table)
+            if index >= 0:
+                self.angleReportPhaseMuscleCombo.setCurrentIndex(index)
+        if selected_fatigue is not None:
+            index = self.angleReportFatigueMuscleCombo.findData(selected_fatigue)
+            if index >= 0:
+                self.angleReportFatigueMuscleCombo.setCurrentIndex(index)
+        self.angleReportCycleMuscleCombo.blockSignals(False)
+        self.angleReportPhaseMuscleCombo.blockSignals(False)
+        self.angleReportFatigueMuscleCombo.blockSignals(False)
+        self.refreshAngleReportCycleTrends()
+        self.refreshAngleReportPhaseTable()
+        self.refreshAngleReportFatigueTrends()
+
+    def refreshAngleReportCycleTrends(self) -> None:
+        """Match PPT slides 6/8/10/12/14/16/18: eight phase trends per side."""
+        for plot in (self.angleReportCycleLeftPlot, self.angleReportCycleRightPlot):
+            plot.clear()
+            if plot.getPlotItem().legend is None:
+                plot.addLegend(offset=(8, 8), colCount=4)
+            else:
+                plot.getPlotItem().legend.clear()
+        if self.angleAnalysisResult is None:
+            return
+        muscle = self.angleReportCycleMuscleCombo.currentData()
+        if not muscle:
+            return
+        result = self.angleAnalysisResult
+        cycles, summary = result["cycles"], result["summary"]
+        settings = result["settings"]
+        bins = int(settings["bins"])
+        bin_centers = (np.arange(bins) + .5) * 360 / bins
+        bin_columns = [f"bin_{index}" for index in range(bins)]
+        target_angles = tuple(range(0, 360, 45))
+        selected_angle = self.angleReportCycleAngleCombo.currentData()
+        displayed_angles = target_angles if selected_angle is None else (int(selected_angle),)
+        line_colors = ("#1684d7", "#e95f54", "#7e57c2", "#00897b",
+                       "#f39c12", "#5c6bc0", "#43a047", "#c2185b")
+        for side, plot, side_zh in (("L", self.angleReportCycleLeftPlot, "\u5de6\u8173"),
+                                    ("R", self.angleReportCycleRightPlot, "\u53f3\u8173")):
+            matches = summary[(summary.muscle == muscle) & (summary.side == side)]
+            if matches.empty:
+                plot.setTitle(f"{side_zh}\uff1a\u7121\u6b64\u808c\u8089\u8cc7\u6599")
+                continue
+            entry = matches.iloc[0]
+            rows = cycles[cycles.channel == entry.channel].sort_values("cycle").reset_index(drop=True)
+            angle_title = "\u9010\u5708 8 \u89d2\u5ea6\u6d3b\u5316" if selected_angle is None else f"{int(selected_angle)}\u00b0\u9010\u5708\u6d3b\u5316"
+            plot.setTitle(f"{entry.location_zh} {entry.channel_label} \u2014 {angle_title}\uff085 \u5708\u79fb\u52d5\u5e73\u5747\uff09")
+            x = np.arange(1, len(rows) + 1, dtype=float)
+            start_count = int((rows.phase == "start").sum())
+            end_indices = np.flatnonzero(rows.phase.to_numpy() == "end")
+            if start_count:
+                start_region = pg.LinearRegionItem((1, start_count), orientation="vertical", movable=False,
+                                                   brush=pg.mkBrush(22, 132, 215, 24), pen=None)
+                start_region.setZValue(-10)
+                plot.addItem(start_region)
+            if len(end_indices):
+                end_region = pg.LinearRegionItem((int(end_indices[0]) + 1, len(rows)), orientation="vertical", movable=False,
+                                                 brush=pg.mkBrush(209, 52, 56, 24), pen=None)
+                end_region.setZValue(-10)
+                plot.addItem(end_region)
+            for angle, color in zip(target_angles, line_colors, strict=True):
+                if angle not in displayed_angles:
+                    continue
+                distance = np.abs((bin_centers - angle + 180) % 360 - 180)
+                columns = [column for column, keep in zip(bin_columns, distance <= 15 + 1e-9, strict=True) if keep]
+                values = rows[columns].mean(axis=1).to_numpy(float)
+                weights = np.convolve(np.ones(len(values)), np.ones(5), mode="same")
+                smoothed = np.convolve(values, np.ones(5), mode="same") / weights
+                plot.plot(x, smoothed, pen=pg.mkPen(color, width=2), name=f"{angle}\u00b0")
+            plot.setXRange(1, max(2, len(rows)), padding=.02)
+            plot.setYRange(0, 105, padding=0)
+            plot.showGrid(x=True, y=True, alpha=.16)
+            self.lockAnalysisPlots(plot)
+
+    def refreshAngleReportPhaseTable(self) -> None:
+        """Match PPT slides 7/9/11/13/15/17/19 with an eight-angle table."""
+        table = self.angleReportPhaseTable
+        table.clearContents()
+        if self.angleAnalysisResult is None:
+            table.setRowCount(0)
+            return
+        muscle = self.angleReportPhaseMuscleCombo.currentData()
+        if not muscle:
+            table.setRowCount(0)
+            return
+        result = self.angleAnalysisResult
+        summary, profiles = result["summary"], result["profiles"]
+        bins = int(result["settings"]["bins"])
+        centers = (np.arange(bins) + .5) * 360 / bins
+        target_angles = tuple(range(0, 360, 45))
+        by_side = {
+            side: summary[(summary.muscle == muscle) & (summary.side == side)].iloc[0]
+            if not summary[(summary.muscle == muscle) & (summary.side == side)].empty else None
+            for side in ("L", "R")
+        }
+
+        def phase_value(entry, phase: str, angle: int) -> float | None:
+            if entry is None:
+                return None
+            curve = profiles[(profiles.channel == entry.channel) & (profiles.phase == phase)]
+            if curve.empty:
+                return None
+            distance = np.abs((curve.angle_bin_center.to_numpy(float) - angle + 180) % 360 - 180)
+            values = curve.mean_percent.to_numpy(float)[distance <= 15 + 1e-9]
+            return float(np.mean(values)) if len(values) else None
+
+        table.setRowCount(len(target_angles) + 2)
+        for row, angle in enumerate(target_angles):
+            left_start = phase_value(by_side["L"], "start", angle)
+            left_end = phase_value(by_side["L"], "end", angle)
+            right_start = phase_value(by_side["R"], "start", angle)
+            right_end = phase_value(by_side["R"], "end", angle)
+            values = (
+                f"{angle}\u00b0 (\u00b115\u00b0)",
+                f"{left_start:.1f}%" if left_start is not None else "\u2014",
+                f"{left_end:.1f}%" if left_end is not None else "\u2014",
+                f"{left_end - left_start:+.1f}%" if left_start is not None and left_end is not None else "\u2014",
+                f"{right_start:.1f}%" if right_start is not None else "\u2014",
+                f"{right_end:.1f}%" if right_end is not None else "\u2014",
+                f"{right_end - right_start:+.1f}%" if right_start is not None and right_end is not None else "\u2014",
+            )
+            for column, value in enumerate(values):
+                table.setItem(row, column, QTableWidgetItem(value))
+
+        for row, label, start_key, end_key, unit in (
+            (len(target_angles), "RMS", "rms_uv_start", "rms_uv_end", " \u00b5V"),
+            (len(target_angles) + 1, "MDF", "mdf_start", "mdf_end", " Hz"),
+        ):
+            values = [label]
+            for side in ("L", "R"):
+                entry = by_side[side]
+                if entry is None:
+                    values.extend(("\u2014", "\u2014", "\u2014"))
+                    continue
+                start, end = float(getattr(entry, start_key)), float(getattr(entry, end_key))
+                values.extend((f"{start:.1f}{unit}", f"{end:.1f}{unit}", f"{end - start:+.1f}{unit}"))
+            for column, value in enumerate(values):
+                table.setItem(row, column, QTableWidgetItem(value))
 
     def refreshAnglePhase(self) -> None:
         """Show the direct, phase-specific answer before the detailed plots."""
@@ -3118,6 +3811,7 @@ class TrignoWindow(QMainWindow):
             plot.setXRange(-10, 0, padding=0)
             plot.setYRange(-1, 1, padding=0)
             plot.setMenuEnabled(False)
+            self.lockAnalysisPlots(plot)
             return
         for row, channel in enumerate(selected):
             mapping = self.mappings[channel]
@@ -3129,6 +3823,7 @@ class TrignoWindow(QMainWindow):
                 plot.hideAxis("bottom")
             plot.showGrid(x=True, y=True, alpha=0.16)
             plot.setMenuEnabled(False)
+            self.lockAnalysisPlots(plot)
             color = QColor(COLORS[channel % len(COLORS)])
             fill = QColor(color)
             fill.setAlpha(56)
