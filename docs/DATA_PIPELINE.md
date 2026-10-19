@@ -43,4 +43,4 @@ GUI 以一次騎乘開始時的 `time.monotonic()` 為共同起點，在收到�
 
 ## 6. 輸出與限制
 
-每次騎乘保留原始 CSV、資訊文字檔及版本化 `*.analysis.json`。HTML 報表包含測試資訊、基準快照、各肌肉曲線、踏板與阻力圖、統計、同步偏移及資料品質；選取第一次騎乘時另附跨次比較表。瀏覽器可列印為 PDF。沒有 MVC 與校正扭力／功率時，不將 RMS 或左右振幅差寫成肌力、疲勞、傷害或治療結論。
+Each ride keeps its raw CSV files, information file, versioned analysis JSON, and a standalone HTML report with session settings, muscle trends, pedal and trainer summaries, statistics, synchronization details, and data-quality notes.

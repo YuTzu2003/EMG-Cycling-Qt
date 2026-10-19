@@ -1,7 +1,6 @@
-"""Versioned, device-independent cycling session analysis and HTML export."""
+"""Versioned, device-independent cycling session analysis."""
 from __future__ import annotations
 
-import html
 import json
 import math
 from bisect import bisect_left
@@ -40,7 +39,6 @@ def new_session(subject: dict, baselines: dict, sample_rate_hz: float | None = N
             "started_at": datetime.now(timezone.utc).isoformat(),
             "sample_rate_hz": sample_rate_hz, "feature": "causal_filtered_200ms_sliding_rms_mv",
             "clock": "GUI monotonic receipt; approximate across devices",
-            "emg_trainer_offset_s": 0.0,
             "emg": [], "pedal": [], "trainer": [], "raw_files": {}, "warnings": []}
 
 
@@ -155,10 +153,10 @@ def analyze(session: dict, normalized: bool = False) -> dict:
     """Align sparse streams to one-second bins, retaining missing values."""
     streams = {name: sorted(session.get(name, []), key=lambda row: row["time_s"])
                for name in ("emg", "pedal", "trainer")}
-    offset = finite(session.get("emg_trainer_offset_s")) or 0.0
-    aligned_emg = ([{**row, "time_s": float(row["time_s"]) + offset}
-                    for row in streams["emg"] if float(row["time_s"]) + offset >= 0]
-                   if offset else streams["emg"])
+    # EMG and trainer timestamps now retain their recorded timing.  Older
+    # sessions can contain a manual offset, but it is intentionally ignored:
+    # the interface no longer offers manual cross-device time alignment.
+    aligned_emg = streams["emg"]
     aligned_streams = {"emg": aligned_emg, "trainer": streams["trainer"]}
     stream_times = {name: [float(row["time_s"]) for row in rows] for name, rows in aligned_streams.items()}
     emg_channels = defaultdict(list)
@@ -243,7 +241,7 @@ def analyze(session: dict, normalized: bool = False) -> dict:
         warnings.append("EMG 與阻力計沒有可對齊的重疊時間")
     for slot, problems in invalid_by_slot.items():
         warnings.extend(f"S{int(slot):02d}：{problem}" for problem in sorted(problems) if slot.isdigit())
-    return {"duration_s": duration, "emg_trainer_offset_s": offset, "emg": emg_summary, "pedal": pedal,
+    return {"duration_s": duration, "emg_trainer_offset_s": 0.0, "emg": emg_summary, "pedal": pedal,
             "trainer": trainer, "resistance_segments": segments, "load_relationship": load_relationship,
             "aligned": aligned,
             "warnings": sorted(set(warnings))}
@@ -276,7 +274,6 @@ def _fmt(value, unit="", digits=1):
 
 def summary_lines(result: dict, normalized: bool = False) -> list[str]:
     lines = [f"騎乘時間：{_fmt(result['duration_s'], ' 秒', 0)}",
-             f"EMG 相對阻力時間偏移：{result['emg_trainer_offset_s']:+.2f} 秒（手動調整；非硬體同步）",
              "EMG 比較：RMS / baseline" if normalized else "EMG 比較：RMS - baseline（mV）", ""]
     for slot, data in result["emg"].items():
         comparison = data["comparison"]
@@ -310,101 +307,3 @@ def summary_lines(result: dict, normalized: bool = False) -> list[str]:
     if result["warnings"]:
         lines += ["", "資料品質：", *result["warnings"]]
     return lines
-
-
-def export_html(path: Path, session: dict, normalized: bool = False, reference_session: dict | None = None,
-                ftp_w: int = 200) -> None:
-    """Write a fixed report for the current session's EMG summary only.
-
-    Pedal, trainer, resistance, and historical-comparison output are deliberately
-    excluded: they make the current-session EMG report hard to scan.  The
-    reference_session and ftp_w arguments remain for compatible callers.
-    """
-    result = analyze(session, normalized)
-    subject = session.get("subject", {})
-    channels = session.get("channels", {})
-    comparison_label = "平均 normalized RMS" if normalized else "平均 RMS－基準值"
-    table_rows = []
-    charts = []
-    for slot in sorted(result["emg"], key=lambda value: int(value) if str(value).isdigit() else str(value)):
-        data = result["emg"][slot]
-        channel = channels.get(slot, {})
-        name = channel.get("label") or channel.get("mapping_name") or "未命名肌肉"
-        slot_label = f"S{int(slot):02d}" if str(slot).isdigit() else f"S{slot}"
-        table_rows.append(
-            "<tr>"
-            f"<th scope=\"row\">{html.escape(slot_label)} {html.escape(str(name))}</th>"
-            f"<td>{_fmt(data['rms_mv']['mean'], ' mV', 3)}</td>"
-            f"<td>{_fmt(data['rms_mv']['max'], ' mV', 3)}</td>"
-            f"<td>{_fmt(data['comparison']['mean'], '' if normalized else ' mV', 3)}</td>"
-            f"<td>{_fmt(data['early_rms_mv'], ' mV', 3)} → {_fmt(data['late_rms_mv'], ' mV', 3)}</td>"
-            "</tr>"
-        )
-        rows = [row for row in session.get("emg", []) if str(row.get("slot")) == str(slot)]
-        envelope_rows = [{"time_s": time_s, "rms_mv": value}
-                         for time_s, value in peak_envelope(rows)]
-        charts.append(
-            "<details class=\"muscle-chart\">"
-            f"<summary>{html.escape(slot_label)} {html.escape(str(name))}：Peak RMS 包絡線</summary>"
-            f"{_chart_fragment(f'{slot_label} {name} Peak RMS 包絡線', envelope_rows, 'rms_mv', '#6d4bc3')}"
-            "</details>"
-        )
-
-    raw_files = ", ".join(str(name) for name in session.get("raw_files", {}).values()) or "未提供"
-    metadata = "".join((
-        f"<div><span>受試者</span><strong>{html.escape(str(subject.get('patientId', '未提供')))}</strong></div>",
-        f"<div><span>測試者</span><strong>{html.escape(str(subject.get('name', '未提供')))}</strong></div>",
-        f"<div><span>開始時間</span><strong>{html.escape(str(session.get('started_at', '--')))}</strong></div>",
-        f"<div><span>EMG 取樣率</span><strong>{_fmt(session.get('sample_rate_hz'), ' Hz')}</strong></div>",
-        f"<div><span>分析方法</span><strong>{html.escape(str(session.get('feature', '未提供')))}</strong></div>",
-        f"<div><span>原始檔</span><strong>{html.escape(raw_files)}</strong></div>",
-    ))
-    if table_rows:
-        analysis = (
-            "<section><h2>肌電摘要</h2>"
-            "<p class=\"hint\">數值為本次騎乘的 RMS 分析結果；基準比較僅在相容基準存在時顯示。</p>"
-            "<div class=\"table-wrap\"><table><thead><tr>"
-            f"<th>肌肉／通道</th><th>平均 RMS</th><th>Peak RMS</th><th>{comparison_label}</th>"
-            "<th>前段 → 後段</th>"
-            "</tr></thead><tbody>" + "".join(table_rows) + "</tbody></table></div></section>"
-            "<section><h2>各肌肉 Peak RMS 包絡線</h2>"
-            "<p class=\"hint\">每 1 秒取一次最高 RMS；展開單一肌肉即可查看其隨騎乘時間的變化。</p>" + "".join(charts) + "</section>"
-        )
-    else:
-        analysis = (
-            "<section class=\"empty\"><h2>尚無可匯出的本次肌電資料</h2>"
-            "<p>請先匯入或完成本次 EMG 紀錄，再重新匯出報表。</p></section>"
-        )
-    content = (
-        "<header><p class=\"eyebrow\">EMG CYCLING MONITOR</p><h1>本次肌電分析報表</h1>"
-        "<p class=\"subtitle\">固定格式｜僅包含本次摘要的 EMG 分析</p></header>"
-        f"<section><h2>紀錄資訊</h2><div class=\"metadata\">{metadata}</div></section>"
-        + analysis
-        + "<footer>研究用途：本報表為訊號分析摘要，不作醫療診斷。</footer>"
-    )
-    document = (
-        '<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">'
-        '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        '<title>本次肌電分析報表</title><style>'
-        ':root{color-scheme:light;font-family:"Segoe UI","Microsoft JhengHei",sans-serif;color:#172033;background:#f4f7fa}'
-        'body{max-width:1120px;margin:0 auto;padding:36px 24px 48px;line-height:1.55}'
-        'header{border-left:5px solid #1684d7;padding:4px 0 4px 18px;margin-bottom:24px}'
-        'h1,h2{margin:0;color:#13243a}h1{font-size:28px}.eyebrow{margin:0;color:#1684d7;font-size:12px;font-weight:700;letter-spacing:.12em}.subtitle,.hint{color:#617086}.subtitle{margin:5px 0 0}'
-        'section{background:#fff;border:1px solid #dbe3ec;border-radius:10px;padding:20px;margin:16px 0;box-shadow:0 1px 2px #13243a0a}'
-        'h2{font-size:18px;margin-bottom:12px}.metadata{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 20px}.metadata div{min-width:0}.metadata span{display:block;color:#617086;font-size:13px}.metadata strong{display:block;overflow-wrap:anywhere;font-weight:500}'
-        '.table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;min-width:740px}th,td{padding:10px 12px;border-bottom:1px solid #e5ebf1;text-align:left;vertical-align:top}thead th{background:#eff6fc;color:#25415f;font-size:13px;white-space:nowrap}tbody th{font-weight:600}.muscle-chart{border-top:1px solid #e5ebf1;padding:12px 0}.muscle-chart:last-child{padding-bottom:0}.muscle-chart summary{cursor:pointer;color:#164b7a;font-weight:600}.muscle-chart section{box-shadow:none;border:0;padding:12px 0 0;margin:0}.muscle-chart h2{font-size:15px}.muscle-chart svg{width:100%;background:#fbfcfe;border:1px solid #e5ebf1}.empty{text-align:center;padding:40px 20px}footer{margin-top:24px;color:#617086;font-size:13px;text-align:center}@media(max-width:680px){body{padding:24px 14px}.metadata{grid-template-columns:1fr}section{padding:16px}}'
-        '</style></head><body>' + content + '</body></html>'
-    )
-    path.write_text(document, encoding="utf-8")
-
-
-def _chart_fragment(title, rows, key, color):
-    pairs = [(finite(row.get("time_s")), finite(row.get(key))) for row in rows]
-    pairs = [(x, y) for x, y in pairs if x is not None and y is not None]
-    if not pairs:
-        return f"<section><h2>{html.escape(title)}</h2><p>無資料</p></section>"
-    xmax = max(x for x, _ in pairs) or 1
-    ymin, ymax = min(y for _, y in pairs), max(y for _, y in pairs)
-    span = ymax - ymin or 1
-    points = " ".join(f"{30 + 720*x/xmax:.1f},{170 - 130*(y-ymin)/span:.1f}" for x, y in pairs[::max(1, len(pairs)//1000)])
-    return f'<section><h2>{html.escape(title)}</h2><svg viewBox="0 0 780 200" role="img" aria-label="{html.escape(title)}"><polyline fill="none" stroke="{color}" stroke-width="2" points="{points}"/></svg><p>{_fmt(ymin)}–{_fmt(ymax)}；0–{_fmt(xmax, " 秒")}</p></section>'

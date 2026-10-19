@@ -8,16 +8,13 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QRectF, QSettings, QStandardPaths, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-    QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,
-    QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget, QInputDialog,
-    QTableWidget, QTableWidgetItem, QHeaderView, QDoubleSpinBox,)
-from delsys.collection import CollectionInfoRecorder, SubjectInfo, infoOutputPath
+from PySide6.QtGui import QColor, QPainter, QPen, QPalette
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
+    QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget, QInputDialog,
+    QTableWidget, QTableWidgetItem, QHeaderView, QDoubleSpinBox, QToolButton, QStyle, QGraphicsProxyWidget,)
+from delsys.collection import CollectionInfoRecorder, SubjectInfo, analysisOutputPath, infoOutputPath
 from delsys.emg.body_map import BodyMapPanel
-from delsys.emg.sensor_mapping import (SensorMapping,duplicateMappingSlots,loadMappings,saveMappings,)
+from delsys.emg.sensor_mapping import (SensorMapping,duplicateMappingSlots,loadMappings,saveMappings,matchesCsvColumn,recordingChannelSides,)
 from delsys.emg.trigno import CHANNEL_COUNT, SAMPLE_RATE
 from delsys.emg.baseline import BaselineManager, CalibrationSession, EMGPreprocessor, FilterSettings, RMSFeatureExtractor, load_raw_emg_csv
 from delsys.emg.workers import ConnectionWorker, StreamWorker
@@ -28,24 +25,55 @@ from delsys.pedal.analysis import analyze_pedal_records, pedal_analysis_lines, p
 from delsys.pedal.worker import PedalWorker
 from delsys.pedal.fit_export import exportPedalFit
 from delsys.pedal.fit_import import load_pedal_fit
+from delsys.pedal.angle_emg import (AngleSettings, analysis_summary_text, analyze_angle_emg,export_angle_emg, phase_intensities)
 from delsys.cycling_bluetooth import CyclingDeviceScanWorker
 from delsys.fluent_theme import FluentThemeManager
-from delsys.session_analysis import (add_point, analyze, compare_rms, export_html,
-                                     load_session, new_session, peak_envelope,
-                                     save_session)
+from delsys.session_analysis import (add_point, analyze, compare_rms, load_session, new_session, peak_envelope, save_session)
 from delsys.session_compare import compare_sessions
+from delsys.storage_db import DatabaseConfig, DatabaseWriter, SecondAggregator, SqlServerStorage, prefixed_id
+from delsys.reporting import export_report
 
-COLORS = ("#1684d7", "#e95f54", "#7e57c2", "#00897b", "#f39c12", "#5c6bc0", "#43a047", "#c2185b")
+COLORS = (
+    "#1684d7", "#e95f54", "#7e57c2", "#00897b",
+    "#f39c12", "#5c6bc0", "#43a047", "#c2185b",
+    "#00a6a6", "#d1495b", "#725ac1", "#6b8e23",
+    "#d97706", "#0077b6", "#9d4edd", "#e76f51",
+)
 MAPPING_PATH = Path(__file__).resolve().parents[2] / "sensor_mapping.json"
 
+class AngleAnalysisWorker(QThread):
+    completed = Signal(object)
+    failed = Signal(str)
+    def __init__(self, emg_path: Path, pedal_path: Path, sides: dict[str, str],
+                 settings: AngleSettings, side_source: str) -> None:
+        super().__init__()
+        self.emg_path, self.pedal_path, self.sides, self.settings = emg_path, pedal_path, sides, settings
+        self.side_source = side_source
+    def run(self) -> None:
+        try:
+            result = analyze_angle_emg(self.emg_path, self.pedal_path, self.sides, self.settings)
+            result["sync"]["side_source"] = self.side_source
+            self.completed.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+class AngleExportWorker(QThread):
+    completed = Signal(str)
+    failed = Signal(str)
+    def __init__(self, result: dict, directory: Path, include_raw: bool) -> None:
+        super().__init__()
+        self.result, self.directory, self.include_raw = result, directory, include_raw
+    def run(self) -> None:
+        try:
+            export_angle_emg(self.result, self.directory, self.include_raw)
+            self.completed.emit(str(self.directory))
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 class EMGAnalysisImportWorker(QThread):
-    """Build a replayable RMS session from a raw EMG CSV off the UI thread."""
     completed = Signal(object, str)
     failed = Signal(str)
-
-    def __init__(self, path: Path, mappings: list[SensorMapping], baselines: dict,
-                 subject: dict, settings: FilterSettings) -> None:
+    def __init__(self, path: Path, mappings: list[SensorMapping], baselines: dict,subject: dict, settings: FilterSettings) -> None:
         super().__init__()
         self.path = path
         self.mappings = mappings
@@ -56,13 +84,9 @@ class EMGAnalysisImportWorker(QThread):
     def run(self) -> None:
         try:
             times, columns, sample_rate = load_raw_emg_csv(self.path, limit_seconds=None)
-            normalized = {name.strip().casefold(): name for name in columns}
             channel_columns: list[tuple[int, str]] = []
             for channel, mapping in enumerate(self.mappings):
-                candidates = (f"S{mapping.slot:02d}_{mapping.english_name.strip()}",
-                              mapping.english_name.strip(), mapping.abbreviation.strip())
-                header = next((normalized[item.casefold()] for item in candidates
-                               if item and item.casefold() in normalized), None)
+                header = next((name for name in columns if matchesCsvColumn(mapping, name)), None)
                 if header is not None:
                     channel_columns.append((channel, header))
             if not channel_columns:
@@ -97,17 +121,14 @@ class EMGAnalysisImportWorker(QThread):
                         comparison["quality"] = "基準不相容"
                     add_point(session, "emg", {
                         "time_s": float(times[end - 1]), "slot": channel + 1,
-                        "rms_mv": rms_values.get(compact_channel), **comparison,
-                    })
-            self.completed.emit(session, self.path.name)
+                        "rms_mv": rms_values.get(compact_channel), **comparison,})
+            self.completed.emit(session, str(self.path))
         except (OSError, ValueError, TypeError) as exc:
             self.failed.emit(str(exc))
-
 
 def baselineSettingsPath() -> Path:
     location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppConfigLocation)
     return Path(location) / "emg_baseline_settings.json"
-
 
 class SensorLegendToggle(QWidget):
     toggled = Signal(bool)
@@ -149,8 +170,6 @@ class SensorLegendToggle(QWidget):
 
 
 class PowerBalanceRing(QWidget):
-    """A compact, non-interactive ring for one side's estimated pedal output."""
-
     def __init__(self, side: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.side = side
@@ -161,8 +180,8 @@ class PowerBalanceRing(QWidget):
         self.text_color = QColor("#242424")
         # Keep the summary visual compact while retaining enough space for
         # the power and balance labels at normal desktop text scaling.
-        self.setMinimumSize(170, 195)
-        self.setMaximumSize(190, 215)
+        self.setMinimumSize(145, 170)
+        self.setMaximumSize(165, 185)
         self.setAccessibleName(f"{side}腳估計功率與平衡")
 
     def setValues(self, balance: float | None, power_w: float | None) -> None:
@@ -171,9 +190,7 @@ class PowerBalanceRing(QWidget):
         if self.balance is None or self.power_w is None:
             self.setAccessibleDescription("沒有有效的左右平衡資料。")
         else:
-            self.setAccessibleDescription(
-                f"平均估計功率 {self.power_w:.1f} W，平衡 {self.balance:.1f}%。"
-            )
+            self.setAccessibleDescription(f"平均估計功率 {self.power_w:.1f} W，平衡 {self.balance:.1f}%。")
         self.update()
 
     def setThemeColors(self, active: str, track: str, text: str) -> None:
@@ -186,11 +203,8 @@ class PowerBalanceRing(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         content = self.rect().adjusted(12, 12, -12, -12)
-        diameter = min(content.width(), content.height() - 70)
-        ring = QRectF(
-            content.center().x() - diameter / 2, content.top() + 24,
-            diameter, diameter,
-        )
+        diameter = min(content.width(), content.height())
+        ring = QRectF(content.center().x() - diameter / 2, content.center().y() - diameter / 2,diameter, diameter,)
         pen = QPen(self.track_color, 18)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         painter.setPen(pen)
@@ -201,53 +215,54 @@ class PowerBalanceRing(QWidget):
             painter.setPen(pen)
             painter.drawArc(ring, 90 * 16, -round(self.balance * 3.6 * 16))
         painter.setPen(self.text_color)
-        painter.drawText(content.adjusted(0, 38, 0, -content.height() + 104),
-                         Qt.AlignmentFlag.AlignHCenter, self.side)
+        def label_rect(ratio: float) -> QRectF:
+            return QRectF(ring.left(), ring.top() + diameter * ratio, diameter, 19)
+        painter.drawText(label_rect(.20), Qt.AlignmentFlag.AlignHCenter, self.side)
         power_text = "--" if self.power_w is None else f"{self.power_w:.1f} W"
-        painter.drawText(content.adjusted(0, 66, 0, -content.height() + 132),
-                         Qt.AlignmentFlag.AlignHCenter, power_text)
+        painter.drawText(label_rect(.42), Qt.AlignmentFlag.AlignHCenter, power_text)
         balance_text = "無有效資料" if self.balance is None else f"平衡 {self.balance:.1f}%"
-        painter.drawText(content.adjusted(0, 94, 0, -content.height() + 160),
-                         Qt.AlignmentFlag.AlignHCenter, balance_text)
-
+        painter.drawText(label_rect(.64), Qt.AlignmentFlag.AlignHCenter, balance_text)
 
 class MappingEditorDialog(QDialog):
-    def __init__(self, mappings: list[SensorMapping], active_slots: set[int], baseline_records: dict[int, object], parent: QWidget | None = None) -> None:
+    def __init__(self, mappings: list[SensorMapping], active_slots: set[int], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("編輯感測器／肌肉對應")
-        self.resize(920, 650)
+        self.resize(760, 650)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("基準 RMS 使用 mV；可直接修改，留白表示未設定，清空既有數字會移除該通道基準。", objectName="muted"))
-        layout.addWidget(QLabel("修改後按「儲存並套用」。SDK Slot 是固定編號，無法變更。"))
-        headings = QGridLayout()
-        for column, title in enumerate(("Slot", "狀態", "中文肌肉名稱", "English EMG name", "縮寫", "基準 RMS (mV)")):
-            headings.addWidget(QLabel(title, objectName="editorHeader"), 0, column)
-        layout.addLayout(headings)
+        column_widths = (32, 55, 200, 200, 200)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         content = QWidget()
         grid = QGridLayout(content)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(5)
+        grid.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        for column, title in enumerate(("Slot", "狀態", "中文肌肉名稱", "English EMG name", "縮寫")):
+            label = QLabel(title, objectName="editorHeader")
+            label.setFixedWidth(column_widths[column])
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            grid.addWidget(label, 0, column)
         self.edits: list[tuple[QLineEdit, QLineEdit, QLineEdit]] = []
-        self.baselineEdits: list[QLineEdit] = []
-        self._initialBaselines: list[float | None] = []
-        for row, mapping in enumerate(mappings):
-            grid.addWidget(QLabel(f"S{mapping.slot:02d}"), row, 0)
+        for row, mapping in enumerate(mappings, start=1):
+            slot = QLabel(f"S{mapping.slot:02d}")
+            slot.setFixedWidth(column_widths[0])
+            slot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            grid.addWidget(slot, row, 0)
             state = QLabel("● 啟用" if mapping.slot in active_slots else "未啟用")
+            state.setFixedWidth(column_widths[1])
+            state.setAlignment(Qt.AlignmentFlag.AlignCenter)
             state.setStyleSheet("color: #16a34a; font-weight: 700;" if mapping.slot in active_slots else "color: #94a3b8;")
             grid.addWidget(state, row, 1)
             chinese, english, abbreviation = QLineEdit(mapping.chinese_name), QLineEdit(mapping.english_name), QLineEdit(mapping.abbreviation)
+            for edit, width in zip((chinese, english, abbreviation), column_widths[2:], strict=True):
+                edit.setFixedWidth(width)
+                edit.setFixedHeight(28)
+                edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
             grid.addWidget(chinese, row, 2)
             grid.addWidget(english, row, 3)
             grid.addWidget(abbreviation, row, 4)
-            record = baseline_records.get(mapping.slot)
-            initial = record.rms_mv if record is not None else None
-            baseline = QLineEdit("" if initial is None else f"{initial:.6f}")
-            baseline.setPlaceholderText("未設定")
-            baseline.setAccessibleName(f"S{mapping.slot:02d} 基準 RMS (mV)")
-            grid.addWidget(baseline, row, 5)
             self.edits.append((chinese, english, abbreviation))
-            self.baselineEdits.append(baseline)
-            self._initialBaselines.append(initial)
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Save)
@@ -258,17 +273,8 @@ class MappingEditorDialog(QDialog):
 
     def mappings(self) -> list[SensorMapping]:
         return [
-            SensorMapping(slot, chinese.text().strip() or "未指定", english.text().strip() or "UNASSIGNED", abbreviation.text().strip())
+            SensorMapping(slot, chinese.text().strip(), english.text().strip(), abbreviation.text().strip())
             for slot, (chinese, english, abbreviation) in enumerate(self.edits, 1) ]
-
-    def baselineChanges(self) -> dict[int, float | None]:
-        changes: dict[int, float | None] = {}
-        for slot, (edit, initial) in enumerate(zip(self.baselineEdits, self._initialBaselines, strict=True), 1):
-            text = edit.text().strip()
-            value = None if not text else float(text)
-            if value != initial:
-                changes[slot] = value
-        return changes
 
     def accept(self) -> None:
         duplicates = duplicateMappingSlots(self.mappings())
@@ -277,18 +283,149 @@ class MappingEditorDialog(QDialog):
                 for (muscle, side), slots in duplicates.items())
             QMessageBox.warning(self,"重複肌肉對應","同一側的同一肌肉只能對應一個感測器：\n" + conflicts,)
             return
+        super().accept()
+
+
+class BaselineSettingsDialog(QDialog):
+    """Show saved baseline RMS values and configure deviation thresholds."""
+
+    def __init__(self, mappings: list[SensorMapping], manager: BaselineManager,
+                 settings: FilterSettings, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("基準值與判定設定")
+        self.resize(840, 500)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+        description_row = QHBoxLayout()
+        description_row.addWidget(QLabel("顯示此電腦已儲存的基準 RMS；尚未匯入或量測的肌肉會顯示「--」。",
+                                         objectName="muted"), 1)
+        self.import_requested = False
+        import_button = QPushButton("匯入基準 CSV")
+        FluentThemeManager.set_property(import_button, "fluentAppearance", "primary")
+        import_button.clicked.connect(self.request_import)
+        description_row.addWidget(import_button)
+        layout.addLayout(description_row)
+
+        self.table = QTableWidget(0, 6)
+        table = self.table
+        table.setHorizontalHeaderLabels(("肌肉／側別", "基準 RMS", "來源", "取樣率", "濾波", "狀態"))
+        table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked | QTableWidget.EditTrigger.EditKeyPressed)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setAlternatingRowColors(True)
+        rows = [mapping for mapping in mappings
+                if mapping.english_name.strip().casefold() != "unassigned"
+                or mapping.slot in manager.records]
+        self._row_slots = []
+        self._initial_baselines: dict[int, float | None] = {}
+        table.setRowCount(len(rows))
+        for row, mapping in enumerate(rows):
+            self._row_slots.append(mapping.slot)
+            record = manager.records.get(mapping.slot)
+            self._initial_baselines[mapping.slot] = record.rms_mv if record is not None else None
+            identity = f"{mapping.english_name.strip()}|{mapping.abbreviation.strip()}"
+            if record is None:
+                baseline, source, sample_rate, filter_text, status = "--", "--", "--", "--", "尚無基準"
+            else:
+                baseline = f"{record.rms_mv:.4f} mV"
+                source = {"imported_csv": "匯入 CSV", "measured": "量測", "manual": "手動"}.get(
+                    record.source, record.source)
+                sample_rate = f"{record.sample_rate_hz:.1f} Hz"
+                notch = record.filter.get("notch_hz")
+                filter_text = (f"{record.filter.get('highpass_hz', '--')}–"
+                               f"{record.filter.get('lowpass_hz', '--')} Hz"
+                               + (f"；陷波 {notch:g} Hz" if notch else ""))
+                if record.mapping_name != identity:
+                    status = "肌肉對應已變更"
+                elif record.filter != asdict(settings):
+                    status = "濾波設定已變更"
+                else:
+                    status = "可用"
+            values = (f"S{mapping.slot:02d} {mapping.chinese_name}（{mapping.abbreviation or mapping.english_name}）",
+                      baseline, source, sample_rate, filter_text, status)
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column != 1:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                else:
+                    item.setToolTip("雙擊後可輸入新的基準 RMS（mV）。")
+                table.setItem(row, column, item)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for column in range(1, table.columnCount()):
+            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(table, 1)
+
+        threshold_frame = QFrame(objectName="panel")
+        threshold_layout = QGridLayout(threshold_frame)
+        threshold_layout.setContentsMargins(12, 10, 12, 10)
+        threshold_layout.addWidget(QLabel("偏離判定", objectName="sectionTitle"), 0, 0, 1, 4)
+        self.warning_spin = QDoubleSpinBox()
+        self.warning_spin.setRange(0.1, 1000.0)
+        self.warning_spin.setDecimals(1)
+        self.warning_spin.setSuffix(" %")
+        self.warning_spin.setValue(manager.warning_percent)
+        self.focus_spin = QDoubleSpinBox()
+        self.focus_spin.setRange(0.2, 1000.0)
+        self.focus_spin.setDecimals(1)
+        self.focus_spin.setSuffix(" %")
+        self.focus_spin.setValue(manager.focus_percent)
+        self.warning_spin.valueChanged.connect(self._update_focus_minimum)
+        self._update_focus_minimum(self.warning_spin.value())
+        threshold_row = QHBoxLayout()
+        threshold_row.setSpacing(6)
+        threshold_row.addWidget(QLabel("警告偏離"))
+        threshold_row.addWidget(self.warning_spin)
+        threshold_row.addSpacing(16)
+        threshold_row.addWidget(QLabel("重點察看偏離"))
+        threshold_row.addWidget(self.focus_spin)
+        threshold_row.addStretch()
+        threshold_layout.addLayout(threshold_row, 1, 0, 1, 4)
+        threshold_layout.addWidget(QLabel("偏離提示固定啟用；偏離以目前 RMS 相對於基準 RMS 的百分比計算。", objectName="muted"),
+                                   2, 0, 1, 4)
+        layout.addWidget(threshold_frame)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("儲存設定")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _update_focus_minimum(self, warning: float) -> None:
+        self.focus_spin.setMinimum(warning + 0.1)
+
+    def request_import(self) -> None:
+        self.import_requested = True
+        self.accept()
+
+    def values(self) -> tuple[float, float]:
+        return self.warning_spin.value(), self.focus_spin.value()
+
+    def baseline_changes(self) -> dict[int, float]:
+        changes: dict[int, float] = {}
+        for row, slot in enumerate(self._row_slots):
+            text = self.table.item(row, 1).text().replace("mV", "").strip()
+            if text in {"", "--"}:
+                continue
+            try:
+                value = float(text)
+            except ValueError as exc:
+                raise ValueError(f"S{slot:02d} 的基準 RMS 必須是數字。") from exc
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"S{slot:02d} 的基準 RMS 必須大於 0。")
+            if value != self._initial_baselines[slot]:
+                changes[slot] = value
+        return changes
+
+    def accept(self) -> None:
         try:
-            for value in self.baselineChanges().values():
-                if value is not None and (not np.isfinite(value) or value <= 0):
-                    raise ValueError
-        except ValueError:
-            QMessageBox.warning(self, "基準值無效", "基準 RMS 必須是大於 0 的數值，或留白以移除。")
+            self.baseline_changes()
+        except ValueError as exc:
+            QMessageBox.warning(self, "基準值格式無效", str(exc))
             return
         super().accept()
 
 
 class PedalSummaryDialog(QDialog):
-    """Show the current-session P715 summary without creating a second GUI."""
     def __init__(self, summary: dict[str, float | int | None], parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("本次騎乘摘要")
@@ -314,9 +451,6 @@ class TrignoWindow(QMainWindow):
         self.resize(1500, 920)
         self.streamWorker: StreamWorker | None = None
         self.testWorker: ConnectionWorker | None = None
-        # The SDK test worker is intentionally short-lived.  Keep its result
-        # separate from the active streaming worker so the header does not
-        # incorrectly revert to "未連線" after a successful test.
         self.emgTested = False
         self.trainerWorker = TrainerWorker()
         self.trainerIsConnected = False
@@ -340,6 +474,7 @@ class TrignoWindow(QMainWindow):
         self.curves: dict[int, tuple[pg.PlotItem, pg.PlotDataItem, pg.TextItem]] = {}
         self.collectionSummary: tuple[int, float, float] | None = None
         self.collectionError: str | None = None
+        self.collectionStoppedEarly = False
         self.collectionOutput: Path | None = None
         self.collectionSubject = SubjectInfo()
         self.infoRecorder: CollectionInfoRecorder | None = None
@@ -354,20 +489,36 @@ class TrignoWindow(QMainWindow):
         self.rideSession: dict | None = None
         self.latestRideSession: dict | None = None
         self.collectedRideSession: dict | None = None
-        self.collectedRidePath: Path | None = None
-        self.loadedRidePath: Path | None = None
         self.referenceRideSession: dict | None = None
         self.rideStartedAt = 0.0
         self.lastEmgAnalysisAt = 0.0
+        self.databaseWriter: DatabaseWriter | None = None
+        self.databaseWriters: set[DatabaseWriter] = set()
+        self.databaseAggregator: SecondAggregator | None = None
+        self.databaseTestId: str | None = None
+        self.databaseLastTestId: str | None = None
+        self.databaseDiscardAfterWriter: dict[DatabaseWriter, str] = {}
+        self.databaseStartedAt: datetime | None = None
+        self.activeDatabaseConfig: DatabaseConfig | None = None
+        self.discardCurrentCollection = False
         self.bikeOnlySession = False
         self.commandedNativeResistance: float | None = None
         self.currentSampleRate = SAMPLE_RATE
-        self.baselineManager = BaselineManager(baselineSettingsPath())
+        # A calibration belongs to the current patient and measurement session.
+        # Keep thresholds/settings, but never restore a previous patient's RMS.
+        self.baselineManager = BaselineManager(
+            baselineSettingsPath(), restore_records=False, persist_records=False,
+        )
         self.baselineManager.thresholds_enabled = True
         self.filterSettings = FilterSettings()
         self.preprocessor: EMGPreprocessor | None = None
         self.rmsExtractor: RMSFeatureExtractor | None = None
         self.emgAnalysisImportWorker: EMGAnalysisImportWorker | None = None
+        self.angleAnalysisWorker: AngleAnalysisWorker | None = None
+        self.angleExportWorker: AngleExportWorker | None = None
+        self.angleAnalysisResult: dict | None = None
+        self.angleEmgPath: Path | None = None
+        self.anglePedalPath: Path | None = None
         self.calibrationSession: CalibrationSession | None = None
         self.calibrationOnly = False
         self.calibrationRecording = False
@@ -378,6 +529,9 @@ class TrignoWindow(QMainWindow):
         self.lastTrainerDistanceMeters: int | None = None
         self.collectionDistanceBaselineMeters: int | None = None
         self.collectionDistanceMeters: int | None = None
+        self.collectionLastTrainerDistanceMeters: int | None = None
+        self.collectionDistanceUpdatedAt: float | None = None
+        self.lastDistanceRejectAt = 0.0
         self.distanceSessionActive = False
         self.buildUi()
         if hasattr(QApplication.instance().styleHints(), "colorSchemeChanged"):
@@ -400,6 +554,7 @@ class TrignoWindow(QMainWindow):
         self.setTrainerConnectionState(False)
         self.setPedalConnectionState(False)
         self.setEmgConnectionState(False)
+        self.setDatabaseConnectionState(False)
 
     def buildUi(self) -> None:
         root = QWidget(objectName="root")
@@ -414,19 +569,24 @@ class TrignoWindow(QMainWindow):
         self.trainerConnectionLabel = QLabel(objectName="connectionIndicator")
         self.pedalConnectionLabel = QLabel(objectName="connectionIndicator")
         self.emgConnectionLabel = QLabel(objectName="connectionIndicator")
+        self.databaseConnectionLabel = QLabel(objectName="connectionIndicator")
         header.addWidget(self.trainerConnectionLabel)
         header.addWidget(self.pedalConnectionLabel)
         header.addWidget(self.emgConnectionLabel)
+        header.addWidget(self.databaseConnectionLabel)
         self.tabs.setCornerWidget(statusCorner, Qt.Corner.TopRightCorner)
         self.resistanceTab = self.createResistanceTab()
         self.trainerTab = self.createTrainerTab()
+        self.sessionDevicesPanel = self.createSessionDevicesPanel()
         self.collectionTab = self.createCollectionTab()
         self.summaryTab = self.createSummaryTab()
         self.settingsTab = self.createSettingsTab()
         self.startButton.setText("開始收集資料")
         self.tabs.addTab(self.settingsTab, "設定")
         self.tabs.addTab(self.collectionTab, "收集資料")
-        self.tabs.addTab(self.summaryTab, "本次摘要")
+        self.tabs.addTab(self.summaryTab, "後續分析")
+        self.tabs.addTab(self.comparisonTab, "測試比較")
+        self.tabs.currentChanged.connect(self.onMainTabChanged)
         outer.addWidget(self.tabs, 1)
 
     def createPedalPanel(self) -> QWidget:
@@ -447,6 +607,25 @@ class TrignoWindow(QMainWindow):
         layout.addWidget(self.pedalTelemetryLabel, 2, 0, 1, 4)
         self.scanPedalButton.clicked.connect(self.scanCyclingDevices)
         self.connectPedalButton.clicked.connect(self.connectPedal)
+        return panel
+
+    def createSessionDevicesPanel(self) -> QFrame:
+        panel = QFrame()
+        FluentThemeManager.set_property(panel, "fluentRole", "surface")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(14, 10, 14, 10)
+        row = QHBoxLayout()
+        row.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        row.addWidget(QLabel("測試項目", objectName="sectionTitle"))
+        row.addSpacing(28)
+        for text, attribute in (("EMG", "useEmgCheck"), ("阻力計", "useTrainerCheck"), ("踏板", "usePedalCheck")):
+            check = QCheckBox(text)
+            check.setChecked(True)
+            setattr(self, attribute, check)
+            row.addWidget(check)
+            row.addSpacing(14)
+        row.addStretch(1)
+        layout.addLayout(row)
         return panel
 
     def createSettingsTab(self) -> QWidget:
@@ -496,26 +675,6 @@ class TrignoWindow(QMainWindow):
         self.genderCombo.setFixedWidth(100)
         subjectLayout.setColumnStretch(6, 1)
         layout.addWidget(subject)
-
-        devices = QFrame()
-        FluentThemeManager.set_property(devices, "fluentRole", "surface")
-        devicesLayout = QVBoxLayout(devices)
-        devicesLayout.setContentsMargins(14, 12, 14, 12)
-        deviceHeader = QHBoxLayout()
-        deviceHeader.setAlignment(Qt.AlignLeft)
-        deviceHeader.addWidget(QLabel("本次設備", objectName="sectionTitle"))
-        checks = QHBoxLayout()
-        checks.setSpacing(18)
-        self.useEmgCheck = QCheckBox("EMG")
-        self.useTrainerCheck = QCheckBox("阻力計")
-        self.usePedalCheck = QCheckBox("踏板")
-        for check in (self.useEmgCheck, self.useTrainerCheck, self.usePedalCheck):
-            check.setChecked(True)
-            checks.addWidget(check)
-        deviceHeader.addSpacing(28)
-        deviceHeader.addLayout(checks)
-        devicesLayout.addLayout(deviceHeader)
-        layout.addWidget(devices)
 
         bluetooth = QFrame()
         FluentThemeManager.set_property(bluetooth, "fluentRole", "surface")
@@ -609,6 +768,50 @@ class TrignoWindow(QMainWindow):
         scanResultsLayout.addWidget(self.scanResultsScroll)
         layout.addWidget(scanResults)
 
+        database = QFrame()
+        FluentThemeManager.set_property(database, "fluentRole", "surface")
+        databaseLayout = QVBoxLayout(database)
+        databaseLayout.setContentsMargins(14, 12, 14, 12)
+        databaseLayout.setSpacing(6)
+        databaseLayout.addWidget(QLabel("SQL Server 資料庫", objectName="sectionTitle"))
+        self.databaseStatusLabel = QLabel("填入帳密後測試連線，即可載入資料庫。", objectName="muted")
+        databaseLayout.addWidget(self.databaseStatusLabel)
+        self.databaseServerEdit = QLineEdit("127.0.0.1")
+        self.databaseUserEdit = QLineEdit("Rehab-User")
+        self.databasePasswordEdit = QLineEdit()
+        self.databasePasswordEdit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.databaseNameCombo = QComboBox()
+        self.databaseNameCombo.setEnabled(False)
+        self.databaseNameCombo.setPlaceholderText("先測試連線以載入資料庫")
+        self.databaseTestButton = QPushButton("測試連線")
+        FluentThemeManager.set_property(self.databaseTestButton, "fluentAppearance", "primary")
+        self.databaseServerEdit.setFixedWidth(160)
+        self.databaseUserEdit.setFixedWidth(130)
+        self.databasePasswordEdit.setFixedWidth(130)
+        self.databaseTestButton.setFixedWidth(96)
+        credentialsRow = QHBoxLayout()
+        credentialsRow.setSpacing(6)
+        credentialsRow.addWidget(QLabel("Server"))
+        credentialsRow.addWidget(self.databaseServerEdit)
+        credentialsRow.addWidget(QLabel("帳號"))
+        credentialsRow.addWidget(self.databaseUserEdit)
+        credentialsRow.addWidget(QLabel("密碼"))
+        credentialsRow.addWidget(self.databasePasswordEdit)
+        credentialsRow.addWidget(self.databaseTestButton)
+        credentialsRow.addStretch()
+        databaseLayout.addLayout(credentialsRow)
+        databaseRow = QHBoxLayout()
+        databaseRow.setSpacing(6)
+        databaseRow.addWidget(QLabel("資料庫"))
+        databaseRow.addWidget(self.databaseNameCombo, 1)
+        databaseLayout.addLayout(databaseRow)
+        self.databaseTestButton.clicked.connect(self.testDatabaseConnection)
+        self.databaseServerEdit.textEdited.connect(self.databaseConnectionEdited)
+        self.databaseUserEdit.textEdited.connect(self.databaseConnectionEdited)
+        self.databasePasswordEdit.textEdited.connect(self.databaseConnectionEdited)
+        self.databaseNameCombo.currentTextChanged.connect(self.databaseConnectionEdited)
+        layout.addWidget(database)
+
         resistance = QFrame()
         FluentThemeManager.set_property(resistance, "fluentRole", "surface")
         resistanceLayout = QVBoxLayout(resistance)
@@ -632,6 +835,165 @@ class TrignoWindow(QMainWindow):
         page.addWidget(scroll, 1)
         page.addWidget(eventLogPanel, 0)
         return tab
+
+    def databaseConfig(self) -> DatabaseConfig:
+        database = self.databaseNameCombo.currentText().strip() or "master"
+        return DatabaseConfig(
+            server=self.databaseServerEdit.text().strip(), database=database,
+            username=self.databaseUserEdit.text().strip(), password=self.databasePasswordEdit.text(),
+        )
+
+    def databaseConnectionEdited(self, *_args) -> None:
+        self.activeDatabaseConfig = None
+        self.databaseStatusLabel.setText("連線資料已變更，請重新測試連線")
+        self.setDatabaseConnectionState(False)
+
+    def testDatabaseConnection(self) -> None:
+        credentials = DatabaseConfig(
+            server=self.databaseServerEdit.text().strip(), database="master",
+            username=self.databaseUserEdit.text().strip(), password=self.databasePasswordEdit.text(),
+        )
+        try:
+            store = SqlServerStorage(credentials)
+            databases = store.list_databases()
+            store.close()
+            if not databases:
+                raise RuntimeError("此帳號沒有可連線的資料庫。")
+            selected = self.databaseNameCombo.currentText()
+            self.databaseNameCombo.clear()
+            self.databaseNameCombo.addItems(databases)
+            self.databaseNameCombo.setEnabled(True)
+            preferred = "RehabPatients-ylh"
+            self.databaseNameCombo.setCurrentText(selected if selected in databases else preferred if preferred in databases else databases[0])
+            config = self.databaseConfig()
+            store = SqlServerStorage(config)
+            name = store.test_connection()
+            store.close()
+        except Exception as exc:
+            self.activeDatabaseConfig = None
+            self.databaseStatusLabel.setText(f"連線失敗：{exc}")
+            self.setDatabaseConnectionState(False)
+            return
+        self.activeDatabaseConfig = config
+        self.databaseStatusLabel.setText(f"已連線：{name}；五張資料表可用")
+        self.setDatabaseConnectionState(True)
+        if hasattr(self, "databaseComparePatientCombo"):
+            self.loadDatabaseComparisonPatients()
+
+    def onMainTabChanged(self, index: int) -> None:
+        if (self.tabs.widget(index) is self.comparisonTab
+                and self.activeDatabaseConfig is not None
+                and self.databaseComparePatientCombo.count() == 0):
+            self.loadDatabaseComparisonPatients()
+
+    def startDatabaseRecording(self) -> None:
+        config = self.activeDatabaseConfig
+        if config is None:
+            self.appendLog("資料庫未寫入：請先在設定頁測試 SQL Server 連線")
+            return
+        self.databaseLastTestId = None
+        self.databaseTestId = prefixed_id("TEST")
+        self.databaseStartedAt = datetime.now()
+        self.databaseAggregator = SecondAggregator(self.databaseTestId, self.databaseStartedAt)
+        baselines: list[dict] = []
+        for slot, record in self.baselineManager.records.items():
+            mapping = self.mappings[slot - 1]
+            baselines.append({"muscle_name": f"{mapping.chinese_name} ({mapping.abbreviation})", "rms_mv": record.rms_mv,
+                "base_time": 10, "action_type": record.protocol or "基準測試", "yellow_pct": self.baselineManager.warning_percent,
+                "red_pct": self.baselineManager.focus_percent, "quality_status": "VALID"})
+        subject = self.collectionSubject
+        payload = {"test_id": self.databaseTestId, "patient_id": subject.patientId, "name": subject.name,
+            "sex": subject.gender, "action_type": "固定阻力騎乘", "test_time": None,
+            "resistance_level": self.resistanceSpin.value(), "has_baseline": bool(baselines), "notes": "EMG Cycling Monitor",
+            "started_at": self.databaseStartedAt, "baselines": baselines}
+        self.databaseWriter = DatabaseWriter(config)
+        writer = self.databaseWriter
+        self.databaseWriters.add(writer)
+        self.databaseWriter.connected.connect(lambda name: self.appendLog(f"資料庫已連線：{name}；TestID {self.databaseTestId}"))
+        self.databaseWriter.failed.connect(lambda message: self.appendLog(f"資料庫寫入失敗（CSV 收集未受影響）：{message}"))
+        self.databaseWriter.completed.connect(self.appendLog)
+        self.databaseWriter.finished.connect(lambda: self.databaseWriterFinished(writer))
+        self.databaseWriter.start()
+        self.databaseWriter.enqueue("start", payload)
+
+    def databaseAddSample(self, kind: str, time_s: float, sample: dict) -> None:
+        if self.databaseAggregator is None or self.databaseWriter is None:
+            return
+        rows = self.databaseAggregator.add(kind, time_s, sample)
+        if rows:
+            self.databaseWriter.enqueue("rows", (kind, rows))
+
+    def finishDatabaseRecording(self, result: dict | None) -> None:
+        writer, aggregator, test_id = self.databaseWriter, self.databaseAggregator, self.databaseTestId
+        self.databaseAggregator = None
+        self.databaseTestId = None
+        if writer is None or aggregator is None or test_id is None:
+            return
+        for kind, rows in aggregator.flush_all().items():
+            if rows:
+                writer.enqueue("rows", (kind, rows))
+        pedal = (result or {}).get("pedal", {})
+        trainer = (result or {}).get("trainer", {})
+        def stat(group: dict, key: str, field: str = "mean"):
+            value = group.get(key, {})
+            return value.get(field) if isinstance(value, dict) else None
+        avg_power = stat(pedal, "power_w") if stat(pedal, "power_w") is not None else stat(trainer, "power_watts")
+        max_power = stat(pedal, "power_w", "max") if stat(pedal, "power_w", "max") is not None else stat(trainer, "power_watts", "max")
+        avg_cadence = stat(pedal, "cadence_rpm") if stat(pedal, "cadence_rpm") is not None else stat(trainer, "cadence_rpm")
+        distance_m = stat(trainer, "session_distance_meters", "max")
+        elapsed = int(round(self.rideTime()))
+        status = "失敗" if self.collectionError else ("中斷" if self.collectionStoppedEarly else "完成")
+        writer.enqueue("finish", {"test_id": test_id, "test_time": elapsed, "status": status,
+            "avg_power_w": avg_power, "max_power_w": max_power,
+            "avg_cadence_rpm": avg_cadence, "distance_km": None if distance_m is None else distance_m / 1000,
+            "left_balance_pct": stat(pedal, "left_balance_percent"),
+            "right_balance_pct": None if stat(pedal, "left_balance_percent") is None else 100 - stat(pedal, "left_balance_percent"),
+            "notes": self.collectionError or ""})
+        self.databaseLastTestId = test_id
+        writer.enqueue("stop")
+
+    def databaseWriterFinished(self, writer: DatabaseWriter) -> None:
+        """Retain every writer until its QThread has actually exited."""
+        discard_test_id = self.databaseDiscardAfterWriter.pop(writer, None)
+        self.databaseWriters.discard(writer)
+        if self.databaseWriter is writer:
+            self.databaseWriter = None
+        writer.deleteLater()
+        if discard_test_id:
+            self.startDatabaseDiscardWorker(discard_test_id)
+
+    def startDatabaseDiscardWorker(self, test_id: str) -> None:
+        """Delete a completed test after its original writer has closed."""
+        config = self.activeDatabaseConfig
+        if config is None:
+            self.appendLog("資料庫捨棄略過：本次沒有可用的資料庫連線設定")
+            return
+        writer = DatabaseWriter(config)
+        self.databaseWriters.add(writer)
+        writer.failed.connect(lambda message: self.appendLog(f"資料庫捨棄失敗：{message}"))
+        writer.completed.connect(lambda _message: self.appendLog("資料庫：已刪除本次測試資料"))
+        writer.finished.connect(lambda: self.databaseWriterFinished(writer))
+        writer.start()
+        writer.enqueue("discard", test_id)
+        writer.enqueue("stop")
+
+    def discardDatabaseRecording(self, active_writer: bool) -> None:
+        """Discard active rows, or wait until a completed writer has drained."""
+        test_id = self.databaseTestId or self.databaseLastTestId
+        writer = self.databaseWriter
+        self.databaseAggregator = None
+        self.databaseTestId = None
+        self.databaseLastTestId = None
+        if not test_id:
+            return
+        if active_writer and writer is not None and writer.isRunning():
+            writer.enqueue("discard", test_id)
+            writer.enqueue("stop")
+            return
+        if writer is not None and writer.isRunning():
+            self.databaseDiscardAfterWriter[writer] = test_id
+            return
+        self.startDatabaseDiscardWorker(test_id)
 
     def createResistanceTab(self) -> QWidget:
         tab = QWidget()
@@ -664,7 +1026,6 @@ class TrignoWindow(QMainWindow):
         return tab
 
     def createSummaryTab(self) -> QWidget:
-        """Fluent summary workspace for the live ride, comparison and pedal detail."""
         tab = QWidget(objectName="summaryPage")
         layout = QVBoxLayout(tab)
         layout.setContentsMargins(16, 12, 16, 16)
@@ -676,35 +1037,36 @@ class TrignoWindow(QMainWindow):
         self.rideStateLabel = QLabel("等待騎乘", objectName="status")
         FluentThemeManager.set_property(self.rideStateLabel, "fluentSeverity", "info")
         actions = QHBoxLayout()
+        actions.setSpacing(4)
         self.importFitButton = QPushButton("匯入FIT檔")
         self.importFitButton.setAccessibleName("匯入 FIT 活動檔")
         self.importFitButton.setToolTip("匯入 .fit 檔並顯示功率、踏頻與左右平衡摘要")
         FluentThemeManager.set_property(self.importFitButton, "fluentAppearance", "primary")
-        self.importEmgAnalysisButton = QPushButton("匯入 EMG 資料")
-        self.importEmgAnalysisButton.setToolTip("匯入原始 EMG CSV，產生 RMS 平均、Peak 與包絡線分析")
+        self.importEmgAnalysisButton = QPushButton("匯入原始 EMG")
+        self.importEmgAnalysisButton.setToolTip("匯入原始 EMG CSV，重新產生 RMS 平均、Peak 與包絡線分析")
         FluentThemeManager.set_property(self.importEmgAnalysisButton, "fluentAppearance", "primary")
         self.currentSessionSummaryButton = QPushButton("顯示本次收集")
         self.currentSessionSummaryButton.setEnabled(False)
         self.currentSessionSummaryButton.setToolTip("切換回本程式最新收集的踏板資料")
-        self.loadRideButton = QPushButton("載入歷史騎乘")
+        FluentThemeManager.set_property(self.currentSessionSummaryButton, "fluentAppearance", "success")
         self.exportReportButton = QPushButton("匯出 HTML 報表")
         self.exportReportButton.setEnabled(False)
-        self.loadReferenceButton = QPushButton("選取第一次騎乘")
-        FluentThemeManager.set_property(self.loadReferenceButton, "fluentAppearance", "primary")
-        actions.addWidget(self.importFitButton)
-        actions.addWidget(self.importEmgAnalysisButton)
+        FluentThemeManager.set_property(self.exportReportButton, "fluentAppearance", "success")
+        self.loadReferenceButton = QPushButton("選取比較基準")
+        self.loadReferenceButton.setToolTip("選取第一次騎乘，作為兩次騎乘比較的基準資料")
+        FluentThemeManager.set_property(self.loadReferenceButton, "fluentAppearance", "warning")
         actions.addWidget(self.currentSessionSummaryButton)
-        actions.addWidget(self.loadRideButton)
-        actions.addWidget(self.exportReportButton)
+        actions.addWidget(self.importEmgAnalysisButton)
+        actions.addWidget(self.importFitButton)
         actions.addWidget(self.loadReferenceButton)
+        actions.addWidget(self.exportReportButton)
         heading.addLayout(actions)
         heading.addSpacing(12)
         heading.addWidget(self.rideStateLabel)
         layout.addLayout(heading)
         metricStrip = QHBoxLayout()
         self.summaryMetricValues = {}
-        for key, title, unit in (("duration", "騎乘時間", "秒"),
-                                 ("muscles", "有效肌肉", "通道")):
+        for key, title, unit in (("duration", "收集時間", "s"), ("muscles", "肌肉", "部位")):
             frame = QFrame(objectName="metricCard")
             column = QVBoxLayout(frame)
             column.setContentsMargins(12, 8, 12, 8)
@@ -714,9 +1076,9 @@ class TrignoWindow(QMainWindow):
             valueRow = QHBoxLayout()
             valueRow.setContentsMargins(0, 0, 0, 0)
             valueRow.addWidget(value)
+            valueRow.addStretch()
             if unit:
                 valueRow.addWidget(QLabel(unit, objectName="metricUnit"))
-            valueRow.addStretch()
             column.addLayout(valueRow)
             metricStrip.addWidget(frame, 1)
             self.summaryMetricValues[key] = value
@@ -727,62 +1089,13 @@ class TrignoWindow(QMainWindow):
         self.analysisFtpSpin.setValue(int(self.settings.value("analysis/ftp_w", 200)))
         self.analysisFtpSpin.setAccessibleName("FTP 功率設定")
         self.analysisFtpSpin.setToolTip("用於計算 NP、IF、TSS 與功率區間；不是醫療判讀")
-        self.normalizedCheck = QCheckBox("顯示 normalized RMS（RMS / baseline）")
-        self.normalizedCheck.setToolTip("關閉時顯示 RMS - baseline，單位 mV")
         analysisControls = QHBoxLayout()
         analysisControls.addWidget(QLabel("FTP"))
         analysisControls.addWidget(self.analysisFtpSpin)
         analysisControls.addWidget(QLabel("僅供騎乘訓練指標計算", objectName="muted"))
-        analysisControls.addSpacing(18)
-        analysisControls.addWidget(self.normalizedCheck)
-        analysisControls.addSpacing(18)
-        analysisControls.addWidget(QLabel("EMG 相對阻力時間偏移"))
-        self.alignmentOffsetSpin = QDoubleSpinBox()
-        self.alignmentOffsetSpin.setRange(-30, 30)
-        self.alignmentOffsetSpin.setDecimals(2)
-        self.alignmentOffsetSpin.setSingleStep(0.1)
-        self.alignmentOffsetSpin.setSuffix(" 秒")
-        self.alignmentOffsetSpin.setToolTip("有共同可辨識事件時，調整 EMG 相對阻力資料的時間；正值讓 EMG 向後移。")
-        self.alignmentOffsetSpin.setAccessibleName("EMG 相對阻力時間偏移秒數")
-        analysisControls.addWidget(self.alignmentOffsetSpin)
         analysisControls.addStretch()
         layout.addLayout(analysisControls)
         self.summaryTabs = QTabWidget()
-        summaryPage = QWidget()
-        summaryLayout = QVBoxLayout(summaryPage)
-        summaryLayout.setContentsMargins(8, 8, 8, 8)
-        self.summaryDetails = QPlainTextEdit()
-        self.summaryDetails.setReadOnly(True)
-        self.summaryDetails.setPlaceholderText("完成一次踏板收集，或匯入 fit 檔後，摘要會顯示在這裡。")
-        self.summaryDetails.setMinimumHeight(150)
-        self.summaryDetails.setMaximumHeight(190)
-        summaryLayout.addWidget(self.summaryDetails)
-        pedalMetrics = QHBoxLayout()
-        self.pedalMetricCards = {}
-        for key, title, unit in (("normalized_power_w", "NP", "W"),
-                                 ("intensity_factor", "IF", ""),
-                                 ("peak_5s_w", "最佳 5 秒", "W"),
-                                 ("coverage_percent", "資料涵蓋", "%")):
-            card = QFrame(objectName="metricCard")
-            column = QVBoxLayout(card)
-            column.addWidget(QLabel(title, objectName="metricTitle"))
-            value = QLabel("--", objectName="metricValue")
-            value.setAccessibleName(title)
-            column.addWidget(value)
-            if unit:
-                column.addWidget(QLabel(unit, objectName="metricUnit"))
-            pedalMetrics.addWidget(card, 1)
-            self.pedalMetricCards[key] = value
-        summaryLayout.addLayout(pedalMetrics)
-        summaryLayout.addWidget(QLabel("功率區間 · 依 FTP 與已觀測秒數計算", objectName="sectionTitle"))
-        self.pedalZoneTable = QTableWidget(7, 4)
-        self.pedalZoneTable.setHorizontalHeaderLabels(("區間", "功率範圍", "時間", "佔有效資料"))
-        self.pedalZoneTable.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.pedalZoneTable.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.pedalZoneTable.setAccessibleName("踏板功率區間時間分布")
-        self.pedalZoneTable.setMinimumHeight(210)
-        summaryLayout.addWidget(self.pedalZoneTable)
-        self.summaryTabs.addTab(summaryPage, "數值與功率區間")
         chartPage = QWidget()
         chartLayout = QVBoxLayout(chartPage)
         chartLayout.setContentsMargins(8, 8, 8, 8)
@@ -798,31 +1111,46 @@ class TrignoWindow(QMainWindow):
         self.balanceAnalysisPlot.setYRange(0, 100, padding=0.04)
         self.cadenceAnalysisPlot.setXLink(self.powerAnalysisPlot)
         self.balanceAnalysisPlot.setXLink(self.powerAnalysisPlot)
-        for plot in (self.powerAnalysisPlot, self.cadenceAnalysisPlot, self.balanceAnalysisPlot):
+        for chart_name, plot in (("功率", self.powerAnalysisPlot), ("踏頻", self.cadenceAnalysisPlot), ("左右平衡", self.balanceAnalysisPlot)):
             plot.showGrid(x=True, y=True, alpha=0.18)
-        chartLayout.addWidget(self.summaryPlots, 1)
-        chartLayout.addWidget(QLabel("左右腳估計功率與平衡", objectName="sectionTitle"))
-        self.powerBalanceNote = QLabel(
-            "依總功率與 P715 回報的左右平衡估算，非左右獨立扭力或踩踏相位量測。",
-            objectName="muted",
-        )
-        self.powerBalanceNote.setWordWrap(True)
-        chartLayout.addWidget(self.powerBalanceNote)
+            self.attachPlotFitButton(plot, chart_name)
+
+        chartColumns = QHBoxLayout()
+        chartColumns.setSpacing(18)
+        pedalInfo = QWidget()
+        pedalInfo.setMinimumWidth(300)
+        pedalInfoLayout = QVBoxLayout(pedalInfo)
+        pedalInfoLayout.setContentsMargins(4, 4, 4, 4)
+        pedalInfoLayout.setSpacing(8)
+        pedalInfoLayout.addWidget(QLabel("踏板資訊", objectName="sectionTitle"))
+        self.summaryDetails = QLabel(objectName="muted")
+        self.summaryDetails.setText("完成踏板收集，或匯入FIT檔後，摘要會顯示在這裡")
+        self.summaryDetails.setTextFormat(Qt.TextFormat.PlainText)
+        self.summaryDetails.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.summaryDetails.setWordWrap(True)
+        self.summaryDetails.setAccessibleName("騎乘數值摘要")
+        pedalInfoLayout.addWidget(self.summaryDetails)
+        pedalInfoLayout.addStretch(1)
+        pedalInfoLayout.addWidget(QLabel("雙腳平衡與估計功率", objectName="sectionTitle"))
         rings = QHBoxLayout()
-        rings.setSpacing(20)
+        rings.setSpacing(12)
         self.leftPowerBalanceRing = PowerBalanceRing("左腳")
         self.rightPowerBalanceRing = PowerBalanceRing("右腳")
-        rings.addStretch()
         rings.addWidget(self.leftPowerBalanceRing, 1)
         rings.addWidget(self.rightPowerBalanceRing, 1)
-        rings.addStretch()
-        chartLayout.addLayout(rings)
-        self.summaryTabs.addTab(chartPage, "圖表")
+        pedalInfoLayout.addLayout(rings)
+        chartColumns.addWidget(pedalInfo, 1)
+        self.summaryPlots.setMinimumWidth(760)
+        self.summaryPlots.setMinimumHeight(620)
+        chartColumns.addWidget(self.summaryPlots, 4)
+        chartLayout.addLayout(chartColumns, 1)
+        self.pedalMetricCards = {}
+        self.pedalZoneTable = None
+        self.summaryTabs.addTab(chartPage, "踏板分析")
         ridePage = QWidget()
         rideLayout = QVBoxLayout(ridePage)
-        self.rideEmptyLabel = QLabel("開始收集資料、匯入 EMG CSV，或載入歷史騎乘分析檔，即可查看肌肉 RMS 分析。", objectName="muted")
-        self.rideEmptyLabel.setWordWrap(True)
-        rideLayout.addWidget(self.rideEmptyLabel)
+        self.rideEmptyLabel = QLabel(objectName="muted")
+        self.rideEmptyLabel.hide()
         self.rideMuscleTable = QTableWidget(0, 6)
         self.rideMuscleTable.setHorizontalHeaderLabels(("肌肉／側別", "平均 RMS", "最大 RMS", "基準比較", "前段 → 後段", "資料狀態"))
         self.rideMuscleTable.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -832,17 +1160,15 @@ class TrignoWindow(QMainWindow):
         self.ridePlots = pg.GraphicsLayoutWidget()
         self.ridePlots.setBackground("#ffffff")
         self.ridePlots.setMinimumHeight(360)
-        self.rmsAverageBarPlot = self.ridePlots.addPlot(
-            row=0, col=0, title="各肌肉 RMS 平均值")
+        self.rmsAverageBarPlot = self.ridePlots.addPlot(row=0, col=0, title="各肌肉 RMS 平均值")
         self.rmsAverageBarPlot.setLabel("left", "RMS", units="mV")
-        self.rmsPeakBarPlot = self.ridePlots.addPlot(
-            row=0, col=1, title="各肌肉 RMS Peak 值")
+        self.rmsPeakBarPlot = self.ridePlots.addPlot(row=0, col=1, title="各肌肉 RMS Peak 值")
         self.rmsPeakBarPlot.setLabel("left", "RMS", units="mV")
-        self.emgEnvelopePlot = self.ridePlots.addPlot(
-            row=1, col=0, colspan=2, title="EMG RMS Peak 包絡線（每 1 秒最高值）")
+        self.emgEnvelopePlot = self.ridePlots.addPlot(row=1, col=0, colspan=2, title="EMG RMS Peak 包絡線（每 1 秒最高值）")
         self.emgEnvelopePlot.setLabel("left", "RMS", units="mV")
-        for plot in (self.rmsAverageBarPlot, self.rmsPeakBarPlot, self.emgEnvelopePlot):
+        for chart_name, plot in (("RMS 平均值", self.rmsAverageBarPlot), ("RMS Peak", self.rmsPeakBarPlot), ("EMG RMS 包絡線", self.emgEnvelopePlot)):
             plot.showGrid(x=True, y=True, alpha=0.18)
+            self.attachPlotFitButton(plot, chart_name)
         self.emgEnvelopePlot.setLabel("bottom", "騎乘時間", units="s")
         envelopeControls = QHBoxLayout()
         envelopeControls.addWidget(QLabel("肌肉"))
@@ -859,54 +1185,310 @@ class TrignoWindow(QMainWindow):
         self.summaryTabs.insertTab(0, ridePage, "肌電分析")
         comparePage = QWidget()
         compareLayout = QVBoxLayout(comparePage)
-        self.comparisonStatusLabel = QLabel("選取第一次騎乘，再使用本次或載入歷史騎乘作為第二次。", objectName="muted")
+        compareLayout.setContentsMargins(14, 14, 14, 12)
+        compareLayout.setSpacing(10)
+        setup = QFrame()
+        FluentThemeManager.set_property(setup, "comparisonRole", "summary")
+        setupLayout = QVBoxLayout(setup)
+        setupLayout.setContentsMargins(18, 16, 18, 14)
+        setupLayout.setSpacing(10)
+        setupLayout.addWidget(QLabel("資料庫 RMS 比較", objectName="sectionTitle"))
+        setupLayout.addWidget(QLabel("選取同一病人的兩次量測；前、後段平均使用未標準化的每秒 RMS（mV）。", objectName="muted"))
+        databaseCompareControls = QHBoxLayout()
+        databaseCompareControls.setSpacing(8)
+        databaseCompareControls.addWidget(QLabel("病人"))
+        self.databaseComparePatientCombo = QComboBox()
+        self.databaseComparePatientCombo.setMinimumWidth(210)
+        self.databaseCompareReloadButton = QPushButton("載入量測")
+        FluentThemeManager.set_property(self.databaseCompareReloadButton, "fluentAppearance", "primary")
+        databaseCompareControls.addWidget(self.databaseComparePatientCombo)
+        databaseCompareControls.addWidget(self.databaseCompareReloadButton)
+        databaseCompareControls.addWidget(QLabel("量測 A"))
+        self.databaseCompareACombo = QComboBox()
+        self.databaseCompareACombo.setMinimumWidth(250)
+        databaseCompareControls.addWidget(self.databaseCompareACombo)
+        databaseCompareControls.addWidget(QLabel("量測 B"))
+        self.databaseCompareBCombo = QComboBox()
+        self.databaseCompareBCombo.setMinimumWidth(250)
+        databaseCompareControls.addWidget(self.databaseCompareBCombo)
+        databaseCompareControls.addStretch()
+        setupLayout.addLayout(databaseCompareControls)
+        windowControls = QHBoxLayout()
+        windowControls.addWidget(QLabel("前段"))
+        self.databaseCompareEarlySpin = QSpinBox()
+        self.databaseCompareEarlySpin.setRange(1, 600)
+        self.databaseCompareEarlySpin.setValue(30)
+        self.databaseCompareEarlySpin.setSuffix(" 秒")
+        windowControls.addWidget(self.databaseCompareEarlySpin)
+        windowControls.addWidget(QLabel("後段"))
+        self.databaseCompareLateSpin = QSpinBox()
+        self.databaseCompareLateSpin.setRange(1, 600)
+        self.databaseCompareLateSpin.setValue(30)
+        self.databaseCompareLateSpin.setSuffix(" 秒")
+        windowControls.addWidget(self.databaseCompareLateSpin)
+        self.databaseCompareRunButton = QPushButton("比較 RMS")
+        FluentThemeManager.set_property(self.databaseCompareRunButton, "fluentAppearance", "success")
+        windowControls.addWidget(self.databaseCompareRunButton)
+        windowControls.addStretch()
+        setupLayout.addLayout(windowControls)
+        compareLayout.addWidget(setup)
+        self.comparisonStatusLabel = QLabel("請先在設定頁測試資料庫連線，接著載入病人與量測紀錄。", objectName="muted")
         self.comparisonStatusLabel.setWordWrap(True)
         compareLayout.addWidget(self.comparisonStatusLabel)
-        self.comparisonTable = QTableWidget(0, 7)
-        self.comparisonTable.setHorizontalHeaderLabels(("肌肉／側別", "第一次中位 mV", "第二次中位 mV", "差異 mV", "變化 %", "P90 第一次／第二次", "狀態"))
-        self.comparisonTable.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.comparisonTable.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.comparisonTable.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.comparisonTable.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.comparisonTable.setAccessibleName("兩次騎乘肌肉活化比較表")
-        compareLayout.addWidget(self.comparisonTable, 2)
-        self.comparisonPlot = pg.PlotWidget(title="選取肌肉：兩次 RMS 隨各自騎乘時間變化")
-        self.comparisonPlot.setBackground("#ffffff")
-        self.comparisonPlot.setLabel("bottom", "各自騎乘時間", units="s")
-        self.comparisonPlot.setLabel("left", "RMS", units="mV")
-        self.comparisonPlot.showGrid(x=True, y=True, alpha=0.18)
-        self.comparisonPlot.addLegend()
-        compareLayout.addWidget(self.comparisonPlot, 2)
-        self.comparisonNotes = QLabel("RMS 表示肌肉電活動；跨次比較需維持電極位置、姿勢與阻力流程。", objectName="muted")
+        self.databaseComparisonTabs = QTabWidget()
+        self.databaseComparisonLayouts: dict[str, QVBoxLayout] = {}
+        self.databaseComparisonScrolls: dict[str, QScrollArea] = {}
+        self.databaseComparisonPlots: list[pg.PlotWidget] = []
+        for side, title in (("R", "右腳"), ("L", "左腳"), ("", "未辨識側別")):
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            content = QWidget()
+            cards = QVBoxLayout(content)
+            cards.setContentsMargins(4, 4, 4, 4)
+            cards.setSpacing(10)
+            cards.addStretch()
+            scroll.setWidget(content)
+            self.databaseComparisonLayouts[side] = cards
+            self.databaseComparisonScrolls[side] = scroll
+            self.databaseComparisonTabs.addTab(scroll, title)
+        compareLayout.addWidget(self.databaseComparisonTabs, 1)
+        self.comparisonNotes = QLabel("RMS 代表肌肉電活動，非肌力。資料庫目前未保存濾波設定與取樣率，跨次比較前請確認兩次收集設定一致。", objectName="muted")
         self.comparisonNotes.setWordWrap(True)
         compareLayout.addWidget(self.comparisonNotes)
-        self.summaryTabs.insertTab(1, comparePage, "兩次騎乘比較")
+        self.comparisonTab = comparePage
+        anglePage = QWidget()
+        angleLayout = QVBoxLayout(anglePage)
+        angleLayout.setSpacing(12)
+        angleSetupFrame = QFrame()
+        FluentThemeManager.set_property(angleSetupFrame, "fluentRole", "surface")
+        angleSetupLayout = QVBoxLayout(angleSetupFrame)
+        angleSetupLayout.setContentsMargins(14, 12, 14, 12)
+        angleSetupLayout.setSpacing(8)
+        angleHeading = QHBoxLayout()
+        headingText = QVBoxLayout()
+        headingText.setSpacing(2)
+        headingText.addWidget(QLabel("踩踏角度分析", objectName="sectionTitle"))
+        headingText.addWidget(QLabel("將同次騎乘的 EMG 與踏板資料對齊，查看肌肉在各相位的相對活化。", objectName="muted"))
+        angleHeading.addLayout(headingText)
+        angleHeading.addStretch()
+        angleSetupLayout.addLayout(angleHeading)
+        angleFiles = QHBoxLayout()
+        self.angleEmgButton = QPushButton("1. 選擇 EMG CSV")
+        self.angleEmgButton.setAccessibleDescription("選擇原始肌電資料 CSV 檔")
+        self.anglePedalButton = QPushButton("2. 選擇踏板 CSV")
+        self.anglePedalButton.setAccessibleDescription("選擇同一次騎乘的踏板或校正角度 CSV 檔")
+        self.angleRunButton = QPushButton("開始分析", objectName="primary")
+        self.angleExportButton = QPushButton("匯出 CSV 與圖片")
+        self.angleExportButton.setEnabled(False)
+        FluentThemeManager.set_property(self.angleRunButton, "fluentAppearance", "primary")
+        FluentThemeManager.set_property(self.angleExportButton, "fluentAppearance", "outline")
+        for widget in (self.angleEmgButton, self.anglePedalButton, self.angleRunButton, self.angleExportButton):
+            angleFiles.addWidget(widget)
+        angleFiles.addStretch()
+        angleSetupLayout.addLayout(angleFiles)
+
+        self.angleStatusLabel = QLabel("依序選擇同一次騎乘的 EMG 與踏板 CSV，接著按「開始分析」。", objectName="muted")
+        self.angleStatusLabel.setWordWrap(True)
+        angleSetupLayout.addWidget(self.angleStatusLabel)
+
+        self.angleAdvancedToggle = QToolButton()
+        self.angleAdvancedToggle.setText("進階設定")
+        self.angleAdvancedToggle.setCheckable(True)
+        self.angleAdvancedToggle.setArrowType(Qt.RightArrow)
+        self.angleAdvancedToggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.angleAdvancedToggle.setAccessibleName("展開進階分析設定")
+        self.angleAdvancedToggle.setToolTip("調整分析時間、同步校正與匯出內容")
+        angleSetupLayout.addWidget(self.angleAdvancedToggle, alignment=Qt.AlignLeft)
+        self.angleAdvancedPanel = QFrame()
+        FluentThemeManager.set_property(self.angleAdvancedPanel, "fluentRole", "surface")
+        self.angleAdvancedPanel.setVisible(False)
+        advancedOptions = QGridLayout(self.angleAdvancedPanel)
+        advancedOptions.setContentsMargins(12, 8, 12, 8)
+        advancedOptions.setHorizontalSpacing(10)
+        advancedOptions.setVerticalSpacing(6)
+        self.angleRangeSpins = []
+        for label, key, default in (("前段起", "start0", 5), ("前段迄", "start1", 65),("後段起", "end0", 240), ("後段迄", "end1", 300)):
+            spin = QDoubleSpinBox()
+            spin.setRange(0, 100000)
+            spin.setSuffix(" 秒")
+            spin.setValue(float(self.settings.value(f"angle/{key}", default)))
+            spin.setAccessibleName(label)
+            self.angleRangeSpins.append(spin)
+        advancedOptions.addWidget(QLabel("前段比較時間"), 0, 0)
+        advancedOptions.addWidget(self.angleRangeSpins[0], 0, 1)
+        advancedOptions.addWidget(QLabel("至"), 0, 2)
+        advancedOptions.addWidget(self.angleRangeSpins[1], 0, 3)
+        advancedOptions.addWidget(QLabel("後段比較時間"), 1, 0)
+        advancedOptions.addWidget(self.angleRangeSpins[2], 1, 1)
+        advancedOptions.addWidget(QLabel("至"), 1, 2)
+        advancedOptions.addWidget(self.angleRangeSpins[3], 1, 3)
+        self.angleAutoScaleCheck = QCheckBox("自動校正 EMG 時鐘")
+        self.angleAutoScaleCheck.setChecked(str(self.settings.value("angle/auto_scale", "true")).lower() == "true")
+        self.angleScaleSpin = QDoubleSpinBox()
+        self.angleScaleSpin.setDecimals(5)
+        self.angleScaleSpin.setRange(.8, 1.2)
+        self.angleScaleSpin.setSingleStep(.001)
+        self.angleScaleSpin.setValue(float(self.settings.value("angle/scale", 1.0)))
+        self.angleScaleSpin.setEnabled(not self.angleAutoScaleCheck.isChecked())
+        self.angleOffsetSpin = QDoubleSpinBox()
+        self.angleOffsetSpin.setRange(-30, 30)
+        self.angleOffsetSpin.setDecimals(3)
+        self.angleOffsetSpin.setSuffix(" 秒")
+        self.angleOffsetSpin.setValue(float(self.settings.value("angle/offset_s", 0)))
+        self.angleAutoOffsetCheck = QCheckBox("依典型角度估起點")
+        self.angleAutoOffsetCheck.setToolTip("僅適用已校正上死點的角度 CSV；估計值有文獻與同步誤差。")
+        self.angleAutoOffsetCheck.setChecked(str(self.settings.value("angle/auto_offset", "false")).lower() == "true")
+        self.angleOffsetSpin.setEnabled(not self.angleAutoOffsetCheck.isChecked())
+        advancedOptions.addWidget(self.angleAutoScaleCheck, 2, 0, 1, 2)
+        advancedOptions.addWidget(QLabel("手動比例"), 2, 2)
+        advancedOptions.addWidget(self.angleScaleSpin, 2, 3)
+        advancedOptions.addWidget(QLabel("起點偏移"), 3, 0)
+        advancedOptions.addWidget(self.angleOffsetSpin, 3, 1)
+        advancedOptions.addWidget(self.angleAutoOffsetCheck, 3, 2, 1, 2)
+        self.angleIncludeRawCheck = QCheckBox("匯出時包含完整同步 EMG CSV（檔案較大）")
+        self.angleIncludeRawCheck.setChecked(True)
+        self.angleIncludeRawCheck.setAccessibleDescription("取消勾選可縮小匯出的資料夾")
+        advancedOptions.addWidget(self.angleIncludeRawCheck, 4, 0, 1, 4)
+        angleSetupLayout.addWidget(self.angleAdvancedPanel)
+        angleLayout.addWidget(angleSetupFrame)
+        self.angleViews = QTabWidget()
+        angleOverviewPage = QWidget()
+        angleOverviewLayout = QVBoxLayout(angleOverviewPage)
+        angleOverviewLayout.setContentsMargins(8, 8, 8, 8)
+        overviewFrame = QFrame()
+        FluentThemeManager.set_property(overviewFrame, "fluentRole", "surface")
+        overviewLayout = QVBoxLayout(overviewFrame)
+        overviewLayout.setContentsMargins(12, 10, 12, 10)
+        overviewLayout.addWidget(QLabel("本次分析重點", objectName="sectionTitle"))
+        self.angleOverviewLabel = QLabel("完成分析後，這裡會顯示前後段的可讀摘要。", objectName="muted")
+        self.angleOverviewLabel.setWordWrap(True)
+        self.angleOverviewLabel.setAccessibleName("踩踏角度分析摘要")
+        overviewLayout.addWidget(self.angleOverviewLabel)
+        angleOverviewLayout.addWidget(overviewFrame)
+
+        self.angleOverviewDataTabs = QTabWidget()
+        phasePage = QWidget()
+        phaseLayout = QVBoxLayout(phasePage)
+        phaseLayout.setContentsMargins(8, 8, 8, 8)
+        phaseRow = QHBoxLayout()
+        phaseRow.addWidget(QLabel("查看踩踏相位", objectName="sectionTitle"))
+        self.anglePhaseSpin = QSpinBox()
+        self.anglePhaseSpin.setRange(0, 359)
+        self.anglePhaseSpin.setSingleStep(15)
+        self.anglePhaseSpin.setSuffix("°")
+        self.anglePhaseSpin.setValue(0)
+        self.anglePhaseSpin.setAccessibleName("要比較的踩踏相位")
+        self.anglePhaseSpin.setToolTip("以 0° 至 359° 的相對踩踏相位查看各肌肉訊號")
+        phaseRow.addWidget(self.anglePhaseSpin)
+        phaseRow.addStretch()
+        phaseLayout.addLayout(phaseRow)
+        self.anglePhaseLabel = QLabel("完成分析後，會在這裡直接指出 0° 相對活化最高的肌肉。", objectName="muted")
+        self.anglePhaseLabel.setWordWrap(True)
+        self.anglePhaseLabel.setAccessibleName("踩踏相位肌肉訊號答案")
+        phaseLayout.addWidget(self.anglePhaseLabel)
+        self.anglePhasePlot = pg.PlotWidget(title="0° 肌肉相對 EMG 活化｜藍色：前段；紅色：後段")
+        self.anglePhasePlot.setLabel("bottom", "相對自身參考值", units="%")
+        self.anglePhasePlot.setMinimumHeight(270)
+        self.attachPlotFitButton(self.anglePhasePlot.getPlotItem(), "活化區間圖")
+        phaseLayout.addWidget(self.anglePhasePlot, 1)
+        phaseLayout.addWidget(QLabel("每條肌肉各自正規化；百分比用於比較該肌肉在不同相位的訊號，不代表實際出力或跨肌肉力量。", objectName="muted"))
+        self.angleOverviewDataTabs.addTab(phasePage, "相位活化")
+
+        heatPage = QWidget()
+        heatLayout = QVBoxLayout(heatPage)
+        heatLayout.setContentsMargins(8, 8, 8, 8)
+        self.angleHeatPlot = pg.PlotWidget(title="全肌肉角度熱圖｜每列僅比較自身訊號")
+        self.angleHeatPlot.setLabel("bottom", "相對踩踏相位", units="°")
+        self.angleHeatPlot.setMinimumHeight(250)
+        self.attachPlotFitButton(self.angleHeatPlot.getPlotItem(), "角度熱圖")
+        heatLayout.addWidget(self.angleHeatPlot, 1)
+        self.angleOverviewDataTabs.addTab(heatPage, "全肌肉熱圖")
+
+        comparisonPage = QWidget()
+        comparisonLayout = QVBoxLayout(comparisonPage)
+        comparisonLayout.setContentsMargins(8, 8, 8, 8)
+        comparisonLayout.addWidget(QLabel("前後段數值比較", objectName="sectionTitle"))
+        self.angleComparisonTable = QTableWidget(0, 10)
+        self.angleComparisonTable.setHorizontalHeaderLabels(("肌肉／側別", "前段圈數", "後段圈數", "前段 RMS µV", "後段 RMS µV", "RMS 變化 %", "前段峰值 °", "後段峰值 °", "峰值位移 °", "MDF 變化 Hz"))
+        self.angleComparisonTable.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.angleComparisonTable.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.angleComparisonTable.setAccessibleName("踩踏角度分析前後段比較")
+        self.angleComparisonTable.setMinimumHeight(220)
+        comparisonLayout.addWidget(self.angleComparisonTable, 1)
+        self.angleOverviewDataTabs.addTab(comparisonPage, "前後段數值")
+        angleOverviewLayout.addWidget(self.angleOverviewDataTabs, 1)
+        self.angleViews.addTab(angleOverviewPage, "相位總覽")
+        angleDetailPage = QWidget()
+        angleDetailLayout = QVBoxLayout(angleDetailPage)
+        angleDetailLayout.setContentsMargins(8, 8, 8, 8)
+        selectorRow = QHBoxLayout()
+        selectorRow.addWidget(QLabel("查看肌肉", objectName="sectionTitle"))
+        self.angleMuscleCombo = QComboBox()
+        self.angleMuscleCombo.setAccessibleName("選擇角度曲線肌肉")
+        self.angleMuscleCombo.setMinimumWidth(300)
+        selectorRow.addWidget(self.angleMuscleCombo)
+        selectorRow.addStretch()
+        angleDetailLayout.addLayout(selectorRow)
+        self.angleDetailLabel = QLabel("選擇一個肌肉，查看前後段的相位曲線與峰值變化。", objectName="muted")
+        self.angleDetailLabel.setWordWrap(True)
+        angleDetailLayout.addWidget(self.angleDetailLabel)
+        self.angleCurvePlot = pg.PlotWidget(title="選取肌肉的前段／後段相位曲線")
+        self.angleCurvePlot.setLabel("left", "相對自身參考值", units="%")
+        self.angleCurvePlot.setLabel("bottom", "相對踩踏相位", units="°")
+        self.angleCurvePlot.addLegend()
+        self.angleCurvePlot.showGrid(x=True, y=True, alpha=.18)
+        self.attachPlotFitButton(self.angleCurvePlot.getPlotItem(), "相位曲線")
+        angleDetailLayout.addWidget(self.angleCurvePlot, 1)
+        angleDetailLayout.addWidget(QLabel("藍線＝前段，紅線＝後段；垂直虛線＝各段峰值相位。肌電訊號強度不等於施力大小。", objectName="muted"))
+        self.angleViews.addTab(angleDetailPage, "肌肉細節")
+        angleLayout.addWidget(self.angleViews, 1)
+        self.summaryTabs.insertTab(2, anglePage, "踩踏角度分析")
+        self.angleEmgButton.clicked.connect(self.chooseAngleEmg)
+        self.anglePedalButton.clicked.connect(self.chooseAnglePedal)
+        self.angleRunButton.clicked.connect(self.runAngleAnalysis)
+        self.angleExportButton.clicked.connect(self.exportAngleAnalysis)
+        self.angleMuscleCombo.currentIndexChanged.connect(self.refreshAngleCurve)
+        self.anglePhaseSpin.valueChanged.connect(self.refreshAnglePhase)
+        self.angleComparisonTable.itemSelectionChanged.connect(self.showSelectedAngleMuscle)
+        self.angleAutoScaleCheck.toggled.connect(lambda checked: self.angleScaleSpin.setEnabled(not checked))
+        self.angleAutoOffsetCheck.toggled.connect(lambda checked: self.angleOffsetSpin.setEnabled(not checked))
+        self.angleAdvancedToggle.toggled.connect(self.setAngleAdvancedVisible)
         self.summaryTabs.setCurrentIndex(0)
         layout.addWidget(self.summaryTabs, 1)
         self.importFitButton.clicked.connect(self.importFitSummary)
         self.importEmgAnalysisButton.clicked.connect(self.importEmgAnalysis)
         self.currentSessionSummaryButton.clicked.connect(self.showCurrentSessionSummary)
         self.analysisFtpSpin.valueChanged.connect(self.refreshSummaryAnalysis)
-        self.normalizedCheck.toggled.connect(self.refreshRideAnalysis)
         self.envelopeMuscleCombo.currentIndexChanged.connect(self.refreshRideAnalysis)
-        self.alignmentOffsetSpin.valueChanged.connect(self.setAlignmentOffset)
-        self.loadRideButton.clicked.connect(self.loadRideHistory)
         self.exportReportButton.clicked.connect(self.exportRideReport)
-        self.loadReferenceButton.clicked.connect(self.loadReferenceRide)
-        self.comparisonTable.itemSelectionChanged.connect(self.updateComparisonPlot)
+        self.loadReferenceButton.setText("資料庫 RMS 比較")
+        self.loadReferenceButton.setToolTip("使用資料庫中的兩次 EMG RMS 紀錄進行比較")
+        self.loadReferenceButton.clicked.connect(self.openDatabaseComparison)
+        self.databaseCompareReloadButton.clicked.connect(self.loadDatabaseComparisonPatients)
+        self.databaseComparePatientCombo.currentIndexChanged.connect(self.loadDatabaseComparisonSessions)
+        self.databaseCompareRunButton.clicked.connect(self.refreshDatabaseComparison)
         return tab
 
     def applySummaryPlotTheme(self, *_args) -> None:
         tokens = FluentThemeManager.DARK if QApplication.instance().styleHints().colorScheme().name == "Dark" else FluentThemeManager.LIGHT
-        for widget in (self.summaryPlots, self.ridePlots, self.comparisonPlot):
+        for widget in (self.summaryPlots, self.ridePlots, self.angleCurvePlot,
+                       self.angleHeatPlot, self.anglePhasePlot):
             widget.setBackground(tokens["surface_background"])
         for plot in (self.powerAnalysisPlot, self.cadenceAnalysisPlot, self.balanceAnalysisPlot,
                      self.rmsAverageBarPlot, self.rmsPeakBarPlot, self.emgEnvelopePlot,
-                     self.comparisonPlot.getPlotItem()):
+                     self.angleCurvePlot.getPlotItem(),
+                     self.angleHeatPlot.getPlotItem(), self.anglePhasePlot.getPlotItem()):
             for axis_name in ("left", "bottom"):
                 axis = plot.getAxis(axis_name)
                 axis.setPen(tokens["text_secondary"])
                 axis.setTextPen(tokens["text_primary"])
+        for plot in getattr(self, "databaseComparisonPlots", []):
+            plot.setBackground("#ffffff")
+            for axis_name in ("left", "bottom"):
+                axis = plot.getAxis(axis_name)
+                axis.setPen("#667085")
+                axis.setTextPen("#1f2937")
+            plot.getPlotItem().titleLabel.setAttr("color", "#1f2937")
         if hasattr(self, "plotWidget"):
             self.plotWidget.setBackground(tokens["surface_background"])
             for plot, _curve, stats in self.curves.values():
@@ -916,16 +1498,35 @@ class TrignoWindow(QMainWindow):
                     axis.setPen(tokens["text_secondary"])
                     axis.setTextPen(tokens["text_primary"])
         if hasattr(self, "leftPowerBalanceRing"):
-            self.leftPowerBalanceRing.setThemeColors(
-                tokens["success"], tokens["border_primary"], tokens["text_primary"],
-            )
-            self.rightPowerBalanceRing.setThemeColors(
-                tokens["brand_background"], tokens["border_primary"], tokens["text_primary"],
-            )
+            self.leftPowerBalanceRing.setThemeColors(tokens["success"], tokens["border_primary"], tokens["text_primary"],)
+            self.rightPowerBalanceRing.setThemeColors(tokens["brand_background"], tokens["border_primary"], tokens["text_primary"],)
 
     def onSystemThemeChanged(self, *_args) -> None:
         FluentThemeManager(QApplication.instance()).apply()
         self.applySummaryPlotTheme()
+
+    def attachPlotFitButton(self, plot: pg.PlotItem, chart_name: str, callback=None) -> QToolButton:
+        """Place an independent auto-fit control inside a plot's title row."""
+        button = QToolButton()
+        button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMaxButton))
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        button.setToolTip(f"自動縮放：{chart_name}")
+        button.setAccessibleName(f"自動縮放 {chart_name}")
+
+        def fit_plot() -> None:
+            plot.enableAutoRange(x=True, y=True)
+            plot.autoRange()
+
+        button.clicked.connect(callback or fit_plot)
+        proxy = QGraphicsProxyWidget()
+        proxy.setWidget(button)
+        # PlotItem's first layout row is outside the data ViewBox, so the
+        # icon remains at the upper right while panning or zooming data.
+        plot.layout.addItem(proxy, 0, 2)
+        return button
+
+    def resetLivePlotView(self) -> None:
+        self.refreshPlots()
 
     def createCollectionTab(self) -> QWidget:
         tab = QWidget()
@@ -944,12 +1545,16 @@ class TrignoWindow(QMainWindow):
         self.hostEdit = QLineEdit("127.0.0.1")
         self.hostEdit.setMaximumWidth(200)
         self.testButton, self.startButton, self.stopButton = QPushButton("測試連線"), QPushButton("開始串流", objectName="record"), QPushButton("停止")
+        self.discardButton = QPushButton("捨棄本次測試")
         self.calibrateButton = QPushButton("測量 20 秒基準")
         FluentThemeManager.set_property(self.calibrateButton, "fluentAppearance", "danger")
-        self.calibrationLabel = QLabel("基準：尚未開始", objectName="muted")
+        self.calibrationLabel = QLabel(objectName="muted")
+        self.calibrationLabel.hide()
         FluentThemeManager.set_property(self.startButton, "fluentAppearance", "success")
         FluentThemeManager.set_property(self.stopButton, "fluentAppearance", "danger")
-        for widget in (self.hostEdit, self.testButton, self.startButton, self.calibrateButton, self.stopButton):
+        FluentThemeManager.set_property(self.discardButton, "fluentAppearance", "danger")
+        self.discardButton.setToolTip("刪除剛完成或正在收集的測試檔案與資料庫資料")
+        for widget in (self.hostEdit, self.testButton, self.startButton, self.calibrateButton, self.stopButton, self.discardButton):
             controls.addWidget(widget)
         controls.addWidget(self.calibrationLabel)
         controls.addSpacing(10)
@@ -965,10 +1570,16 @@ class TrignoWindow(QMainWindow):
         self.sampleLabel = QLabel("0 samples", objectName="muted")
         controls.addWidget(self.sampleLabel)
         controls.addStretch()
+        self.recordingIndicator = QLabel("● 錄製中", objectName="recordingIndicator")
+        self.recordingIndicator.hide()
+        controls.addWidget(self.recordingIndicator)
         self.countdownLabel = QLabel(objectName="countdown")
+        self.countdownLabel.setMinimumWidth(112)
+        self.countdownLabel.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.countdownLabel.hide()
         controls.addWidget(self.countdownLabel)
         layout.addLayout(controls)
+        layout.addWidget(self.sessionDevicesPanel)
         metrics = QHBoxLayout()
         self.bikeMetricValues: dict[str, QLabel] = {}
         for key, title, unit in (("speed", "速度", "km/h"),("cadence", "踏頻", "rpm"),("power", "即時功率", "W"),("resistance", "阻力", "level"),):
@@ -1021,8 +1632,8 @@ class TrignoWindow(QMainWindow):
         self.recordCheck = QCheckBox("測量完成後輸出 CSV")
         self.recordCheck.setChecked(True)
         self.recordCheck.setEnabled(False)
-        self.pathEdit = QLineEdit(self.defaultOutputDirectory())
-        self.pathEdit.setPlaceholderText("選擇收集檔案的輸出資料夾")
+        self.pathEdit = QLineEdit()
+        self.pathEdit.setPlaceholderText("請選擇資料輸出資料夾")
         self.browseButton = QPushButton("選擇資料夾")
         for widget in (self.recordCheck, self.pathEdit, self.browseButton):
             recording.addWidget(widget)
@@ -1051,6 +1662,7 @@ class TrignoWindow(QMainWindow):
         self.testButton.clicked.connect(self.testConnection)
         self.startButton.clicked.connect(self.startStream)
         self.stopButton.clicked.connect(self.stopStream)
+        self.discardButton.clicked.connect(self.requestDiscardCurrentTest)
         self.browseButton.clicked.connect(self.chooseOutput)
         self.plotTimer = QTimer(self)
         self.plotTimer.setInterval(80)
@@ -1076,12 +1688,9 @@ class TrignoWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
         controls = QHBoxLayout()
-        self.importBaselineButton = QPushButton("匯入基準 CSV")
-        self.thresholdButton = QPushButton("判定門檻")
-        FluentThemeManager.set_property(self.importBaselineButton, "fluentAppearance", "primary")
-        FluentThemeManager.set_property(self.thresholdButton, "fluentAppearance", "warning")
-        controls.addWidget(self.importBaselineButton)
-        controls.addWidget(self.thresholdButton)
+        self.baselineSettingsButton = QPushButton("基準值與判定設定")
+        FluentThemeManager.set_property(self.baselineSettingsButton, "fluentAppearance", "warning")
+        controls.addWidget(self.baselineSettingsButton)
         controls.addStretch()
         layout.addLayout(controls)
         scroll = QScrollArea()
@@ -1114,8 +1723,7 @@ class TrignoWindow(QMainWindow):
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
         self.updateSensorRows()
-        self.importBaselineButton.clicked.connect(self.importBaselineCsv)
-        self.thresholdButton.clicked.connect(self.editThresholds)
+        self.baselineSettingsButton.clicked.connect(self.showBaselineSettings)
         self.calibrateButton.clicked.connect(self.startBaselineCalibration)
         return panel
 
@@ -1352,6 +1960,8 @@ class TrignoWindow(QMainWindow):
             point = {key: data.get(key) for key in ("power_w", "cadence_rpm", "left_balance_percent", "right_balance_percent", "left_power_w", "right_power_w", "crank_revolutions")}
             point["time_s"] = self.rideTime()
             add_point(self.rideSession, "pedal", point)
+            point["quality_status"] = "VALID"
+            self.databaseAddSample("pedal", point["time_s"], point)
         if self.pedalRecorder:
             try:
                 self.pedalRecorder.append(data)
@@ -1406,27 +2016,25 @@ class TrignoWindow(QMainWindow):
             self.bikeMetricValues["power"].setText(f"{data.powerWatts}")
         sessionDistanceMeters = self.sessionDistanceMeters(data.distanceMeters)
         if sessionDistanceMeters is not None:
-            self.bikeMetricValues["distance"].setText(
-                f"{sessionDistanceMeters / 1000:.2f}"
-            )
+            self.bikeMetricValues["distance"].setText(f"{sessionDistanceMeters / 1000:.2f}")
         if data.resistance is not None:
             self.bikeMetricValues["resistance"].setText(f"{data.resistance:g}")
         if self.rideSession is not None:
-            add_point(self.rideSession, "trainer", {
+            point = {
                 "time_s": self.rideTime(), "resistance_level": self.resistanceSpin.value(),
                 "resistance_native_commanded": self.commandedNativeResistance,
                 "resistance_native_reported": data.resistance, "power_watts": data.powerWatts,
                 "speed_kph": data.speedKph, "cadence_rpm": data.cadenceRpm,
                 "heart_rate_bpm": data.heartRate, "session_distance_meters": sessionDistanceMeters,
-                "energy_kcal": data.energyKcal})
+                "energy_kcal": data.energyKcal}
+            add_point(self.rideSession, "trainer", point)
+            self.databaseAddSample("trainer", point["time_s"], {
+                "distance_km": None if sessionDistanceMeters is None else sessionDistanceMeters / 1000,
+                "speed_kph": data.speedKph, "power_w": data.powerWatts, "cadence_rpm": data.cadenceRpm,
+                "quality_status": "VALID"})
         if self.trainerRecorder:
             try:
-                self.trainerRecorder.append(
-                    data,
-                    self.resistanceSpin.value(),
-                    self.commandedNativeResistance,
-                    sessionDistanceMeters,
-                )
+                self.trainerRecorder.append(data,self.resistanceSpin.value(),self.commandedNativeResistance,sessionDistanceMeters,)
             except OSError as exc:
                 self.appendLog(f"阻力計 CSV 輸出失敗：{exc}")
                 self.trainerRecorder.close()
@@ -1437,9 +2045,11 @@ class TrignoWindow(QMainWindow):
             value.setText("--")
 
     def beginCollectionDistance(self) -> None:
-        """Start a new distance counter for the current EMG collection."""
+        """Start an isolated, plausibility-checked distance counter for this collection."""
         self.collectionDistanceBaselineMeters = self.lastTrainerDistanceMeters
+        self.collectionLastTrainerDistanceMeters = self.lastTrainerDistanceMeters
         self.collectionDistanceMeters = 0
+        self.collectionDistanceUpdatedAt = time.monotonic()
         self.distanceSessionActive = True
         self.bikeMetricValues["distance"].setText("0.00")
 
@@ -1448,12 +2058,38 @@ class TrignoWindow(QMainWindow):
             return self.collectionDistanceMeters
         if not self.distanceSessionActive:
             return totalDistanceMeters
-        if self.collectionDistanceBaselineMeters is None:
+
+        now = time.monotonic()
+        previous = self.collectionLastTrainerDistanceMeters
+        if previous is None:
             self.collectionDistanceBaselineMeters = totalDistanceMeters
-        self.collectionDistanceMeters = max(
-            0,
-            totalDistanceMeters - self.collectionDistanceBaselineMeters,
-        )
+            self.collectionLastTrainerDistanceMeters = totalDistanceMeters
+            self.collectionDistanceUpdatedAt = now
+            return self.collectionDistanceMeters
+
+        elapsed = max(0.1, now - (self.collectionDistanceUpdatedAt or now))
+        increment = totalDistanceMeters - previous
+        # 72 km/h plus a short notification allowance.  This is well above a
+        # rehabilitation ride but filters a stale/corrupt FTMS distance packet.
+        maximum_increment = max(12, int(elapsed * 20) + 4)
+        if increment < 0:
+            # Some trainers reset their total counter. Rebase without adding a
+            # negative distance, then continue accumulating the same session.
+            self.collectionLastTrainerDistanceMeters = totalDistanceMeters
+            self.collectionDistanceUpdatedAt = now
+            return self.collectionDistanceMeters
+        if increment > maximum_increment:
+            if now - self.lastDistanceRejectAt >= 5:
+                self.appendLog(
+                    f"已略略阻力計距離異常跳值：+{increment} m / {elapsed:.1f} s"
+                )
+                self.lastDistanceRejectAt = now
+            self.collectionDistanceUpdatedAt = now
+            return self.collectionDistanceMeters
+
+        self.collectionLastTrainerDistanceMeters = totalDistanceMeters
+        self.collectionDistanceUpdatedAt = now
+        self.collectionDistanceMeters = (self.collectionDistanceMeters or 0) + increment
         return self.collectionDistanceMeters
 
     def scanTrainer(self) -> None:
@@ -1533,6 +2169,9 @@ class TrignoWindow(QMainWindow):
     def setTrainerConnectionState(self, connected: bool) -> None:
         self.setConnectionIndicator(self.trainerConnectionLabel, "阻力計", connected)
 
+    def setDatabaseConnectionState(self, connected: bool) -> None:
+        self.setConnectionIndicator(self.databaseConnectionLabel, "資料庫", connected)
+
     def setEmgConnectionState(self, tested: bool) -> None:
         """Record whether the Trigno SDK test has succeeded."""
         self.emgTested = tested
@@ -1557,24 +2196,10 @@ class TrignoWindow(QMainWindow):
 
     def editMappings(self) -> None:
         active_slots = {index + 1 for index, active in enumerate(self.sensorActive) if active}
-        dialog = MappingEditorDialog(self.mappings, active_slots, self.baselineManager.records, self)
+        dialog = MappingEditorDialog(self.mappings, active_slots, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.mappings = dialog.mappings()
             saveMappings(MAPPING_PATH, self.mappings)
-            for slot, value in dialog.baselineChanges().items():
-                if value is None:
-                    self.baselineManager.records.pop(slot, None)
-                    continue
-                channel = slot - 1
-                previous = self.baselineManager.records.get(slot)
-                serial = previous.sensor_serial if previous else self.sensorSerials.get(slot, "Manual mapping edit")
-                if serial == "Unknown SID":
-                    serial = "Manual mapping edit"
-                self.baselineManager.set_manual(
-                    slot, value, self.mappingIdentity(channel), serial,
-                    self.currentSampleRate, self.filterSettings, "Edited in muscle mapping",
-                )
-            self.baselineManager.save()
             self.updateSensorRows()
             self.syncMuscleMap()
             self.rebuildPlots()
@@ -1584,9 +2209,7 @@ class TrignoWindow(QMainWindow):
             side = mapping.abbreviation.rsplit("-", 1)[-1] if "-" in mapping.abbreviation else ""
             title = f"{side} {mapping.english_name.upper()}" if side in {"R", "L"} else mapping.english_name.upper()
             detected = self.sensorActive[index]
-            self.sensorChecks[index].setLabels(
-                f"S{mapping.slot:02d} · {mapping.chinese_name}", mapping.english_name
-            )
+            self.sensorChecks[index].setLabels(f"S{mapping.slot:02d} · {mapping.chinese_name}", mapping.english_name)
             serial = self.sensorSerials.get(mapping.slot, "未取得 SID")
             tooltip = f"S{mapping.slot:02d} · {title}\nSID：{serial}"
             self.sensorRows[index].setToolTip(tooltip)
@@ -1614,7 +2237,7 @@ class TrignoWindow(QMainWindow):
         percent = "--" if result["percent"] is None else f"{result['percent']:+.1f}%"
         ratio = "--" if result["percent"] is None else f"{1 + result['percent'] / 100:.2f} 倍"
         if channel < len(self.baselineMetricLabels):
-            comparison = f"normalized RMS：{ratio}" if self.normalizedCheck.isChecked() else f"差異：{delta}｜變化：{percent}"
+            comparison = f"差異：{delta}｜變化：{percent}"
             self.baselineMetricLabels[channel].setText(f"目前 RMS：{current}\n基準：{baseline}｜{comparison}")
             self.baselineStatusLabels[channel].setText(result["text"])
             self.baselineStatusLabels[channel].setToolTip("狀態是相對基準偏離程度，並非醫療診斷。")
@@ -1638,20 +2261,15 @@ class TrignoWindow(QMainWindow):
         self.startStream()
 
     def importBaselineCsv(self) -> None:
-        filename, _ = QFileDialog.getOpenFileName(
-            self, "匯入原始 EMG 基準 CSV", self.defaultOutputDirectory(), "CSV files (*.csv)"
-        )
+        filename, _ = QFileDialog.getOpenFileName(self, "匯入原始 EMG 基準 CSV", self.pathEdit.text().strip(), "CSV files (*.csv)")
         if not filename:
             return
         path = Path(filename)
         try:
             _, columns, sample_rate = load_raw_emg_csv(path)
-            normalized = {name.strip().casefold(): name for name in columns}
             channel_columns: list[tuple[int, str]] = []
             for index, mapping in enumerate(self.mappings):
-                english = mapping.english_name.strip()
-                candidates = (f"S{mapping.slot:02d}_{english}", english, mapping.abbreviation.strip())
-                header = next((normalized[candidate.casefold()] for candidate in candidates if candidate and candidate.casefold() in normalized), None)
+                header = next((name for name in columns if matchesCsvColumn(mapping, name)), None)
                 if header is not None:
                     channel_columns.append((index, header))
             if not channel_columns:
@@ -1679,7 +2297,7 @@ class TrignoWindow(QMainWindow):
         self.currentSampleRate = sample_rate
         self.calibrationLabel.setText(f"已匯入 {path.name}：{', '.join(imported)}" + (f"；無效：{', '.join(invalid)}" if invalid else ""))
         self.updateSensorRows()
-        QMessageBox.information(self, "基準 CSV 已匯入", "已用前 20 秒資料（捨棄前 10 秒）建立基準；數值已顯示在各肌肉列。")
+        self.showBaselineSettings()
 
     def editManualBaseline(self) -> None:
         choices = [f"S{index + 1:02d} {mapping.abbreviation or mapping.english_name}" for index, mapping in enumerate(self.mappings)]
@@ -1701,14 +2319,28 @@ class TrignoWindow(QMainWindow):
             return
         self.updateBaselineRow(channel)
 
-    def editThresholds(self) -> None:
-        warning, accepted = QInputDialog.getDouble(self, "研究用判定門檻", "警告偏離百分比：", self.baselineManager.warning_percent, 0.1, 1000, 1)
-        if not accepted:
+    def showBaselineSettings(self) -> None:
+        dialog = BaselineSettingsDialog(self.mappings, self.baselineManager, self.filterSettings, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        focus, accepted = QInputDialog.getDouble(self, "研究用判定門檻", "重點察看偏離百分比：", self.baselineManager.focus_percent, warning + 0.1, 1000, 1)
-        if accepted:
-            self.baselineManager.warning_percent, self.baselineManager.focus_percent = warning, focus
-            self.baselineManager.save()
+        warning, focus = dialog.values()
+        for slot, value in dialog.baseline_changes().items():
+            channel = slot - 1
+            previous = self.baselineManager.records.get(slot)
+            serial = previous.sensor_serial if previous else self.sensorSerials.get(slot, "Manual mapping edit")
+            if serial == "Unknown SID":
+                serial = "Manual mapping edit"
+            self.baselineManager.set_manual(
+                slot, value, self.mappingIdentity(channel), serial,
+                self.currentSampleRate, self.filterSettings, "Edited in baseline settings",
+            )
+        self.baselineManager.thresholds_enabled = True
+        self.baselineManager.warning_percent = warning
+        self.baselineManager.focus_percent = focus
+        self.baselineManager.save()
+        self.updateSensorRows()
+        if dialog.import_requested:
+            self.importBaselineCsv()
 
     def editFilterSettings(self) -> None:
         highpass, accepted = QInputDialog.getDouble(self, "EMG 濾波設定", "高通截止頻率 (Hz)：", self.filterSettings.highpass_hz, 0.1, 1000, 1)
@@ -1728,55 +2360,11 @@ class TrignoWindow(QMainWindow):
         self.baselineManager.save()
         self.updateSensorRows()
 
-    def setThresholdsEnabled(self, enabled: bool) -> None:
-        self.baselineManager.thresholds_enabled = enabled
-        self.baselineManager.save()
-        self.updateSensorRows()
-
     def applyStyles(self) -> None:
         FluentThemeManager(QApplication.instance()).apply()
-        return
-        self.setStyleSheet("""
-            QWidget#root { background: #eef3f8; color: #1e293b; }
-            QLabel#title { font-size: 24px; font-weight: 700; }
-            QLabel#sectionTitle { font-size: 15px; font-weight: 700; }
-            QLabel#muted { color: #64748b; }
-            QLabel#sensorLegendTitle { color: #1e293b; font-size: 12px; font-weight: 400; }
-            QLabel#sensorLegendEnglish { color: #6b6b6b; font-size: 11px; font-weight: 400; }
-            QLabel#bodyCaption { color: #64748b; font-size: 10px; }
-            QLabel#status { padding: 5px 10px; border-radius: 10px; }
-            QLabel#connectionIndicator { padding: 5px 8px; font-weight: 700; }
-            QLabel#countdown { min-width: 90px; font-size: 13px; color: #64748b; }
-            QFrame#metricCard { background: white; border: 1px solid #dbe3ef; border-radius: 7px; }
-            QLabel#metricTitle { color: #64748b; font-size: 11px; font-weight: 600; }
-            QLabel#metricValue { color: #0f172a; font-size: 26px; font-weight: 700; }
-            QLabel#metricUnit { color: #64748b; font-size: 13px; font-weight: 600; }
-            QFrame#eventLogPanel { background: #111827; border: 1px solid #374151; border-radius: 7px; }
-            QLabel#eventLogTitle { color: #f3f4f6; font-size: 13px; font-weight: 700; padding: 0 3px; }
-            QPlainTextEdit#eventLog { background: transparent; color: #d1d5db; border: 0; padding: 3px; font-family: Consolas, monospace; }
-            QFrame#panel { background: #f8fafc; border: 1px solid #dbe3ef; border-radius: 7px; }
-            QFrame#sensorRow { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 7px; }
-            QLineEdit, QSpinBox, QComboBox { padding: 6px; background: white; border: 1px solid #cbd5e1; border-radius: 5px; }
-            QComboBox QAbstractItemView { background: white; color: #1e293b; selection-background-color: #dbeafe; selection-color: #0f172a; outline: 0; }
-            QComboBox QAbstractItemView::item { min-height: 24px; color: #1e293b; background: white; }
-            QComboBox QAbstractItemView::item:hover, QComboBox QAbstractItemView::item:selected { color: #0f172a; background: #dbeafe; }
-            QPushButton { padding: 7px 10px; background: white; border: 1px solid #cbd5e1; border-radius: 5px; }
-            QPushButton#bodyViewButton { padding: 5px 12px; border-radius: 0; }
-            QPushButton#bodyViewButton:checked { background: #2563eb; color: white; border-color: #2563eb; font-weight: 700; }
-            QPushButton#primary { background: #2563eb; border: 0; color: white; font-weight: 600; }
-            QPushButton#record { background: #dc2626; border: 0; color: white; font-weight: 600; }
-            QPushButton:disabled { color: #94a3b8; background: #e2e8f0; }
-            QCheckBox { font-weight: 700; }""")
-
-    def defaultOutputDirectory(self) -> str:
-        return str(Path.cwd() / "recordings")
 
     def subjectInfo(self) -> SubjectInfo:
-        return SubjectInfo(
-            patientId=self.patientIdEdit.text().strip(),
-            name=self.patientNameEdit.text().strip(),
-            gender=self.genderCombo.currentText(),
-        )
+        return SubjectInfo(patientId=self.patientIdEdit.text().strip(),name=self.patientNameEdit.text().strip(),gender=self.genderCombo.currentText(),)
 
     def collectionSetupIsValid(self) -> bool:
         subject = self.subjectInfo()
@@ -1786,45 +2374,33 @@ class TrignoWindow(QMainWindow):
         if not subject.name:
             missing.append("姓名")
         if missing:
-            QMessageBox.warning(
-                self,
-                "缺少病人資訊",
-                "開始收集前請填寫：" + "、".join(missing),
-            )
+            QMessageBox.warning(self,"缺少病人資訊","開始收集前請填寫：" + "、".join(missing),)
             self.tabs.setCurrentWidget(self.settingsTab)
             (self.patientIdEdit if not subject.patientId else self.patientNameEdit).setFocus()
             return False
 
         duplicates = duplicateMappingSlots(self.mappings)
         if duplicates:
-            conflicts = "\n".join(
-                f"{muscle.title()} ({side.upper() or '?' }): "
-                + ", ".join(f"S{slot:02d}" for slot in slots)
+            conflicts = "\n".join(f"{muscle.title()} ({side.upper() or '?' }): "+ ", ".join(f"S{slot:02d}" for slot in slots)
                 for (muscle, side), slots in duplicates.items()
             )
-            QMessageBox.warning(
-                self,
-                "重複肌肉對應",
-                "請先修正感測器對應，再開始收集：\n" + conflicts,
-            )
+            QMessageBox.warning(self,"重複肌肉對應","請先修正感測器對應，再開始收集：\n" + conflicts,)
             self.tabs.setCurrentWidget(self.settingsTab)
             return False
         return True
 
     def outputPathForCollection(self, directory: Path) -> Path:
-        """Generate a collision-free, patient-ID based EMG file name."""
         patientId = self.subjectInfo().patientId
         invalid = '\\/:*?"<>|'
         safeId = "".join(character for character in patientId if character not in invalid).strip()
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        candidate = directory / f"{safeId}_EMG_{timestamp}.csv"
+        date = datetime.now().strftime("%Y%m%d")
+        candidate = directory / f"{safeId}_EMG_{date}.csv"
         suffix = 2
-        while candidate.exists() or infoOutputPath(candidate).exists() or (
-            self.useTrainerCheck.isChecked() and self.trainerIsConnected and trainerOutputPath(candidate).exists()
-        ) or (
-            self.usePedalCheck.isChecked() and self.pedalIsConnected and pedalOutputPath(candidate).exists()
-        ):
-            candidate = directory / f"{safeId}_EMG_{timestamp}_{suffix:02d}.csv"
+        while candidate.exists() or infoOutputPath(candidate).exists() or analysisOutputPath(candidate).exists() or (
+            self.useTrainerCheck.isChecked() and self.trainerIsConnected and trainerOutputPath(candidate).exists()) or (
+            self.usePedalCheck.isChecked() and self.pedalIsConnected and (
+                pedalOutputPath(candidate).exists() or pedalOutputPath(candidate).with_suffix(".fit").exists())):
+            candidate = directory / f"{safeId}_EMG_{date}_{suffix:02d}.csv"
             suffix += 1
         return candidate
 
@@ -1846,6 +2422,7 @@ class TrignoWindow(QMainWindow):
         self.startButton.setEnabled(not streaming and not testing)
         self.calibrateButton.setEnabled(not streaming and not testing)
         self.stopButton.setEnabled(streaming)
+        self.discardButton.setEnabled(streaming or self.collectedRideSession is not None)
         self.hostEdit.setEnabled(not streaming and not testing)
         self.testButton.setEnabled(not streaming and not testing)
         self.recordCheck.setEnabled(False)
@@ -1853,6 +2430,7 @@ class TrignoWindow(QMainWindow):
         self.durationSecondsSpin.setEnabled(not streaming)
         self.pathEdit.setEnabled(not streaming and self.recordCheck.isChecked())
         self.browseButton.setEnabled(not streaming and self.recordCheck.isChecked())
+        self.recordingIndicator.setVisible(streaming)
         for check in (self.useEmgCheck, self.useTrainerCheck, self.usePedalCheck):
             check.setEnabled(not streaming)
 
@@ -1918,15 +2496,16 @@ class TrignoWindow(QMainWindow):
         return max(0.0, time.monotonic() - self.rideStartedAt)
 
     def beginRideAnalysis(self) -> None:
+        self.angleEmgPath = None
+        self.anglePedalPath = None
+        self.angleAnalysisResult = None
+        self.discardCurrentCollection = False
+        self.databaseLastTestId = None
+        self.angleExportButton.setEnabled(False)
         baselines = {str(slot): asdict(record) for slot, record in self.baselineManager.records.items()}
         self.rideSession = new_session(asdict(self.collectionSubject), baselines)
         self.rideSession["filter"] = asdict(self.filterSettings)
         self.rideSession["channels"] = {}
-        self.loadedRidePath = None
-        self.collectedRidePath = None
-        self.alignmentOffsetSpin.blockSignals(True)
-        self.alignmentOffsetSpin.setValue(0.0)
-        self.alignmentOffsetSpin.blockSignals(False)
         self.rideSession["raw_files"] = {
             name: path.name for name, path in (("emg", self.collectionOutput),
                 ("pedal", self.pedalOutput), ("trainer", self.trainerOutput))
@@ -1944,38 +2523,113 @@ class TrignoWindow(QMainWindow):
         session, self.rideSession = self.rideSession, None
         if session is None:
             return
+        if self.discardCurrentCollection:
+            self.finalizeDiscardedTest(active_database_writer=True)
+            return
+        result = analyze(session)
+        self.finishDatabaseRecording(result)
         self.latestRideSession = session
         self.collectedRideSession = session
+        self.angleEmgPath = self.collectionOutput if self.collectionOutput and self.collectionOutput.is_file() else None
+        self.anglePedalPath = self.pedalOutput if self.pedalOutput and self.pedalOutput.is_file() else None
         self.summarySourceLabel.setText("資料來源：本次騎乘，分析完成")
         if self.collectionOutput:
-            path = self.collectionOutput.with_suffix(".analysis.json")
+            path = analysisOutputPath(self.collectionOutput)
             try:
-                session["aligned_1s"] = analyze(session)["aligned"]
+                session["aligned_1s"] = result["aligned"]
                 save_session(path, session)
-                self.loadedRidePath = path
-                self.collectedRidePath = path
                 self.appendLog(f"騎乘分析已保存：{path.name}")
             except (OSError, ValueError) as exc:
                 QMessageBox.warning(self, "無法保存分析", str(exc))
         self.refreshRideAnalysis()
         self.refreshComparison()
 
+    def requestDiscardCurrentTest(self) -> None:
+        """Ask before permanently deleting the current collection and its database rows."""
+        has_current_test = self.rideSession is not None or self.collectedRideSession is not None
+        if not has_current_test:
+            QMessageBox.information(self, "捨棄本次測試", "目前沒有可捨棄的本次測試。")
+            return
+        choice = QMessageBox.question(
+            self, "捨棄本次測試",
+            "將刪除本次測試的 EMG、踏板、阻力計、資訊與分析檔，並刪除資料庫中的同次測試資料。\n\n此操作無法復原，是否繼續？",
+            QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if choice != QMessageBox.StandardButton.Discard:
+            return
+        if self.rideSession is not None:
+            self.discardCurrentCollection = True
+            self.discardButton.setEnabled(False)
+            self.stopStream()
+            return
+        self.finalizeDiscardedTest(active_database_writer=False)
+
+    def finalizeDiscardedTest(self, active_database_writer: bool) -> None:
+        """Clear the rejected session only after all recorders have stopped."""
+        self.discardDatabaseRecording(active_database_writer)
+        removed, failures = self.removeCurrentCollectionFiles()
+        self.discardCurrentCollection = False
+        self.rideSession = None
+        self.latestRideSession = None
+        self.collectedRideSession = None
+        self.latestPedalRecords = []
+        self.summaryRecords = []
+        self.angleEmgPath = None
+        self.anglePedalPath = None
+        self.angleAnalysisResult = None
+        self.angleExportButton.setEnabled(False)
+        self.currentSessionSummaryButton.setEnabled(False)
+        self.exportReportButton.setEnabled(False)
+        self.rideMuscleTable.setRowCount(0)
+        self.rideStateLabel.setText("本次測試已捨棄")
+        FluentThemeManager.set_property(self.rideStateLabel, "fluentSeverity", "warning")
+        self.summarySourceLabel.setText("本次測試已捨棄，未保留分析資料")
+        self.refreshSummaryAnalysis()
+        self.refreshComparison()
+        self.discardButton.setEnabled(False)
+        detail = f"已刪除 {removed} 個檔案" if removed else "沒有需要刪除的檔案"
+        if failures:
+            detail += f"；{len(failures)} 個檔案無法刪除"
+        self.appendLog(f"本次測試已捨棄：{detail}")
+        if failures:
+            QMessageBox.warning(self, "部分檔案未刪除", "\n".join(failures))
+
+    def removeCurrentCollectionFiles(self) -> tuple[int, list[str]]:
+        """Delete only files derived from this collection's exact output names."""
+        paths = {path for path in (self.collectionOutput, self.infoOutput, self.trainerOutput, self.pedalOutput) if path}
+        if self.collectionOutput:
+            paths.add(analysisOutputPath(self.collectionOutput))
+        if self.pedalOutput:
+            paths.add(self.pedalOutput.with_suffix(".fit"))
+        removed, failures = 0, []
+        for path in paths:
+            try:
+                if path.is_file():
+                    path.unlink()
+                    removed += 1
+            except OSError as exc:
+                failures.append(f"{path.name}：{exc}")
+        return removed, failures
+
     def refreshLiveRideSummary(self) -> None:
-        if self.rideSession is not None and self.tabs.currentWidget() is self.summaryTab:
+        if self.rideSession is None:
+            return
+        if self.tabs.currentWidget() is self.summaryTab:
             if self.summaryTabs.currentIndex() == 0:
                 self.refreshRideAnalysis()
-            elif self.summaryTabs.currentIndex() == 1 and self.referenceRideSession is not None:
-                self.refreshComparison()
-            elif self.summaryTabs.currentIndex() in (2, 3) and self.pedalRecorder is not None and self.pedalSummarySource == "current":
+            elif self.summaryTabs.currentIndex() == 1 and self.pedalRecorder is not None and self.pedalSummarySource == "current":
                 if len(self.summaryRecords) != len(self.pedalRecorder.records):
                     self.summaryRecords = list(self.pedalRecorder.records)
                     self.refreshSummaryAnalysis()
+        elif self.tabs.currentWidget() is self.comparisonTab and self.referenceRideSession is not None:
+            self.refreshComparison()
 
     def refreshRideAnalysis(self) -> None:
         session = self.rideSession or self.latestRideSession
         if session is None:
             return
-        normalized = self.normalizedCheck.isChecked()
+        normalized = False
         result = analyze(session, normalized)
         self.rideEmptyLabel.hide()
         self.rideMuscleTable.setRowCount(len(result["emg"]))
@@ -2036,10 +2690,8 @@ class TrignoWindow(QMainWindow):
         self.envelopeMuscleCombo.setEnabled(self.envelopeMuscleCombo.count() > 0)
         self.envelopeMuscleCombo.blockSignals(False)
         selected_slot = self.envelopeMuscleCombo.currentData()
-        self.emgEnvelopePlot.setTitle(
-            f"EMG RMS Peak 包絡線（每 1 秒最高值）— {self.envelopeMuscleCombo.currentText()}"
-            if selected_slot is not None else "EMG RMS Peak 包絡線（每 1 秒最高值）"
-        )
+        self.emgEnvelopePlot.setTitle(f"EMG RMS Peak 包絡線（每 1 秒最高值）— {self.envelopeMuscleCombo.currentText()}"
+            if selected_slot is not None else "EMG RMS Peak 包絡線（每 1 秒最高值）")
         if selected_slot is not None:
             slot = str(selected_slot)
             rows = [row for row in session["emg"] if str(row.get("slot")) == slot]
@@ -2047,27 +2699,19 @@ class TrignoWindow(QMainWindow):
             envelope = peak_envelope(rows)
             if envelope:
                 stride = max(1, len(envelope) // 2000)
-                self.emgEnvelopePlot.plot(
-                    [point[0] + offset for point in envelope[::stride]],
-                    [point[1] for point in envelope[::stride]],
-                    pen=pg.mkPen(COLORS[(int(slot) - 1) % len(COLORS)], width=2),
-                    name=f"S{int(slot):02d}",
-                )
+                self.emgEnvelopePlot.plot([point[0] + offset for point in envelope[::stride]],[point[1] for point in envelope[::stride]],
+                    pen=pg.mkPen(COLORS[(int(slot) - 1) % len(COLORS)], width=2),name=f"S{int(slot):02d}",)
 
     def importEmgAnalysis(self) -> None:
         if self.emgAnalysisImportWorker is not None:
             return
-        filename, _ = QFileDialog.getOpenFileName(
-            self, "匯入 EMG 分析 CSV", self.defaultOutputDirectory(), "EMG CSV (*.csv)"
-        )
+        filename, _ = QFileDialog.getOpenFileName(self, "匯入 EMG 分析 CSV", self.pathEdit.text().strip(), "EMG CSV (*.csv)")
         if not filename:
             return
         path = Path(filename)
         baselines = {str(slot): asdict(record) for slot, record in self.baselineManager.records.items()}
         self.importEmgAnalysisButton.setEnabled(False)
-        worker = EMGAnalysisImportWorker(
-            path, list(self.mappings), baselines, asdict(self.collectionSubject), self.filterSettings,
-        )
+        worker = EMGAnalysisImportWorker(path, list(self.mappings), baselines, asdict(self.collectionSubject), self.filterSettings,)
         self.emgAnalysisImportWorker = worker
         worker.completed.connect(self.emgAnalysisImported)
         worker.failed.connect(self.emgAnalysisImportFailed)
@@ -2077,10 +2721,13 @@ class TrignoWindow(QMainWindow):
 
     def emgAnalysisImported(self, session: dict, filename: str) -> None:
         self.latestRideSession = session
+        self.angleEmgPath = Path(filename)
+        paired_pedal = pedalOutputPath(self.angleEmgPath)
+        self.anglePedalPath = paired_pedal if paired_pedal.is_file() else None
+        self.angleAnalysisResult = None
+        self.angleExportButton.setEnabled(False)
         self.collectedRideSession = None
-        self.loadedRidePath = None
-        self.collectedRidePath = None
-        self.summarySourceLabel.setText(f"資料來源：匯入 EMG CSV — {filename}")
+        self.summarySourceLabel.setText(f"資料來源：匯入 EMG CSV — {Path(filename).name}")
         self.refreshRideAnalysis()
         self.summaryTabs.setCurrentIndex(0)
 
@@ -2091,122 +2738,545 @@ class TrignoWindow(QMainWindow):
         self.importEmgAnalysisButton.setEnabled(True)
         self.emgAnalysisImportWorker = None
 
-    def loadRideHistory(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "載入歷史騎乘", self.pathEdit.text(), "分析檔 (*.analysis.json)")
-        if not path:
+    def openDatabaseComparison(self) -> None:
+        self.tabs.setCurrentWidget(self.comparisonTab)
+        self.loadDatabaseComparisonPatients()
+
+    def _comparisonStore(self) -> SqlServerStorage | None:
+        if self.activeDatabaseConfig is None:
+            self.comparisonStatusLabel.setText("請先到「設定」頁輸入 SQL Server 帳密並完成測試連線。")
+            return None
+        return SqlServerStorage(self.activeDatabaseConfig)
+
+    def loadDatabaseComparisonPatients(self) -> None:
+        store = self._comparisonStore()
+        if store is None:
             return
         try:
-            self.latestRideSession = load_session(Path(path))
-        except (OSError, ValueError, TypeError) as exc:
-            QMessageBox.warning(self, "無法載入騎乘分析", str(exc))
+            patients = store.list_patients_with_emg()
+        except Exception as exc:
+            self.comparisonStatusLabel.setText(f"無法讀取資料庫病人：{exc}")
             return
-        self.summarySourceLabel.setText(f"歷史騎乘：{Path(path).name}")
-        self.loadedRidePath = Path(path)
-        self.alignmentOffsetSpin.blockSignals(True)
-        self.alignmentOffsetSpin.setValue(float(self.latestRideSession.get("emg_trainer_offset_s", 0)))
-        self.alignmentOffsetSpin.blockSignals(False)
-        self.refreshRideAnalysis()
-        self.refreshComparison()
-        self.summaryTabs.setCurrentIndex(0)
-
-    def setAlignmentOffset(self, value: float) -> None:
-        session = self.rideSession or self.latestRideSession
-        if session is None:
+        finally:
+            store.close()
+        self.databaseComparePatientCombo.blockSignals(True)
+        self.databaseComparePatientCombo.clear()
+        for patient in patients:
+            name = str(patient["name"] or "未填姓名")
+            self.databaseComparePatientCombo.addItem(f'{patient["patient_id"]} · {name}（{patient["test_count"]} 次）', patient["patient_id"])
+        self.databaseComparePatientCombo.blockSignals(False)
+        if not patients:
+            self.clearDatabaseComparisonCards()
+            self.comparisonStatusLabel.setText("資料庫目前沒有可比較的 EMG RMS 量測紀錄。")
             return
-        session["emg_trainer_offset_s"] = value
-        self.refreshRideAnalysis()
-        if self.rideSession is None and self.loadedRidePath is not None:
-            try:
-                session["aligned_1s"] = analyze(session)["aligned"]
-                save_session(self.loadedRidePath, session)
-            except (OSError, ValueError) as exc:
-                QMessageBox.warning(self, "無法儲存對齊設定", str(exc))
+        self.loadDatabaseComparisonSessions()
 
-    def loadReferenceRide(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "選取第一次騎乘", self.pathEdit.text(), "分析檔 (*.analysis.json)")
-        if not path:
+    @staticmethod
+    def _databaseSessionLabel(session: dict) -> str:
+        created = session.get("created_at")
+        timestamp = created.strftime("%Y-%m-%d %H:%M") if isinstance(created, datetime) else "--"
+        duration = session.get("test_time")
+        duration_text = f"{int(duration)} 秒" if duration is not None else "時間未記錄"
+        resistance = session.get("resistance_level")
+        resistance_text = f"阻力 {float(resistance):g}" if resistance is not None else "阻力未記錄"
+        return f"{timestamp} ｜ {duration_text} ｜ {resistance_text}"
+
+    def loadDatabaseComparisonSessions(self, *_args) -> None:
+        patient_id = self.databaseComparePatientCombo.currentData()
+        if not patient_id:
+            return
+        store = self._comparisonStore()
+        if store is None:
             return
         try:
-            self.referenceRideSession = load_session(Path(path))
-        except (OSError, ValueError, TypeError) as exc:
-            QMessageBox.warning(self, "無法載入第一次騎乘", str(exc))
+            sessions = store.list_emg_sessions(str(patient_id))
+        except Exception as exc:
+            self.comparisonStatusLabel.setText(f"無法讀取量測紀錄：{exc}")
             return
-        self.loadReferenceButton.setText(f"第一次：{Path(path).name}")
-        self.refreshComparison()
-        self.summaryTabs.setCurrentIndex(1)
+        finally:
+            store.close()
+        for combo in (self.databaseCompareACombo, self.databaseCompareBCombo):
+            combo.blockSignals(True)
+            combo.clear()
+            for session in sessions:
+                combo.addItem(self._databaseSessionLabel(session), session)
+            combo.blockSignals(False)
+        if len(sessions) < 2:
+            self.clearDatabaseComparisonCards()
+            self.comparisonStatusLabel.setText("此病人需要至少兩次含 RMS 資料的量測，才能比較。")
+            return
+        self.databaseCompareACombo.setCurrentIndex(0)
+        self.databaseCompareBCombo.setCurrentIndex(1)
+        self.clearDatabaseComparisonCards()
+        self.comparisonStatusLabel.setText("已載入兩次量測選項，請確認 A、B 與前後段秒數，再按「比較 RMS」顯示結果。")
+
+    @staticmethod
+    def _comparisonSide(muscle_name: str) -> str:
+        name = muscle_name.upper().strip()
+        if name.startswith("右") or "-R)" in name or name.endswith("-R"):
+            return "R"
+        if name.startswith("左") or "-L)" in name or name.endswith("-L"):
+            return "L"
+        return ""
+
+    @staticmethod
+    def _comparisonMean(points: list[dict], start: float, end: float) -> float | None:
+        values = [float(point["rms_mv"]) for point in points if point["time_s"] is not None and start <= float(point["time_s"]) <= end and point["rms_mv"] is not None]
+        return float(np.mean(values)) if values else None
+
+    def clearDatabaseComparisonCards(self) -> None:
+        self.databaseComparisonPlots = []
+        for layout in self.databaseComparisonLayouts.values():
+            while layout.count():
+                item = layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            layout.addStretch()
 
     def refreshComparison(self) -> None:
-        first, second = self.referenceRideSession, self.rideSession or self.latestRideSession
-        if first is None or second is None:
-            self.comparisonStatusLabel.setText("選取第一次騎乘，再使用本次或載入歷史騎乘作為第二次。")
-            self.comparisonTable.setRowCount(0)
-            self.comparisonPlot.clear()
-            return
-        result = compare_sessions(first, second)
-        self.comparisonStatusLabel.setText("第一次／第二次依相同肌肉、側別、感測器及濾波設定配對。差異 = 第二次 − 第一次。")
-        bilateral = [f"{item['muscle']} 右−左相對活化：{item['first_right_minus_left_percent']:+.1f}% → {item['second_right_minus_left_percent']:+.1f}%"
-                     for item in result["bilateral"]
-                     if item["first_right_minus_left_percent"] is not None and item["second_right_minus_left_percent"] is not None]
-        self.comparisonNotes.setText("\n".join([*bilateral, *result["notes"]]))
-        previous_row = self.comparisonTable.currentRow()
-        self.comparisonTable.blockSignals(True)
-        self.comparisonTable.setRowCount(len(result["channels"]))
-        for row, entry in enumerate(result["channels"]):
-            a, b = entry["first"], entry["second"]
-            def fmt(value, signed=False, digits=3):
-                return "--" if value is None else f"{value:+.{digits}f}" if signed else f"{value:.{digits}f}"
-            cells = (entry["label"], fmt(a["median_mv"]), fmt(b["median_mv"]),
-                     fmt(entry["median_difference_mv"], True), fmt(entry["median_change_percent"], True, 1),
-                     f"{fmt(a['p90_mv'])} / {fmt(b['p90_mv'])}", entry["quality"])
-            for column, value in enumerate(cells):
-                item = QTableWidgetItem(value)
-                if column > 0:
-                    item.setTextAlignment(Qt.AlignCenter)
-                self.comparisonTable.setItem(row, column, item)
-        self.comparisonTable.blockSignals(False)
-        self.comparisonResult = result
-        if result["channels"]:
-            self.comparisonTable.selectRow(max(0, min(previous_row, len(result["channels"]) - 1)))
-            self.updateComparisonPlot()
-        else:
-            self.comparisonPlot.clear()
+        self.refreshDatabaseComparison()
 
-    def updateComparisonPlot(self) -> None:
-        self.comparisonPlot.clear()
-        first, second = self.referenceRideSession, self.rideSession or self.latestRideSession
-        if first is None or second is None or not hasattr(self, "comparisonResult"):
+    def refreshDatabaseComparison(self, *_args) -> None:
+        first = self.databaseCompareACombo.currentData()
+        second = self.databaseCompareBCombo.currentData()
+        if not isinstance(first, dict) or not isinstance(second, dict):
             return
-        row = self.comparisonTable.currentRow()
-        entries = self.comparisonResult["channels"]
-        if row < 0 or row >= len(entries):
+        if first["test_id"] == second["test_id"]:
+            self.clearDatabaseComparisonCards()
+            self.comparisonStatusLabel.setText("請選擇兩次不同的量測紀錄。")
             return
-        slot = entries[row]["slot"]
+        store = self._comparisonStore()
+        if store is None:
+            return
+        try:
+            first_rows = store.load_emg_rms_series(first["test_id"])
+            second_rows = store.load_emg_rms_series(second["test_id"])
+        except Exception as exc:
+            self.comparisonStatusLabel.setText(f"無法讀取 RMS 資料：{exc}")
+            return
+        finally:
+            store.close()
+        self.renderDatabaseComparison(first, second, first_rows, second_rows)
+
+    def renderDatabaseComparison(self, first: dict, second: dict, first_rows: list[dict], second_rows: list[dict]) -> None:
+        early, late = self.databaseCompareEarlySpin.value(), self.databaseCompareLateSpin.value()
+        grouped: list[dict[str, list[dict]]] = []
+        for rows in (first_rows, second_rows):
+            by_muscle: dict[str, list[dict]] = {}
+            for row in rows:
+                name = str(row.get("muscle_name") or "").strip() or "未命名肌肉"
+                by_muscle.setdefault(name, []).append(row)
+            grouped.append(by_muscle)
+        names = sorted(set(grouped[0]) | set(grouped[1]), key=lambda value: (self._comparisonSide(value), value))
+        durations = [max((float(row["time_s"]) for row in rows if row.get("time_s") is not None), default=-1) for rows in (first_rows, second_rows)]
+        invalid_windows = [label for label, duration in zip(("量測 A", "量測 B"), durations, strict=True) if duration + 1 < early or duration + 1 < late]
+        self.clearDatabaseComparisonCards()
+        if not names:
+            self.comparisonStatusLabel.setText("選取的量測沒有可用 RMS 資料。")
+            return
+        for name in names:
+            first_points, second_points = grouped[0].get(name, []), grouped[1].get(name, [])
+            side = self._comparisonSide(name)
+            first_end = max((float(point["time_s"]) for point in first_points if point.get("time_s") is not None), default=-1)
+            second_end = max((float(point["time_s"]) for point in second_points if point.get("time_s") is not None), default=-1)
+            first_early = self._comparisonMean(first_points, 0, early - 1) if first_end + 1 >= early else None
+            second_early = self._comparisonMean(second_points, 0, early - 1) if second_end + 1 >= early else None
+            first_late = self._comparisonMean(first_points, max(0, first_end - late + 1), first_end) if first_end + 1 >= late else None
+            second_late = self._comparisonMean(second_points, max(0, second_end - late + 1), second_end) if second_end + 1 >= late else None
+            status = []
+            if not first_points:
+                status.append("量測 A 無資料")
+            if not second_points:
+                status.append("量測 B 無資料")
+            if first_end + 1 < early or second_end + 1 < early:
+                status.append("前段時長不足")
+            if first_end + 1 < late or second_end + 1 < late:
+                status.append("後段時長不足")
+            self.addDatabaseComparisonCard(side, name, first, second, first_early, second_early, first_late, second_late, first_points, second_points, "；".join(status) or "可比較")
+        note = "；".join(invalid_windows) + " 的指定時段超過量測長度，請縮短秒數。" if invalid_windows else "每條曲線均保留各自完整量測時間，未拉伸或裁切。"
+        self.comparisonStatusLabel.setText(f"病人 {self.databaseComparePatientCombo.currentData()} ｜ A：{self._databaseSessionLabel(first)} ｜ B：{self._databaseSessionLabel(second)}。{note}")
+        self.comparisonNotes.setText("數值為 AvgRMSmV 的平均值，未除以個人基準值。缺少肌肉或 RMS 時顯示「無資料」，不以 0 代替。資料庫沒有保存取樣率與濾波參數，請確認兩次採用相同設定。")
+        self.databaseComparisonTabs.setCurrentIndex(0 if self.databaseComparisonLayouts["R"].count() > 1 else 1)
+
+    def addDatabaseComparisonCard(self, side: str, muscle_name: str, first: dict, second: dict, first_early: float | None, second_early: float | None, first_late: float | None, second_late: float | None, first_points: list[dict], second_points: list[dict], status: str) -> None:
+        layout = self.databaseComparisonLayouts[side]
+        card = QFrame()
+        FluentThemeManager.set_property(card, "comparisonRole", "card")
+        row = QHBoxLayout(card)
+        row.setContentsMargins(16, 14, 16, 14)
+        row.setSpacing(18)
+
+        numbers = QWidget()
+        numbers.setMinimumWidth(370)
+        numbers.setMaximumWidth(400)
+        numbers_layout = QVBoxLayout(numbers)
+        numbers_layout.setContentsMargins(0, 0, 0, 0)
+        numbers_layout.setSpacing(6)
+        numbers_layout.addWidget(QLabel(muscle_name, objectName="sectionTitle"))
+        table = QTableWidget(2, 2)
+        table.setHorizontalHeaderLabels(("量測 A 平均 RMS (mV)", "量測 B 平均 RMS (mV)"))
+        table.setVerticalHeaderLabels((f"前 {self.databaseCompareEarlySpin.value()} 秒", f"後 {self.databaseCompareLateSpin.value()} 秒"))
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setMaximumWidth(400)
+        table.setMinimumHeight(118)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.verticalHeader().setVisible(True)
+        table.verticalHeader().setDefaultSectionSize(30)
+        table.verticalHeader().setFixedWidth(66)
+
+        def value_text(value: float | None) -> str:
+            return "無資料" if value is None else f"{value:.4f} mV"
+
+        for row_index, values in enumerate(((first_early, second_early), (first_late, second_late))):
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value_text(value))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                table.setItem(row_index, column, item)
+        numbers_layout.addWidget(table)
+        if status:
+            numbers_layout.addWidget(QLabel(status, objectName="muted"))
+        numbers_layout.addStretch(1)
+        row.addWidget(numbers, 2)
+
+        chart = QWidget()
+        chart_layout = QVBoxLayout(chart)
+        chart_layout.setContentsMargins(0, 0, 0, 0)
+        chart_layout.setSpacing(5)
         tokens = FluentThemeManager.DARK if QApplication.instance().styleHints().colorScheme().name == "Dark" else FluentThemeManager.LIGHT
-        for session, name, color in ((first, "第一次", tokens["text_secondary"]),
-                                     (second, "第二次", tokens["brand_background"])):
-            points = [(sample["time_s"], sample["rms_mv"]) for sample in session.get("emg", [])
-                      if str(sample.get("slot")) == slot and sample.get("rms_mv") is not None]
-            if points:
-                stride = max(1, len(points) // 1500)
-                points = points[::stride]
-                self.comparisonPlot.plot([point[0] for point in points], [point[1] for point in points],
-                                         pen=pg.mkPen(color, width=2), name=name)
+        series_colors = (tokens["brand_background"], tokens["danger"])
+
+        def legend_item(color: str, text: str) -> QWidget:
+            item = QWidget()
+            item_layout = QHBoxLayout(item)
+            item_layout.setContentsMargins(0, 0, 0, 0)
+            item_layout.setSpacing(5)
+            swatch = QFrame()
+            swatch.setFixedSize(11, 11)
+            swatch_palette = swatch.palette()
+            swatch_palette.setColor(QPalette.ColorRole.Window, QColor(color))
+            swatch.setPalette(swatch_palette)
+            swatch.setAutoFillBackground(True)
+            item_layout.addWidget(swatch)
+            item_layout.addWidget(QLabel(text, objectName="muted"))
+            return item
+
+        chart_header = QHBoxLayout()
+        chart_header.setContentsMargins(2, 0, 2, 0)
+        chart_header.setSpacing(8)
+        chart_header.addWidget(QLabel(f"{muscle_name}｜完整 RMS 曲線", objectName="sectionTitle"))
+        chart_header.addStretch(1)
+        chart_header.addWidget(legend_item(series_colors[0], "量測 A"))
+        chart_header.addSpacing(12)
+        chart_header.addWidget(legend_item(series_colors[1], "量測 B"))
+        chart_layout.addLayout(chart_header)
+        plot = pg.PlotWidget()
+        plot.setMinimumHeight(270)
+        plot.setBackground("#ffffff")
+        plot.setLabel("bottom", "量測開始後時間", units="s")
+        plot.setLabel("left", "RMS", units="mV")
+        plot.showGrid(x=True, y=True, alpha=0.16)
+        plot.getViewBox().setDefaultPadding(0.0)
+        for axis_name in ("left", "bottom"):
+            axis = plot.getAxis(axis_name)
+            axis.setPen("#667085")
+            axis.setTextPen("#1f2937")
+            axis.setStyle(tickTextOffset=8)
+        max_x = 1.0
+        plotted_values: list[float] = []
+        series_specs = (
+            (first_points, series_colors[0]),
+            (second_points, series_colors[1]),
+        )
+        for points, color in series_specs:
+            series = [(float(point["time_s"]), float(point["rms_mv"])) for point in points if point.get("time_s") is not None and point.get("rms_mv") is not None]
+            if series:
+                stride = max(1, len(series) // 1500)
+                x, y = zip(*series[::stride])
+                max_x = max(max_x, max(x))
+                plotted_values.extend(y)
+                plot.plot(x, y, pen=pg.mkPen(color, width=2.4))
+
+        def fit_plot() -> None:
+            plot.setXRange(0, max_x, padding=0.0)
+            if not plotted_values:
+                return
+            low, high = min(plotted_values), max(plotted_values)
+            padding = (high - low) * 0.08
+            if padding == 0:
+                padding = max(abs(high) * 0.08, 0.001)
+            plot.setYRange(low - padding, high + padding, padding=0.0)
+
+        self.attachPlotFitButton(plot.getPlotItem(), "完整 RMS 曲線", fit_plot)
+        fit_plot()
+        chart_layout.addWidget(plot, 1)
+        row.addWidget(chart, 5)
+        self.databaseComparisonPlots.append(plot)
+        layout.insertWidget(max(0, layout.count() - 1), card)
+
+    def setAngleAdvancedVisible(self, visible: bool) -> None:
+        self.angleAdvancedPanel.setVisible(visible)
+        self.angleAdvancedToggle.setArrowType(Qt.DownArrow if visible else Qt.RightArrow)
+        self.angleAdvancedToggle.setText("收合進階設定" if visible else "進階設定")
+
+    def updateAngleFileStatus(self) -> None:
+        emg = getattr(self, "angleEmgPath", None)
+        pedal = getattr(self, "anglePedalPath", None)
+        if emg and pedal:
+            self.angleStatusLabel.setText("檔案已選好，按「開始分析」即可使用建議設定；需要調整時再展開「進階設定」。")
+        elif emg:
+            self.angleStatusLabel.setText("已選擇 EMG CSV；請再選擇同一次騎乘的踏板 CSV。")
+        elif pedal:
+            self.angleStatusLabel.setText("已選擇踏板 CSV；請再選擇同一次騎乘的 EMG CSV。")
+
+    def chooseAngleEmg(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "選擇原始 EMG CSV", self.pathEdit.text().strip(), "CSV (*.csv)")
+        if path:
+            self.angleEmgPath = Path(path)
+            self.angleEmgButton.setText(f"EMG：{self.angleEmgPath.name}")
+            self.angleEmgButton.setToolTip(str(self.angleEmgPath))
+            self.angleAnalysisResult = None
+            self.angleExportButton.setEnabled(False)
+            self.updateAngleFileStatus()
+
+    def chooseAnglePedal(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "選擇踏板或校正角度 CSV", self.pathEdit.text().strip(), "CSV (*.csv)")
+        if path:
+            self.anglePedalPath = Path(path)
+            self.anglePedalButton.setText(f"踏板：{self.anglePedalPath.name}")
+            self.anglePedalButton.setToolTip(str(self.anglePedalPath))
+            self.angleAnalysisResult = None
+            self.angleExportButton.setEnabled(False)
+            self.updateAngleFileStatus()
+
+    def runAngleAnalysis(self) -> None:
+        if self.angleAnalysisWorker is not None:
+            return
+        emg = self.angleEmgPath or (self.collectionOutput if self.collectionOutput and self.collectionOutput.is_file() else None)
+        pedal = self.anglePedalPath or (self.pedalOutput if self.pedalOutput and self.pedalOutput.is_file() else None)
+        if emg is None or pedal is None:
+            self.angleStatusLabel.setText("請先選擇原始 EMG CSV 與踏板 CSV（或已校正角度 CSV）。")
+            return
+        import csv
+        try:
+            with emg.open("r", encoding="utf-8-sig", newline="") as stream:
+                headers = next(csv.reader(stream))
+            sides, side_source = recordingChannelSides(emg, headers, self.mappings)
+            if not sides:
+                raise ValueError("沒有通道符合設定頁的肌肉側別對應；請檢查感測器名稱與 -L/-R 縮寫。")
+            values = [spin.value() for spin in self.angleRangeSpins]
+            settings = AngleSettings((values[0], values[1]), (values[2], values[3]),
+                                     scale=None if self.angleAutoScaleCheck.isChecked() else self.angleScaleSpin.value(),
+                                     offset_s=None if self.angleAutoOffsetCheck.isChecked() else self.angleOffsetSpin.value())
+            settings.validate()
+        except (OSError, StopIteration, ValueError) as exc:
+            self.angleStatusLabel.setText(f"無法分析：{exc}")
+            return
+        for key, value in zip(("start0", "start1", "end0", "end1"), values):
+            self.settings.setValue(f"angle/{key}", value)
+        self.settings.setValue("angle/offset_s", self.angleOffsetSpin.value())
+        self.settings.setValue("angle/auto_offset", self.angleAutoOffsetCheck.isChecked())
+        self.settings.setValue("angle/auto_scale", self.angleAutoScaleCheck.isChecked())
+        self.settings.setValue("angle/scale", self.angleScaleSpin.value())
+        self.angleAnalysisResult = None
+        self.angleExportButton.setEnabled(False)
+        self.angleRunButton.setEnabled(False)
+        self.angleEmgButton.setEnabled(False)
+        self.anglePedalButton.setEnabled(False)
+        self.angleStatusLabel.setText("正在背景分析原始 EMG 與踏板資料…")
+        worker = AngleAnalysisWorker(emg, pedal, sides, settings, side_source)
+        self.angleAnalysisWorker = worker
+        worker.completed.connect(self.angleAnalysisCompleted)
+        worker.failed.connect(self.angleAnalysisFailed)
+        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(self.angleAnalysisFinished)
+        worker.start()
+
+    def angleAnalysisCompleted(self, result: dict) -> None:
+        self.angleAnalysisResult = result
+        sync = result["sync"]
+        reference_quality = (f'｜{len(sync["references"])} 個參考通道，最佳殘差 '
+                             f'{sync["references"][0]["residual_std_s"] * 1000:.0f} ms'
+                             if sync["references"] else "｜無可用時鐘參考通道")
+        self.angleStatusLabel.setText(
+            f'{sync["state"]}｜時鐘比例 {sync["scale"]:.5f}｜起點偏移 {sync["offset_s"]:+.3f} 秒｜有效圈數 {sync["valid_cycles"]}｜'
+            f'{sync["angle_label"]}{reference_quality}｜側別依據：{sync.get("side_source", "輸入設定")}。'
+            f'每個通道以自身第 {result["settings"]["percentile"]:g} 百分位為參考；'
+            "跨肌肉顏色不可解讀為出力排名。")
+        self.angleOverviewLabel.setText(result.get("overview") or analysis_summary_text(result))
+        self.angleCurvePlot.setLabel("bottom", sync["angle_label"], units="°")
+        self.angleHeatPlot.setLabel("bottom", sync["angle_label"], units="°")
+        summary, profiles = result["summary"], result["profiles"]
+        self.angleMuscleCombo.blockSignals(True)
+        self.angleMuscleCombo.clear()
+        for entry in summary.itertuples():
+            self.angleMuscleCombo.addItem(f"{entry.location_zh} · {entry.channel_label}", entry.channel)
+        self.angleMuscleCombo.blockSignals(False)
+        self.refreshAngleCurve()
+        self.angleComparisonTable.setRowCount(len(summary))
+        for row, entry in enumerate(summary.itertuples()):
+            cells = (f"{entry.location_zh} · {entry.channel_label}", str(entry.n_start), str(entry.n_end),
+                     f"{entry.rms_uv_start:.1f}", f"{entry.rms_uv_end:.1f}",
+                     f"{entry.rms_change_percent:+.1f}", f"{entry.peak_angle_start:.0f}",
+                     f"{entry.peak_angle_end:.0f}", f"{entry.peak_angle_shift:+.0f}",
+                     f"{entry.mdf_change_hz:+.1f}")
+            for column, value in enumerate(cells):
+                self.angleComparisonTable.setItem(row, column, QTableWidgetItem(value))
+        names = list(summary.channel)
+        matrix = np.column_stack([profiles[(profiles.channel == name) & (profiles.phase == "all")].mean_percent.to_numpy(float)
+                                  for name in names])
+        self.angleHeatPlot.clear()
+        image = pg.ImageItem(matrix)
+        image.setRect(QRectF(0, -.5, 360, len(names)))
+        image.setColorMap(pg.colormap.get("CET-L4"))
+        image.setLevels((0, 100))
+        self.angleHeatPlot.addItem(image)
+        self.angleHeatPlot.getAxis("left").setTicks([[(i, f'{summary.iloc[i].location_zh} · {sync["channel_names"][name]}')
+                                                      for i, name in enumerate(names)]])
+        self.angleHeatPlot.setXRange(0, 360, padding=0)
+        self.angleHeatPhaseLine = pg.InfiniteLine(pos=self.anglePhaseSpin.value(), angle=90,pen=pg.mkPen("#555555", width=2, style=Qt.DashLine),)
+        self.angleHeatPlot.addItem(self.angleHeatPhaseLine)
+        self.refreshAnglePhase()
+        self.angleExportButton.setEnabled(True)
+
+    def refreshAnglePhase(self) -> None:
+        """Show the direct, phase-specific answer before the detailed plots."""
+        if self.angleAnalysisResult is None:
+            return
+        angle = self.anglePhaseSpin.value()
+        values = phase_intensities(self.angleAnalysisResult, angle)
+        if values.empty:
+            return
+        strongest_end = values.iloc[0]
+        strongest_start = values.sort_values("start_percent", ascending=False).iloc[0]
+        angle_label = self.angleAnalysisResult["sync"]["angle_label"]
+        self.anglePhaseLabel.setText(
+            f"{angle_label} {angle}°｜後段相對活化最高：{strongest_end.location_zh}"
+            f"（{strongest_end.channel_label}）{strongest_end.end_percent:.0f}%；"
+            f"前段相對活化最高：{strongest_start.location_zh}（{strongest_start.channel_label}）"
+            f"{strongest_start.start_percent:.0f}%。藍色為前段、紅色為後段。"
+            "此為各肌肉內的相對 EMG 活化，不代表哪條肌肉實際最費力。"
+        )
+        self.anglePhasePlot.clear()
+        self.anglePhasePlot.setTitle(f"{angle}° 肌肉相對 EMG 活化｜藍色：前段；紅色：後段")
+        axis = self.anglePhasePlot.getAxis("left")
+        ticks = []
+        tokens = (FluentThemeManager.DARK if QApplication.instance().styleHints().colorScheme().name == "Dark"
+                  else FluentThemeManager.LIGHT)
+        for row, entry in values.iterrows():
+            label = f"{entry.location_zh} · {entry.channel_label}"
+            ticks.append((row, label))
+            self.anglePhasePlot.plot([0, entry.start_percent], [row - .18, row - .18],pen=pg.mkPen(tokens["brand_background"], width=8))
+            self.anglePhasePlot.plot([0, entry.end_percent], [row + .18, row + .18],pen=pg.mkPen(tokens["danger"], width=8))
+        axis.setTicks([ticks])
+        self.anglePhasePlot.setYRange(-.7, len(values) - .3, padding=0)
+        self.anglePhasePlot.setXRange(0, max(100, float(values[["start_percent", "end_percent"]].max().max()) * 1.08), padding=0)
+        self.anglePhasePlot.showGrid(x=True, y=False, alpha=.18)
+        if hasattr(self, "angleHeatPhaseLine"):
+            self.angleHeatPhaseLine.setPos(angle)
+        self.refreshAngleCurve()
+
+    def refreshAngleCurve(self) -> None:
+        self.angleCurvePlot.clear()
+        if self.angleAnalysisResult is None:
+            return
+        name = self.angleMuscleCombo.currentData()
+        if not name:
+            return
+        profiles = self.angleAnalysisResult["profiles"]
+        summary = self.angleAnalysisResult["summary"]
+        entry = summary[summary.channel == name].iloc[0]
+        self.angleCurvePlot.setTitle(
+            f"{entry.location_zh}｜RMS {entry.rms_change_percent:+.1f}%｜"
+            f"峰值相位 {entry.peak_angle_start:.0f}° → {entry.peak_angle_end:.0f}°（{entry.peak_angle_shift:+.0f}°）")
+        self.angleDetailLabel.setText(
+            f"{entry.location_zh}｜前段 {entry.n_start} 圈、後段 {entry.n_end} 圈。"
+            f"RMS：{entry.rms_uv_start:.1f} → {entry.rms_uv_end:.1f} µV（{entry.rms_change_percent:+.1f}%）；"
+            f"峰值：{entry.peak_angle_start:.0f}° → {entry.peak_angle_end:.0f}°（{entry.peak_angle_shift:+.0f}°）。")
+        for phase, color, peak in (("start", "#1684d7", entry.peak_angle_start),
+                                   ("end", "#d13438", entry.peak_angle_end)):
+            sub = profiles[(profiles.channel == name) & (profiles.phase == phase)]
+            self.angleCurvePlot.plot(sub.angle_bin_center.to_numpy(float), sub.mean_percent.to_numpy(float),
+                                     pen=pg.mkPen(color, width=2),
+                                     name=f'{"前段" if phase == "start" else "後段"} {entry.n_start if phase == "start" else entry.n_end} 圈，峰值 {peak:.0f}°')
+            self.angleCurvePlot.addItem(pg.InfiniteLine(pos=peak, angle=90, pen=pg.mkPen(color, style=Qt.DashLine)))
+        selected_angle = self.anglePhaseSpin.value()
+        self.angleCurvePlot.addItem(pg.InfiniteLine(pos=selected_angle, angle=90, pen=pg.mkPen("#555555", width=2, style=Qt.DotLine),label=f"查看 {selected_angle}°", labelOpts={"position": .9, "color": "#555555"},))
+        self.angleCurvePlot.setXRange(0, 360, padding=0)
+
+    def showSelectedAngleMuscle(self) -> None:
+        row = self.angleComparisonTable.currentRow()
+        if row < 0 or self.angleAnalysisResult is None:
+            return
+        summary = self.angleAnalysisResult["summary"]
+        if row >= len(summary):
+            return
+        channel = summary.iloc[row].channel
+        index = self.angleMuscleCombo.findData(channel)
+        if index >= 0:
+            self.angleMuscleCombo.setCurrentIndex(index)
+            self.angleViews.setCurrentIndex(1)
+
+    def angleAnalysisFailed(self, message: str) -> None:
+        self.angleStatusLabel.setText(f"分析失敗：{message}")
+
+    def angleAnalysisFinished(self) -> None:
+        self.angleAnalysisWorker = None
+        self.angleRunButton.setEnabled(True)
+        self.angleEmgButton.setEnabled(True)
+        self.anglePedalButton.setEnabled(True)
+
+    def exportAngleAnalysis(self) -> None:
+        if self.angleAnalysisResult is None or self.angleExportWorker is not None:
+            return
+        folder = QFileDialog.getExistingDirectory(self, "選擇角度分析匯出資料夾", self.pathEdit.text().strip())
+        if not folder:
+            return
+        base = Path(folder) / f"angle_analysis_{datetime.now():%Y%m%d_%H%M%S}"
+        target = base
+        suffix = 2
+        while target.exists():
+            target = Path(f"{base}_{suffix:02d}")
+            suffix += 1
+        self.angleExportButton.setEnabled(False)
+        self.angleStatusLabel.setText("正在背景匯出同步 CSV、分析表與圖片…")
+        worker = AngleExportWorker(self.angleAnalysisResult, target, self.angleIncludeRawCheck.isChecked())
+        self.angleExportWorker = worker
+        worker.completed.connect(lambda path: self.angleStatusLabel.setText(f"角度分析已匯出至 {path}"))
+        worker.failed.connect(lambda message: self.angleStatusLabel.setText(f"匯出失敗：{message}"))
+        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(self.angleExportFinished)
+        worker.start()
+
+    def angleExportFinished(self) -> None:
+        self.angleExportWorker = None
+        self.angleExportButton.setEnabled(self.angleAnalysisResult is not None)
 
     def exportRideReport(self) -> None:
         session = self.rideSession or self.latestRideSession
         if session is None:
+            QMessageBox.information(
+                self, "匯出 HTML 報表",
+                "請先完成或載入一次測試資料。",
+            )
             return
-        default = str((self.collectionOutput or Path(self.pathEdit.text()) / "cycling").with_suffix(".html"))
-        path, _ = QFileDialog.getSaveFileName(self, "匯出 HTML 報表", default, "HTML (*.html)")
+        stem = (self.collectionOutput or Path(self.pathEdit.text()) / "cycling").with_suffix("")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "匯出 HTML 報表", str(stem) + "_report.html", "HTML 網頁 (*.html)"
+        )
         if not path:
             return
         try:
-            export_html(Path(path), session, self.normalizedCheck.isChecked(), self.referenceRideSession,
-                        self.analysisFtpSpin.value())
+            output = export_report(
+                Path(path).with_suffix(".html"), session,
+                pedal_records=self.summaryRecords,
+                ftp_w=self.analysisFtpSpin.value(),
+                angle_result=self.angleAnalysisResult,
+                reference_session=self.referenceRideSession,
+            )
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "報表匯出失敗", str(exc))
             return
-        self.appendLog(f"HTML 報表已匯出：{Path(path).name}")
+        self.appendLog(f"HTML 報表已匯出：{output.name}")
 
     def startStream(self) -> None:
         if self.calibrationOnly:
@@ -2253,9 +3323,7 @@ class TrignoWindow(QMainWindow):
         self.trainerOutput = trainerOutput if self.useTrainerCheck.isChecked() and self.trainerIsConnected else None
         self.pedalRecorder = None
         self.pedalOutput = pedalOutputPath(output) if self.usePedalCheck.isChecked() and self.pedalIsConnected else None
-        self.infoRecorder = CollectionInfoRecorder(
-            infoOutput, self.collectionSubject, output, self.trainerOutput
-        )
+        self.infoRecorder = CollectionInfoRecorder(infoOutput, self.collectionSubject, output, self.trainerOutput)
         try:
             self.infoRecorder.start()
         except OSError as exc:
@@ -2263,6 +3331,8 @@ class TrignoWindow(QMainWindow):
             QMessageBox.critical(self, "資訊檔輸出錯誤", str(exc))
             return
         self.beginRideAnalysis()
+        self.collectionStoppedEarly = False
+        self.startDatabaseRecording()
         self.emgRateLabel.setText("EMG 頻率：正在向 SDK 查詢…")
         for history in self.histories:
             history.clear()
@@ -2330,6 +3400,7 @@ class TrignoWindow(QMainWindow):
         self.streamWorker.failed.connect(self.streamFailed)
         self.streamWorker.finished.connect(self.streamFinished)
         self.calibrationLabel.setText("基準測量：0 / 20 秒（前 10 秒捨棄，後 10 秒計算 RMS）")
+        self.calibrationLabel.show()
         self.setStreaming(True)
         self.streamWorker.start()
 
@@ -2358,9 +3429,8 @@ class TrignoWindow(QMainWindow):
         self.collectionSubject = self.subjectInfo()
         self.trainerOutput = trainerOutputPath(output) if self.useTrainerCheck.isChecked() else None
         self.pedalOutput = pedalOutputPath(output) if self.usePedalCheck.isChecked() else None
-        self.infoRecorder = CollectionInfoRecorder(
-            infoOutputPath(output), self.collectionSubject, output, self.trainerOutput
-        )
+        self.infoOutput = infoOutputPath(output)
+        self.infoRecorder = CollectionInfoRecorder(self.infoOutput, self.collectionSubject, output, self.trainerOutput)
         try:
             self.infoRecorder.start()
         except OSError as exc:
@@ -2368,6 +3438,8 @@ class TrignoWindow(QMainWindow):
             QMessageBox.critical(self, "資料檔建立失敗", str(exc))
             return
         self.beginRideAnalysis()
+        self.collectionStoppedEarly = False
+        self.startDatabaseRecording()
         self.bikeOnlySession = True
         self.beginTrainerRecording()
         self.beginPedalRecording()
@@ -2376,6 +3448,8 @@ class TrignoWindow(QMainWindow):
         self.startCountdown()
 
     def stopStream(self) -> None:
+        if self.remainingSeconds > 0:
+            self.collectionStoppedEarly = True
         if self.bikeOnlySession:
             self.finishBikeOnlySession()
             return
@@ -2403,7 +3477,7 @@ class TrignoWindow(QMainWindow):
         if text == "串流中" and (not self.calibrationOnly or self.calibrationRecording):
             self.beginTrainerRecording()
             self.beginPedalRecording()
-        if text == "\u4e32\u6d41\u4e2d":
+        if text == "串流中":
             if self.calibrationOnly:
                 self.startCalibrationCountdown()
             else:
@@ -2417,6 +3491,15 @@ class TrignoWindow(QMainWindow):
         try:
             self.trainerRecorder = TrainerCsvRecorder(self.trainerOutput)
             self.trainerRecorder.start()
+            if self.infoRecorder:
+                native = (
+                    f"{self.commandedNativeResistance:g}"
+                    if self.commandedNativeResistance is not None else "設備未回報"
+                )
+                self.infoRecorder.setSettings("阻力計", [
+                    f"固定阻力等級：{self.resistanceSpin.value()} / 30",
+                    f"設備原生阻力：{native}",
+                ])
             self.appendLog(f"阻力計 CSV 開始輸出：{self.trainerOutput.name}")
         except OSError as exc:
             self.trainerRecorder = None
@@ -2435,11 +3518,9 @@ class TrignoWindow(QMainWindow):
             return
         self.appendLog(f"阻力計 CSV 已輸出 {recorder.rows} 筆 telemetry")
         if self.infoRecorder:
-            frequency = recorder.rows / elapsed if elapsed > 0 else 0.0
             self.infoRecorder.append("阻力計資料", [
-                f"阻力計資料列數：{recorder.rows}",
-                f"阻力計資料抓取頻率（平均）：{frequency:.3f} Hz",
-                f"阻力計收集時間：{elapsed:.6f} 秒",
+                f"阻力計記錄筆數：{recorder.rows}",
+                f"阻力計收集時間：{elapsed:.1f} 秒",
                 f"本次騎乘距離：{self.collectionDistanceMeters or 0} m",
             ])
         self.distanceSessionActive = False
@@ -2451,6 +3532,9 @@ class TrignoWindow(QMainWindow):
         try:
             self.pedalRecorder = PedalCsvRecorder(self.pedalOutput)
             self.pedalRecorder.start()
+            if self.infoRecorder:
+                device = self.pedalDevices.currentText().strip() or "已連線踏板"
+                self.infoRecorder.setSettings("踏板", [f"功率計裝置：{device}"])
             self.pedalSummarySource = "current"
             self.summaryRecords = []
             self.currentSessionSummaryButton.setEnabled(True)
@@ -2476,11 +3560,7 @@ class TrignoWindow(QMainWindow):
             except Exception as exc:
                 self.appendLog(f"踏板 FIT 輸出失敗：{exc}")
         if self.infoRecorder:
-            frequency = recorder.rows / elapsed if elapsed else 0.0
             self.infoRecorder.append("踏板資料", [
-                f"踏板資料檔：{recorder.outputPath.name}",
-                f"踏板封包數：{recorder.rows}",
-                f"踏板平均頻率：{frequency:.3f} Hz",
                 *pedal_summary_lines(summary),
             ])
 
@@ -2494,10 +3574,11 @@ class TrignoWindow(QMainWindow):
     def refreshSummaryAnalysis(self) -> None:
         """Refresh the numerical report and time-series plots for the selected source."""
         if not self.summaryRecords:
-            self.summaryDetails.clear()
+            self.summaryDetails.setText("完成踏板收集，或匯入FIT檔後，摘要會顯示在這裡")
             for label in self.pedalMetricCards.values():
                 label.setText("--")
-            self.pedalZoneTable.clearContents()
+            if self.pedalZoneTable is not None:
+                self.pedalZoneTable.clearContents()
             for plot in (self.powerAnalysisPlot, self.cadenceAnalysisPlot, self.balanceAnalysisPlot):
                 plot.clear()
             self.leftPowerBalanceRing.setValues(None, None)
@@ -2513,16 +3594,17 @@ class TrignoWindow(QMainWindow):
         self.rightPowerBalanceRing.setValues(
             summary.get("average_right_balance_percent"), summary.get("average_right_power_w"),
         )
-        self.summaryDetails.setPlainText("\n".join([
+        self.summaryDetails.setText("\n".join([
             *pedal_summary_lines(summary), "", *pedal_analysis_lines(self.summaryRecords, ftp),
         ]))
         for key, label in self.pedalMetricCards.items():
             value = analysis[key]
             label.setText("--" if value is None else f"{value:.0f}" if key in ("peak_5s_w", "coverage_percent") else f"{value:.2f}" if key == "intensity_factor" else f"{value:.0f}")
-        self.pedalZoneTable.setRowCount(len(analysis["zones"]))
-        for row, zone in enumerate(analysis["zones"]):
-            for column, value in enumerate((zone["name"], zone["bounds"], f"{zone['seconds']} 秒", f"{zone['percent']:.1f}%")):
-                self.pedalZoneTable.setItem(row, column, QTableWidgetItem(value))
+        if self.pedalZoneTable is not None:
+            self.pedalZoneTable.setRowCount(len(analysis["zones"]))
+            for row, zone in enumerate(analysis["zones"]):
+                for column, value in enumerate((zone["name"], zone["bounds"], f"{zone['seconds']} 秒", f"{zone['percent']:.1f}%")):
+                    self.pedalZoneTable.setItem(row, column, QTableWidgetItem(value))
         series = analysis["series"]
         x = np.array([point["elapsed_s"] for point in series], dtype=float)
         power = np.array([np.nan if point["power_w"] is None else point["power_w"] for point in series], dtype=float)
@@ -2550,10 +3632,10 @@ class TrignoWindow(QMainWindow):
                                                            pen=pg.mkPen(tokens["danger"], style=Qt.DotLine)))
         if average_power is not None and maximum_power is not None:
             self.powerAnalysisPlot.setTitle(
-                f"\u529F\u7387 Power \uFF5C \u5E73\u5747 {average_power:.0f} W \uFF5C \u6700\u5927 {maximum_power:.0f} W"
+                f"功率 Power ｜ 平均 {average_power:.0f} W ｜ 最大 {maximum_power:.0f} W"
             )
         else:
-            self.powerAnalysisPlot.setTitle("\u529F\u7387 Power \uFF5C \u7121\u8DB3\u5920\u7684\u529F\u7387\u8CC7\u6599")
+            self.powerAnalysisPlot.setTitle("功率 Power ｜ 無足夠的功率資料")
         cadence_color = QColor(tokens["warning"])
         cadence_fill = QColor(cadence_color)
         cadence_fill.setAlpha(64)
@@ -2571,10 +3653,10 @@ class TrignoWindow(QMainWindow):
                                                              pen=pg.mkPen(tokens["danger"], style=Qt.DotLine)))
         if average_cadence is not None and maximum_cadence is not None:
             self.cadenceAnalysisPlot.setTitle(
-                f"\u8E0F\u983B Cadence \uFF5C \u5E73\u5747 {average_cadence:.0f} rpm \uFF5C \u6700\u5927 {maximum_cadence:.0f} rpm"
+                f"踏頻 Cadence ｜ 平均 {average_cadence:.0f} rpm ｜ 最大 {maximum_cadence:.0f} rpm"
             )
         else:
-            self.cadenceAnalysisPlot.setTitle("\u8E0F\u983B Cadence \uFF5C \u7121\u8DB3\u5920\u7684\u8E0F\u983B\u8CC7\u6599")
+            self.cadenceAnalysisPlot.setTitle("踏頻 Cadence ｜ 無足夠的踏頻資料")
         valid = np.isfinite(left)
         if valid.any():
             self.balanceAnalysisPlot.plot(x[valid], left[valid], pen=None, symbol="o", symbolSize=6,
@@ -2585,7 +3667,7 @@ class TrignoWindow(QMainWindow):
     def showCurrentSessionSummary(self) -> None:
         if self.rideSession is not None and self.pedalRecorder is not None:
             self.setSummaryRecords(self.pedalRecorder.records, "資料來源：本次騎乘踏板即時資料")
-            self.summaryTabs.setCurrentIndex(2)
+            self.summaryTabs.setCurrentIndex(1)
             return
         if self.collectedRideSession is not None:
             if self.latestPedalRecords:
@@ -2593,10 +3675,6 @@ class TrignoWindow(QMainWindow):
                 self.pedalSummarySource = "current"
                 self.refreshSummaryAnalysis()
             self.latestRideSession = self.collectedRideSession
-            self.loadedRidePath = self.collectedRidePath
-            self.alignmentOffsetSpin.blockSignals(True)
-            self.alignmentOffsetSpin.setValue(float(self.latestRideSession.get("emg_trainer_offset_s", 0)))
-            self.alignmentOffsetSpin.blockSignals(False)
             self.summarySourceLabel.setText("資料來源：本程式最新收集的騎乘資料")
             self.refreshRideAnalysis()
             self.refreshComparison()
@@ -2618,58 +3696,40 @@ class TrignoWindow(QMainWindow):
             QMessageBox.warning(self, "無法匯入 FIT", f"讀取 FIT 檔失敗：{exc}")
             return
         self.setSummaryRecords(records, f"資料來源：匯入 FIT — {Path(path).name}")
-        self.summaryTabs.setCurrentIndex(2)
+        self.summaryTabs.setCurrentIndex(1)
         self.appendLog(f"已匯入 FIT 摘要：{Path(path).name}（{len(records)} 筆 record）")
 
     def collectionMetadataReady(self, metadata: dict) -> None:
         if self.infoRecorder is None:
             return
+        duration = self.configuredDurationSeconds()
         lines = [
-            f"基站序號：{metadata['base_serial']}",
-            f"EMG 資料抓取頻率：{metadata['sample_rate_hz']:.6f} Hz",
-            f"每個封包樣本數：{metadata['samples_per_frame']}",
-            f"封包間隔：{metadata['frame_interval_seconds']:.6f} 秒",
-            "EMG 測試部位：",
+            f"收集時間：{duration} 秒" if duration else "收集時間：手動停止",
+            "測試肌肉：",
         ]
         lines.extend(
-            "  S{slot:02d}：{chinese_name}（{english_name}） | SID：{sid}".format(
-                **channel
-            )
+            "  {chinese_name}（{english_name}）".format(**channel)
             for channel in metadata["channels"]
         )
-        self.infoRecorder.append("EMG 資料", lines)
-
-        baseline_lines = [
-            "feature=filtered_rms_entire_final_10_seconds; live_window=200 ms",
-            f"filter=high-pass {self.filterSettings.highpass_hz:g} Hz, low-pass {self.filterSettings.lowpass_hz:g} Hz",
-            f"research_thresholds={'enabled' if self.baselineManager.thresholds_enabled else 'disabled'}; warning=±{self.baselineManager.warning_percent:g}%; focus=±{self.baselineManager.focus_percent:g}%",
-            "Clinical interpretation and thresholds require clinician confirmation.",
-        ]
+        lines.append("基準 RMS：")
         for channel in metadata["channels"]:
             record = self.baselineManager.records.get(channel["slot"])
-            if record:
-                baseline_lines.append(f"S{channel['slot']:02d}: {record.rms_mv:.6f} mV; {record.method}; {record.source}; {record.timestamp}")
-        self.infoRecorder.append("EMG baseline comparison", baseline_lines)
+            if record is None:
+                value = "未設定"
+            else:
+                value = f"{record.rms_mv:.6f} mV"
+            lines.append(f"  {channel['chinese_name']}：{value}")
+        self.infoRecorder.append("EMG 資料", lines)
 
     def configuredDurationSeconds(self) -> int:
         return self.durationMinutesSpin.value() * 60 + self.durationSecondsSpin.value()
 
     def updateCountdownLabel(self) -> None:
-        if self.countdownMode == "calibration":
-            minutes, seconds = divmod(max(0, self.remainingSeconds), 60)
-            suffix = "" if self.remainingSeconds > 0 else "\uFF08\u7B49\u5F85\u5B8C\u6210\u6700\u5F8C\u6A23\u672C\uFF09"
-            self.countdownLabel.setText(f"\u57FA\u6E96\u5012\u6578\uFF1A{minutes:02d}:{seconds:02d}{suffix}")
-            self.countdownLabel.show()
-            return
         if self.remainingSeconds <= 0:
-            if self.configuredDurationSeconds() <= 0:
+            if self.countdownMode != "calibration" and self.configuredDurationSeconds() <= 0:
                 self.countdownLabel.hide()
                 return
-            self.countdownLabel.setText("計時：00:00")
-            self.countdownLabel.show()
-            return
-        minutes, seconds = divmod(self.remainingSeconds, 60)
-        self.countdownLabel.setText(f"計時：{minutes:02d}:{seconds:02d}")
+        self.countdownLabel.setText(f"剩餘 {max(0, self.remainingSeconds)} 秒")
         self.countdownLabel.show()
 
     def resetCountdownDisplay(self) -> None:
@@ -2738,6 +3798,21 @@ class TrignoWindow(QMainWindow):
                             comparison["quality"] = "基準不相容"
                         add_point(self.rideSession, "emg", {"time_s": stamp, "slot": channel + 1,
                             "rms_mv": current, **comparison})
+                        mapping = self.mappings[channel]
+                        percent = comparison.get("percent")
+                        alert = "NONE"
+                        if isinstance(percent, (int, float)):
+                            if abs(percent) >= self.baselineManager.focus_percent:
+                                alert = "RED"
+                            elif abs(percent) >= self.baselineManager.warning_percent:
+                                alert = "YELLOW"
+                            else:
+                                alert = "NORMAL"
+                        self.databaseAddSample("emg", stamp, {
+                            "muscle_name": f"{mapping.chinese_name} ({mapping.abbreviation})",
+                            "rms_mv": current, "base_rms_mv": record.rms_mv if compatible and record else None,
+                            "deviation_pct": percent, "alert_status": alert,
+                            "quality_status": comparison.get("quality", "VALID")})
         self.sampleLabel.setText(f"{len(self.histories[activeChannels[0]]):,} samples in view")
 
     def emgRateReady(self, sampleRate: float, samplesPerFrame: int, frameInterval: float) -> None:
@@ -2749,9 +3824,7 @@ class TrignoWindow(QMainWindow):
             self.preprocessor = None
             self.rmsExtractor = None
             self.calibrationLabel.setText(f"RMS 未啟用：{exc}")
-        self.emgRateLabel.setText(
-            f"EMG SDK 頻率：{sampleRate:.3f} Hz · {samplesPerFrame} samples/frame"
-        )
+        self.emgRateLabel.setText(f"EMG SDK 頻率：{sampleRate:.3f} Hz · {samplesPerFrame} samples/frame")
 
     def finishBaselineCalibration(self) -> None:
         session = self.calibrationSession
@@ -2776,16 +3849,27 @@ class TrignoWindow(QMainWindow):
 
     def collectionCompleted(self, samples: int, elapsed: float, sampleRate: float) -> None:
         self.collectionSummary = (samples, elapsed, sampleRate)
-        self.emgRateLabel.setText(
-            f"EMG SDK 頻率：{sampleRate:.3f} Hz · {samples:,} samples"
-        )
+        self.emgRateLabel.setText(f"EMG SDK 頻率：{sampleRate:.3f} Hz · {samples:,} samples")
         output = self.collectionOutput.name if self.collectionOutput else "CSV"
         self.appendLog(f"EMG | 量測完成：{samples:,} samples，SDK 頻率 {sampleRate:.3f} Hz，已輸出 {output}")
         if self.infoRecorder:
+            rms_values: dict[int, list[float]] = {}
+            for point in (self.rideSession or {}).get("emg", []):
+                slot, rms = point.get("slot"), point.get("rms_mv")
+                if isinstance(slot, int) and isinstance(rms, (int, float)) and np.isfinite(rms):
+                    rms_values.setdefault(slot, []).append(float(rms))
+            rms_lines = ["EMG 肌肉 RMS 平均值："]
+            for slot in sorted(rms_values):
+                mapping = self.mappings[slot - 1]
+                values = rms_values[slot]
+                rms_lines.append(f"  {mapping.chinese_name}：{np.mean(values):.6f} mV")
+            if len(rms_lines) == 1:
+                rms_lines.append("  無足夠資料")
             self.infoRecorder.append("EMG 測試摘要", [
                 f"EMG 樣本數：{samples}",
-                f"EMG 收集時間：{elapsed:.6f} 秒",
-                f"EMG 資料時間長度：{samples / sampleRate:.6f} 秒" if sampleRate else "EMG 資料時間長度：0 秒",
+                f"EMG 收集時間：{elapsed:.1f} 秒",
+                f"EMG RMS 記錄筆數：{sum(map(len, rms_values.values()))}",
+                *rms_lines,
             ])
 
     def streamFailed(self, message: str) -> None:
@@ -2817,10 +3901,7 @@ class TrignoWindow(QMainWindow):
         if self.collectionSummary:
             samples, elapsed, sampleRate = self.collectionSummary
             output = self.collectionOutput.name if self.collectionOutput else "CSV"
-            self.setEmgStatus(
-                f"量測完成：{samples:,} samples · {sampleRate:.3f} Hz · 已輸出 {output}",
-                "connected",
-            )
+            self.setEmgStatus(f"量測完成：{samples:,} samples · {sampleRate:.3f} Hz · 已輸出 {output}","connected",)
             return
         self.setEmgStatus("已停止", "idle")
 
@@ -2843,6 +3924,7 @@ class TrignoWindow(QMainWindow):
             plot.setXRange(-10, 0, padding=0)
             plot.setYRange(-1, 1, padding=0)
             plot.setMenuEnabled(False)
+            self.attachPlotFitButton(plot, "即時 EMG 波形", self.resetLivePlotView)
             return
         for row, channel in enumerate(selected):
             mapping = self.mappings[channel]
@@ -2854,6 +3936,7 @@ class TrignoWindow(QMainWindow):
                 plot.hideAxis("bottom")
             plot.showGrid(x=True, y=True, alpha=0.16)
             plot.setMenuEnabled(False)
+            self.attachPlotFitButton(plot, f"{mapping.abbreviation or f'S{channel + 1:02d}'} EMG 波形", self.resetLivePlotView)
             color = QColor(COLORS[channel % len(COLORS)])
             fill = QColor(color)
             fill.setAlpha(56)
@@ -2886,10 +3969,10 @@ class TrignoWindow(QMainWindow):
                 amplitudes = np.abs(values)
                 mean_amplitude = float(np.mean(amplitudes))
                 max_amplitude = float(np.max(amplitudes))
-                stats.setText(f"\u5E73\u5747\u7D55\u5C0D\u632F\u5E45\uFF1A{mean_amplitude:.3f} mV\n\u6700\u5927\u7D55\u5C0D\u632F\u5E45\uFF1A{max_amplitude:.3f} mV")
+                stats.setText(f"平均絕對振幅：{mean_amplitude:.3f} mV\n最大絕對振幅：{max_amplitude:.3f} mV")
                 stats.setPos(-0.15, limit * 0.94)
             else:
-                stats.setText("\u7B49\u5F85 EMG \u6A23\u672C")
+                stats.setText("等待 EMG 樣本")
                 stats.setPos(-0.15, limit * 0.94)
 
     def pedalReady(self) -> None:
@@ -3064,6 +4147,11 @@ class TrignoWindow(QMainWindow):
         # Every QThread must finish before its Python/Qt owner is destroyed.
         # In particular, a shared BLE scan can still be running during the
         # first few seconds after the application opens.
+        for worker in (self.angleAnalysisWorker, self.angleExportWorker):
+            if worker is not None and worker.isRunning():
+                event.ignore()
+                QTimer.singleShot(250, self.close)
+                return
         if self.bluetoothScanWorker and self.bluetoothScanWorker.isRunning():
             self.bluetoothScanWorker.stop()
             if not self.bluetoothScanWorker.wait(3000):
@@ -3104,6 +4192,14 @@ class TrignoWindow(QMainWindow):
                 event.ignore()
                 QTimer.singleShot(150, self.close)
                 return
+        for writer in tuple(self.databaseWriters):
+            if writer.isRunning():
+                writer.enqueue("stop")
+                if not writer.wait(5000):
+                    self.appendLog("Database writer is still stopping; close delayed")
+                    event.ignore()
+                    QTimer.singleShot(150, self.close)
+                    return
         event.accept()
 
 def main() -> int:

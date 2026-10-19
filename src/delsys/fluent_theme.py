@@ -70,6 +70,10 @@ class FluentThemeManager(QObject):
         QTabWidget::pane {{ background: {t['window_background']}; border: 1px solid {t['border_primary']}; border-radius: 6px; top: -1px; }}
         QLabel {{ background: transparent; }}
         QFrame[fluentRole="surface"], QFrame#panel {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 6px; }}
+        QFrame[comparisonRole="summary"] {{ background: {t['surface_secondary']}; border: 1px solid {t['border_primary']}; border-radius: 8px; }}
+        QFrame[comparisonRole="card"] {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 8px; }}
+        QLabel#comparisonSeriesA {{ color: {t['brand_background']}; font-weight: 700; }}
+        QLabel#comparisonSeriesB {{ color: {t['danger']}; font-weight: 700; }}
         QFrame[fluentRole="scanResults"] {{ background: {t['surface_secondary']}; border: 1px solid {t['border_primary']}; border-radius: 4px; }}
         QLabel#title {{ font-size: 20px; font-weight: 600; }} QLabel#sectionTitle {{ font-size: 14px; font-weight: 600; }} QLabel#muted {{ color: {t['text_secondary']}; }}
         QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTableWidget {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 4px; padding: 4px 6px; }}
@@ -96,12 +100,17 @@ class FluentThemeManager(QObject):
         QTabBar::tab:selected {{ color: {t['text_primary']}; background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-bottom: 2px solid {t['text_primary']}; font-weight: 600; }}
         QFrame#metricCard {{ background: {t['window_background']}; border: 1px solid {t['border_primary']}; border-radius: 6px; }}
         QLabel#metricValue {{ font-size: 20px; font-weight: 600; }} QLabel#metricTitle, QLabel#metricUnit {{ color: {t['text_secondary']}; }}
-        QLabel#status, QLabel#connectionIndicator {{ padding: 3px 6px; border-radius: 4px; font-weight: 600; }}
+        QLabel#countdown {{ font-size: 15px; font-weight: 700; }}
+        QLabel#recordingIndicator {{ color: {t['danger']}; font-size: 15px; font-weight: 700; }}
+        QLabel#status {{ padding: 3px 6px; border-radius: 4px; font-weight: 600; }}
+        QLabel#connectionIndicator {{ padding: 3px 7px; border: 1px solid transparent; border-radius: 7px; font-size: 11px; font-weight: 600; }}
         QLabel[fluentSeverity="info"] {{ color: {t['info']}; }} QLabel[fluentSeverity="success"] {{ color: {t['success']}; }} QLabel[fluentSeverity="warning"] {{ color: {t['warning']}; }} QLabel[fluentSeverity="danger"] {{ color: {t['danger']}; }}
         QLabel#status[fluentSeverity="info"], QLabel#connectionIndicator[fluentSeverity="info"] {{ background: {t['info_surface']}; }}
-        QLabel#status[fluentSeverity="success"], QLabel#connectionIndicator[fluentSeverity="success"] {{ background: {t['success_surface']}; }}
+        QLabel#status[fluentSeverity="success"] {{ background: {t['success_surface']}; }}
+        QLabel#connectionIndicator[fluentSeverity="success"] {{ background: {t['success_surface']}; border-color: {t['success']}; }}
         QLabel#status[fluentSeverity="warning"], QLabel#connectionIndicator[fluentSeverity="warning"] {{ background: {t['warning_surface']}; }}
-        QLabel#status[fluentSeverity="danger"], QLabel#connectionIndicator[fluentSeverity="danger"] {{ background: {t['danger_surface']}; }}
+        QLabel#status[fluentSeverity="danger"] {{ background: {t['danger_surface']}; }}
+        QLabel#connectionIndicator[fluentSeverity="danger"] {{ background: {t['danger_surface']}; border-color: {t['danger']}; }}
         QFrame#sensorRow[emgStatus="normal"], QFrame#sensorRow[emgStatus="unknown"] {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; }}
         QFrame#sensorRow[emgStatus="warning"] {{ background: {t['warning_surface']}; border: 1px solid {t['warning']}; }}
         QFrame#sensorRow[emgStatus="focus"] {{ background: {t['danger_surface']}; border: 1px solid {t['danger']}; }}
