@@ -38,6 +38,6 @@
 
 ## 5. 歷史資料與報表
 
-按「載入歷史騎乘」開啟本程式產生的 `*.analysis.json`。按「匯出 HTML 報表」輸出可離線開啟的報表。可從瀏覽器使用「列印 → 儲存為 PDF」。報表包含受試者、測試時間、基準、EMG 曲線、踏板／阻力曲線、數值摘要與資料品質提示。原始 EMG、踏板與阻力 CSV 不會被報表修改。
+Use "Export HTML Report" to create a standalone report with patient information, test settings, EMG trends, pedal and trainer summaries, and data-quality notes.
 
 既有 Garmin FIT 可用「匯入 Garmin FIT」查看踏板功率、踏頻與平衡；FIT 本身不含本程式的 EMG 基準與阻力分析資料，不能直接用於兩次肌肉比較。

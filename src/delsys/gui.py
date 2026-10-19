@@ -28,9 +28,10 @@ from delsys.pedal.fit_import import load_pedal_fit
 from delsys.pedal.angle_emg import (AngleSettings, analysis_summary_text, analyze_angle_emg,export_angle_emg, phase_intensities)
 from delsys.cycling_bluetooth import CyclingDeviceScanWorker
 from delsys.fluent_theme import FluentThemeManager
-from delsys.session_analysis import (add_point, analyze, compare_rms, export_html,load_session, new_session, peak_envelope,save_session)
+from delsys.session_analysis import (add_point, analyze, compare_rms, load_session, new_session, peak_envelope, save_session)
 from delsys.session_compare import compare_sessions
 from delsys.storage_db import DatabaseConfig, DatabaseWriter, SecondAggregator, SqlServerStorage, prefixed_id
+from delsys.reporting import export_report
 
 COLORS = (
     "#1684d7", "#e95f54", "#7e57c2", "#00897b",
@@ -615,9 +616,9 @@ class TrignoWindow(QMainWindow):
         layout.setContentsMargins(14, 10, 14, 10)
         row = QHBoxLayout()
         row.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        row.addWidget(QLabel("\u6e2c\u8a66\u9805\u76ee", objectName="sectionTitle"))
+        row.addWidget(QLabel("測試項目", objectName="sectionTitle"))
         row.addSpacing(28)
-        for text, attribute in (("EMG", "useEmgCheck"), ("\u963b\u529b\u8a08", "useTrainerCheck"), ("\u8e0f\u677f", "usePedalCheck")):
+        for text, attribute in (("EMG", "useEmgCheck"), ("阻力計", "useTrainerCheck"), ("踏板", "usePedalCheck")):
             check = QCheckBox(text)
             check.setChecked(True)
             setattr(self, attribute, check)
@@ -1110,7 +1111,7 @@ class TrignoWindow(QMainWindow):
         self.balanceAnalysisPlot.setYRange(0, 100, padding=0.04)
         self.cadenceAnalysisPlot.setXLink(self.powerAnalysisPlot)
         self.balanceAnalysisPlot.setXLink(self.powerAnalysisPlot)
-        for chart_name, plot in (("\u529f\u7387", self.powerAnalysisPlot), ("\u8e0f\u983b", self.cadenceAnalysisPlot), ("\u5de6\u53f3\u5e73\u8861", self.balanceAnalysisPlot)):
+        for chart_name, plot in (("功率", self.powerAnalysisPlot), ("踏頻", self.cadenceAnalysisPlot), ("左右平衡", self.balanceAnalysisPlot)):
             plot.showGrid(x=True, y=True, alpha=0.18)
             self.attachPlotFitButton(plot, chart_name)
 
@@ -1165,7 +1166,7 @@ class TrignoWindow(QMainWindow):
         self.rmsPeakBarPlot.setLabel("left", "RMS", units="mV")
         self.emgEnvelopePlot = self.ridePlots.addPlot(row=1, col=0, colspan=2, title="EMG RMS Peak 包絡線（每 1 秒最高值）")
         self.emgEnvelopePlot.setLabel("left", "RMS", units="mV")
-        for chart_name, plot in (("RMS \u5e73\u5747\u503c", self.rmsAverageBarPlot), ("RMS Peak", self.rmsPeakBarPlot), ("EMG RMS \u5305\u7d61\u7dda", self.emgEnvelopePlot)):
+        for chart_name, plot in (("RMS 平均值", self.rmsAverageBarPlot), ("RMS Peak", self.rmsPeakBarPlot), ("EMG RMS 包絡線", self.emgEnvelopePlot)):
             plot.showGrid(x=True, y=True, alpha=0.18)
             self.attachPlotFitButton(plot, chart_name)
         self.emgEnvelopePlot.setLabel("bottom", "騎乘時間", units="s")
@@ -1388,7 +1389,7 @@ class TrignoWindow(QMainWindow):
         self.anglePhasePlot = pg.PlotWidget(title="0° 肌肉相對 EMG 活化｜藍色：前段；紅色：後段")
         self.anglePhasePlot.setLabel("bottom", "相對自身參考值", units="%")
         self.anglePhasePlot.setMinimumHeight(270)
-        self.attachPlotFitButton(self.anglePhasePlot.getPlotItem(), "\u6d3b\u5316\u5340\u9593\u5716")
+        self.attachPlotFitButton(self.anglePhasePlot.getPlotItem(), "活化區間圖")
         phaseLayout.addWidget(self.anglePhasePlot, 1)
         phaseLayout.addWidget(QLabel("每條肌肉各自正規化；百分比用於比較該肌肉在不同相位的訊號，不代表實際出力或跨肌肉力量。", objectName="muted"))
         self.angleOverviewDataTabs.addTab(phasePage, "相位活化")
@@ -1399,7 +1400,7 @@ class TrignoWindow(QMainWindow):
         self.angleHeatPlot = pg.PlotWidget(title="全肌肉角度熱圖｜每列僅比較自身訊號")
         self.angleHeatPlot.setLabel("bottom", "相對踩踏相位", units="°")
         self.angleHeatPlot.setMinimumHeight(250)
-        self.attachPlotFitButton(self.angleHeatPlot.getPlotItem(), "\u89d2\u5ea6\u71b1\u5716")
+        self.attachPlotFitButton(self.angleHeatPlot.getPlotItem(), "角度熱圖")
         heatLayout.addWidget(self.angleHeatPlot, 1)
         self.angleOverviewDataTabs.addTab(heatPage, "全肌肉熱圖")
 
@@ -1436,7 +1437,7 @@ class TrignoWindow(QMainWindow):
         self.angleCurvePlot.setLabel("bottom", "相對踩踏相位", units="°")
         self.angleCurvePlot.addLegend()
         self.angleCurvePlot.showGrid(x=True, y=True, alpha=.18)
-        self.attachPlotFitButton(self.angleCurvePlot.getPlotItem(), "\u76f8\u4f4d\u66f2\u7dda")
+        self.attachPlotFitButton(self.angleCurvePlot.getPlotItem(), "相位曲線")
         angleDetailLayout.addWidget(self.angleCurvePlot, 1)
         angleDetailLayout.addWidget(QLabel("藍線＝前段，紅線＝後段；垂直虛線＝各段峰值相位。肌電訊號強度不等於施力大小。", objectName="muted"))
         self.angleViews.addTab(angleDetailPage, "肌肉細節")
@@ -1509,8 +1510,8 @@ class TrignoWindow(QMainWindow):
         button = QToolButton()
         button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMaxButton))
         button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        button.setToolTip(f"\u81ea\u52d5\u7e2e\u653e\uff1a{chart_name}")
-        button.setAccessibleName(f"\u81ea\u52d5\u7e2e\u653e {chart_name}")
+        button.setToolTip(f"自動縮放：{chart_name}")
+        button.setAccessibleName(f"自動縮放 {chart_name}")
 
         def fit_plot() -> None:
             plot.enableAutoRange(x=True, y=True)
@@ -2080,7 +2081,7 @@ class TrignoWindow(QMainWindow):
         if increment > maximum_increment:
             if now - self.lastDistanceRejectAt >= 5:
                 self.appendLog(
-                    f"\u5df2\u7565\u7565\u963b\u529b\u8a08\u8ddd\u96e2\u7570\u5e38\u8df3\u503c\uff1a+{increment} m / {elapsed:.1f} s"
+                    f"已略略阻力計距離異常跳值：+{increment} m / {elapsed:.1f} s"
                 )
                 self.lastDistanceRejectAt = now
             self.collectionDistanceUpdatedAt = now
@@ -2807,7 +2808,7 @@ class TrignoWindow(QMainWindow):
         self.databaseCompareACombo.setCurrentIndex(0)
         self.databaseCompareBCombo.setCurrentIndex(1)
         self.clearDatabaseComparisonCards()
-        self.comparisonStatusLabel.setText("\u5df2\u8f09\u5165\u5169\u6b21\u91cf\u6e2c\u9078\u9805\uff0c\u8acb\u78ba\u8a8d A\u3001B \u8207\u524d\u5f8c\u6bb5\u79d2\u6578\uff0c\u518d\u6309\u300c\u6bd4\u8f03 RMS\u300d\u986f\u793a\u7d50\u679c\u3002")
+        self.comparisonStatusLabel.setText("已載入兩次量測選項，請確認 A、B 與前後段秒數，再按「比較 RMS」顯示結果。")
 
     @staticmethod
     def _comparisonSide(muscle_name: str) -> str:
@@ -2913,8 +2914,8 @@ class TrignoWindow(QMainWindow):
         numbers_layout.setSpacing(6)
         numbers_layout.addWidget(QLabel(muscle_name, objectName="sectionTitle"))
         table = QTableWidget(2, 2)
-        table.setHorizontalHeaderLabels(("\u91cf\u6e2c A \u5e73\u5747 RMS (mV)", "\u91cf\u6e2c B \u5e73\u5747 RMS (mV)"))
-        table.setVerticalHeaderLabels((f"\u524d {self.databaseCompareEarlySpin.value()} \u79d2", f"\u5f8c {self.databaseCompareLateSpin.value()} \u79d2"))
+        table.setHorizontalHeaderLabels(("量測 A 平均 RMS (mV)", "量測 B 平均 RMS (mV)"))
+        table.setVerticalHeaderLabels((f"前 {self.databaseCompareEarlySpin.value()} 秒", f"後 {self.databaseCompareLateSpin.value()} 秒"))
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setMaximumWidth(400)
         table.setMinimumHeight(118)
@@ -2924,7 +2925,7 @@ class TrignoWindow(QMainWindow):
         table.verticalHeader().setFixedWidth(66)
 
         def value_text(value: float | None) -> str:
-            return "\u7121\u8cc7\u6599" if value is None else f"{value:.4f} mV"
+            return "無資料" if value is None else f"{value:.4f} mV"
 
         for row_index, values in enumerate(((first_early, second_early), (first_late, second_late))):
             for column, value in enumerate(values):
@@ -2962,16 +2963,16 @@ class TrignoWindow(QMainWindow):
         chart_header = QHBoxLayout()
         chart_header.setContentsMargins(2, 0, 2, 0)
         chart_header.setSpacing(8)
-        chart_header.addWidget(QLabel(f"{muscle_name}\uff5c\u5b8c\u6574 RMS \u66f2\u7dda", objectName="sectionTitle"))
+        chart_header.addWidget(QLabel(f"{muscle_name}｜完整 RMS 曲線", objectName="sectionTitle"))
         chart_header.addStretch(1)
-        chart_header.addWidget(legend_item(series_colors[0], "\u91cf\u6e2c A"))
+        chart_header.addWidget(legend_item(series_colors[0], "量測 A"))
         chart_header.addSpacing(12)
-        chart_header.addWidget(legend_item(series_colors[1], "\u91cf\u6e2c B"))
+        chart_header.addWidget(legend_item(series_colors[1], "量測 B"))
         chart_layout.addLayout(chart_header)
         plot = pg.PlotWidget()
         plot.setMinimumHeight(270)
         plot.setBackground("#ffffff")
-        plot.setLabel("bottom", "\u91cf\u6e2c\u958b\u59cb\u5f8c\u6642\u9593", units="s")
+        plot.setLabel("bottom", "量測開始後時間", units="s")
         plot.setLabel("left", "RMS", units="mV")
         plot.showGrid(x=True, y=True, alpha=0.16)
         plot.getViewBox().setDefaultPadding(0.0)
@@ -3005,7 +3006,7 @@ class TrignoWindow(QMainWindow):
                 padding = max(abs(high) * 0.08, 0.001)
             plot.setYRange(low - padding, high + padding, padding=0.0)
 
-        self.attachPlotFitButton(plot.getPlotItem(), "\u5b8c\u6574 RMS \u66f2\u7dda", fit_plot)
+        self.attachPlotFitButton(plot.getPlotItem(), "完整 RMS 曲線", fit_plot)
         fit_plot()
         chart_layout.addWidget(plot, 1)
         row.addWidget(chart, 5)
@@ -3253,18 +3254,29 @@ class TrignoWindow(QMainWindow):
     def exportRideReport(self) -> None:
         session = self.rideSession or self.latestRideSession
         if session is None:
+            QMessageBox.information(
+                self, "匯出 HTML 報表",
+                "請先完成或載入一次測試資料。",
+            )
             return
-        default = str((self.collectionOutput or Path(self.pathEdit.text()) / "cycling").with_suffix(".html"))
-        path, _ = QFileDialog.getSaveFileName(self, "匯出 HTML 報表", default, "HTML (*.html)")
+        stem = (self.collectionOutput or Path(self.pathEdit.text()) / "cycling").with_suffix("")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "匯出 HTML 報表", str(stem) + "_report.html", "HTML 網頁 (*.html)"
+        )
         if not path:
             return
         try:
-            export_html(Path(path), session, False, self.referenceRideSession,
-                        self.analysisFtpSpin.value())
+            output = export_report(
+                Path(path).with_suffix(".html"), session,
+                pedal_records=self.summaryRecords,
+                ftp_w=self.analysisFtpSpin.value(),
+                angle_result=self.angleAnalysisResult,
+                reference_session=self.referenceRideSession,
+            )
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "報表匯出失敗", str(exc))
             return
-        self.appendLog(f"HTML 報表已匯出：{Path(path).name}")
+        self.appendLog(f"HTML 報表已匯出：{output.name}")
 
     def startStream(self) -> None:
         if self.calibrationOnly:
@@ -3912,7 +3924,7 @@ class TrignoWindow(QMainWindow):
             plot.setXRange(-10, 0, padding=0)
             plot.setYRange(-1, 1, padding=0)
             plot.setMenuEnabled(False)
-            self.attachPlotFitButton(plot, "\u5373\u6642 EMG \u6ce2\u5f62", self.resetLivePlotView)
+            self.attachPlotFitButton(plot, "即時 EMG 波形", self.resetLivePlotView)
             return
         for row, channel in enumerate(selected):
             mapping = self.mappings[channel]
@@ -3924,7 +3936,7 @@ class TrignoWindow(QMainWindow):
                 plot.hideAxis("bottom")
             plot.showGrid(x=True, y=True, alpha=0.16)
             plot.setMenuEnabled(False)
-            self.attachPlotFitButton(plot, f"{mapping.abbreviation or f'S{channel + 1:02d}'} EMG \u6ce2\u5f62", self.resetLivePlotView)
+            self.attachPlotFitButton(plot, f"{mapping.abbreviation or f'S{channel + 1:02d}'} EMG 波形", self.resetLivePlotView)
             color = QColor(COLORS[channel % len(COLORS)])
             fill = QColor(color)
             fill.setAlpha(56)
