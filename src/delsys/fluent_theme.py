@@ -75,6 +75,7 @@ class FluentThemeManager(QObject):
         QLabel#comparisonSeriesA {{ color: {t['brand_background']}; font-weight: 700; }}
         QLabel#comparisonSeriesB {{ color: {t['danger']}; font-weight: 700; }}
         QFrame[fluentRole="scanResults"] {{ background: {t['surface_secondary']}; border: 1px solid {t['border_primary']}; border-radius: 4px; }}
+        QWidget[fluentRole="scanResultsContent"] {{ background: {t['surface_secondary']}; border: 0; border-radius: 4px; }}
         QLabel#title {{ font-size: 20px; font-weight: 600; }} QLabel#sectionTitle {{ font-size: 14px; font-weight: 600; }} QLabel#muted {{ color: {t['text_secondary']}; }}
         QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTableWidget {{ background: {t['surface_background']}; border: 1px solid {t['border_primary']}; border-radius: 4px; padding: 4px 6px; }}
         QTableWidget::item {{ padding: 5px; }}
