@@ -12,6 +12,17 @@ MUSCLES = {"BF": "股二頭肌", "VM": "股內側肌", "RF": "股直肌", "VL": 
 EXPECTED_PEAK = {"BF": 140, "VM": 80, "RF": 30, "VL": 80, "TA": 330, "GAS": 120, "SOL": 110}
 MUSCLE_KEYS = {"BF": "biceps", "VM": "vastus medialis", "RF": "rectus", "VL": "vastus lateralis","TA": "tibialis", "GAS": "gastroc", "SOL": "soleus"}
 
+
+def _muscle_key(name: str) -> str | None:
+    """Classify both human CSV headers and slot-prefixed collection headers.
+
+    The collector writes names such as ``Vastus_medialis_R`` while imported
+    historical files may use ``S03_R_Vastus medialis``.  Separators must not
+    change the anatomical classification.
+    """
+    normalized = re.sub(r"[_-]+", " ", name.casefold())
+    return next((key for key, token in MUSCLE_KEYS.items() if token in normalized), None)
+
 @dataclass(frozen=True)
 class AngleSettings:
     start: tuple[float, float] = (5.0, 65.0)
@@ -166,6 +177,8 @@ def _circular_mean(degrees):
 def _side_name(name: str, side: str | None) -> str:
     if side not in {"L", "R"}:
         return name
+    if re.match(r"^(?:[LR]_)?S\d+(?:_[LR])?_", name, flags=re.IGNORECASE):
+        return name
     return re.sub(r"_[RL]$", "", name, flags=re.IGNORECASE) + f"_{side}"
 
 
@@ -241,7 +254,7 @@ def analyze_angle_emg(emg_path: Path, pedal_path: Path, sides: dict[str, str],
     unshifted_t = t / scale
     estimates = []
     for index, name in enumerate(names):
-        muscle = next((key for key, token in MUSCLE_KEYS.items() if token in name.casefold()), None)
+        muscle = _muscle_key(name)
         side = sides.get(name)
         if muscle is None or side not in {"L", "R"}:
             continue
@@ -292,7 +305,7 @@ def analyze_angle_emg(emg_path: Path, pedal_path: Path, sides: dict[str, str],
         side = sides.get(name)
         if side not in {"L", "R"}:
             continue
-        muscle = next((key for key, token in MUSCLE_KEYS.items() if token in name.casefold()), None)
+        muscle = _muscle_key(name)
         side_zh = "左" if side == "L" else "右"
         location_zh = side_zh + MUSCLES[muscle] if muscle else side_zh
         angle_deg = left if side == "L" else right
@@ -323,7 +336,7 @@ def analyze_angle_emg(emg_path: Path, pedal_path: Path, sides: dict[str, str],
             segment = filtered[first:last + 1, index]
             frequency, power = welch(segment, fs, nperseg=min(1024, len(segment)))
             mdf = float(frequency[np.searchsorted(np.cumsum(power), power.sum() / 2)])
-            match = re.match(r"S(\d+)", name)
+            match = re.match(r"(?:[LR]_)?S(\d+)(?:_[LR])?", name, flags=re.IGNORECASE)
             short = f"S{int(match.group(1)):02d}" if match else name
             rows.append({"channel": name, "channel_label": _side_name(name, side),
                          "slot": short, "muscle": muscle, "location_zh": location_zh,
