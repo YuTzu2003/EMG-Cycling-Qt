@@ -27,6 +27,7 @@ from delsys.pedal.fit_export import exportPedalFit
 from delsys.pedal.fit_import import load_pedal_fit
 from delsys.pedal.angle_emg import (AngleSettings, analysis_summary_text, analyze_angle_emg,export_angle_emg, phase_intensities)
 from delsys.cycling_bluetooth import CyclingDeviceScanWorker
+from delsys.gopro import GoProCommandWorker, GoProDownloadWorker, GoProMediaListWorker, GoProResult, GoProWifiConnectWorker
 from delsys.fluent_theme import FluentThemeManager
 from delsys.session_analysis import (add_point, analyze, compare_rms, load_session, new_session, peak_envelope, save_session)
 from delsys.session_compare import compare_sessions
@@ -543,6 +544,23 @@ class TrignoWindow(QMainWindow):
         self.initialBluetoothScanStarted = False
         self.selectedScannedDevice: tuple[str, str] | None = None
         self.settings = QSettings("Delsys", "EMG Cycling Monitor")
+        self.goproWorker: GoProCommandWorker | None = None
+        self.goproDownloadWorker: GoProDownloadWorker | None = None
+        self.goproMediaListWorker: GoProMediaListWorker | None = None
+        self.goproWifiWorker: GoProWifiConnectWorker | None = None
+        self.goproWifiSsid: str | None = None
+        self.goproWifiPassword: str | None = None
+        self.goproWifiNextAction: str | None = None
+        self.goproDownloadStartedAt = 0.0
+        self.goproDownloadName = "影片"
+        self.goproAddress = str(self.settings.value("gopro/address", ""))
+        self.goproIdentifier = str(self.settings.value("gopro/identifier", ""))
+        # BLE commands are short-lived; this records the latest verified
+        # camera-control state rather than a permanently open OS connection.
+        self.goproIsConnected = False
+        self.goproRecordingStarted = False
+        self.goproStopPending = False
+        self.goproStopRequested = False
         self.savedPedalAddress = str(self.settings.value("pedal/address", ""))
         self.pedalScanInProgress = False
         self.histories = [deque(maxlen=int(SAMPLE_RATE * 20)) for _ in range(CHANNEL_COUNT)]
@@ -634,6 +652,7 @@ class TrignoWindow(QMainWindow):
         self.setEmgStatus("尚未連線", "idle")
         self.setTrainerConnectionState(False)
         self.setPedalConnectionState(False)
+        self.setGoProConnectionState(False)
         self.setEmgConnectionState(False)
         self.setDatabaseConnectionState(False)
 
@@ -649,10 +668,12 @@ class TrignoWindow(QMainWindow):
         header.setSpacing(6)
         self.trainerConnectionLabel = QLabel(objectName="connectionIndicator")
         self.pedalConnectionLabel = QLabel(objectName="connectionIndicator")
+        self.goproConnectionLabel = QLabel(objectName="connectionIndicator")
         self.emgConnectionLabel = QLabel(objectName="connectionIndicator")
         self.databaseConnectionLabel = QLabel(objectName="connectionIndicator")
         header.addWidget(self.trainerConnectionLabel)
         header.addWidget(self.pedalConnectionLabel)
+        header.addWidget(self.goproConnectionLabel)
         header.addWidget(self.emgConnectionLabel)
         header.addWidget(self.databaseConnectionLabel)
         self.tabs.setCornerWidget(statusCorner, Qt.Corner.TopRightCorner)
@@ -699,9 +720,9 @@ class TrignoWindow(QMainWindow):
         row.setAlignment(Qt.AlignmentFlag.AlignLeft)
         row.addWidget(QLabel("測試項目", objectName="sectionTitle"))
         row.addSpacing(28)
-        for text, attribute in (("EMG", "useEmgCheck"), ("阻力計", "useTrainerCheck"), ("踏板", "usePedalCheck")):
+        for text, attribute in (("EMG", "useEmgCheck"), ("阻力計", "useTrainerCheck"), ("踏板", "usePedalCheck"), ("GoPro 影片", "useGoProCheck")):
             check = QCheckBox(text)
-            check.setChecked(True)
+            check.setChecked(attribute != "useGoProCheck")
             setattr(self, attribute, check)
             row.addWidget(check)
             row.addSpacing(14)
@@ -775,12 +796,16 @@ class TrignoWindow(QMainWindow):
         self.selectedScannedDeviceLabel.setMaximumWidth(300)
         self.assignTrainerButton = QPushButton("設定為阻力計")
         self.assignPedalButton = QPushButton("設定為踏板")
+        self.assignGoProButton = QPushButton("設定為 GoPro")
         self.assignTrainerButton.setEnabled(False)
         self.assignPedalButton.setEnabled(False)
+        self.assignGoProButton.setEnabled(False)
         FluentThemeManager.set_property(self.assignTrainerButton, "fluentAppearance", "dark")
         FluentThemeManager.set_property(self.assignPedalButton, "fluentAppearance", "dark")
+        FluentThemeManager.set_property(self.assignGoProButton, "fluentAppearance", "dark")
         self.assignTrainerButton.clicked.connect(lambda: self.assignSelectedScannedDevice("阻力計"))
         self.assignPedalButton.clicked.connect(lambda: self.assignSelectedScannedDevice("踏板"))
+        self.assignGoProButton.clicked.connect(lambda: self.assignSelectedScannedDevice("GoPro"))
 
         emg = QFrame()
         FluentThemeManager.set_property(emg, "fluentRole", "surface")
@@ -806,6 +831,49 @@ class TrignoWindow(QMainWindow):
         emgLayout.addWidget(self.activeSlotsLabel, 2, 0, 1, 4)
         layout.addWidget(emg)
 
+        gopro = QFrame()
+        FluentThemeManager.set_property(gopro, "fluentRole", "surface")
+        goproLayout = QGridLayout(gopro)
+        goproLayout.setContentsMargins(14, 12, 14, 12)
+        goproLayout.setHorizontalSpacing(12)
+        goproLayout.setVerticalSpacing(8)
+        goproLayout.addWidget(QLabel("GoPro 連線", objectName="sectionTitle"), 0, 0, 1, 4)
+        self.goproTestButton = QPushButton("配對並測試 GoPro")
+        self.goproTestButton.setFixedWidth(180)
+        FluentThemeManager.set_property(self.goproTestButton, "fluentAppearance", "dark")
+        self.goproDisconnectButton = QPushButton("中斷 GoPro")
+        self.goproDisconnectButton.setEnabled(False)
+        self.goproStatusLabel = QLabel("尚未測試；請先讓相機進入配對模式，測試不會開始錄影", objectName="muted")
+        self.goproStatusLabel.setWordWrap(True)
+        goproLayout.addWidget(self.goproTestButton, 1, 0)
+        goproLayout.addWidget(self.goproDisconnectButton, 1, 1)
+        goproLayout.addWidget(self.goproStatusLabel, 1, 2, 1, 2)
+        self.goproDownloadButton = QPushButton("下載最新影片")
+        self.goproDownloadButton.setToolTip("自動連上 GoPro Wi-Fi，下載最新 MP4")
+        FluentThemeManager.set_property(self.goproDownloadButton, "fluentAppearance", "primary")
+        self.goproChooseVideoButton = QPushButton("選擇影片下載")
+        self.goproDownloadStatusLabel = QLabel("配對成功後可自動連上 GoPro Wi-Fi 並下載", objectName="muted")
+        self.goproDownloadStatusLabel.setWordWrap(True)
+        goproLayout.addWidget(self.goproDownloadButton, 2, 0)
+        goproLayout.addWidget(self.goproChooseVideoButton, 2, 1)
+        goproLayout.addWidget(self.goproDownloadStatusLabel, 2, 2, 1, 2)
+        self.goproVideoOutputEdit = QLineEdit(str(self.settings.value("gopro/video_output_dir", "")))
+        self.goproVideoOutputEdit.setPlaceholderText("預設：CSV 輸出資料夾 / gopro_videos")
+        self.goproVideoOutputButton = QPushButton("選擇影片資料夾")
+        goproLayout.addWidget(QLabel("影片儲存位置"), 3, 0)
+        goproLayout.addWidget(self.goproVideoOutputEdit, 3, 1, 1, 2)
+        goproLayout.addWidget(self.goproVideoOutputButton, 3, 3)
+        goproLayout.setColumnStretch(3, 1)
+        self.goproTestButton.clicked.connect(self.testGoProConnection)
+        self.goproDisconnectButton.clicked.connect(self.disconnectGoPro)
+        self.goproDownloadButton.clicked.connect(self.downloadLatestGoProVideo)
+        self.goproChooseVideoButton.clicked.connect(self.chooseGoProVideoToDownload)
+        self.goproVideoOutputButton.clicked.connect(self.chooseGoProVideoOutput)
+        self.goproVideoOutputEdit.editingFinished.connect(
+            lambda: self.settings.setValue("gopro/video_output_dir", self.goproVideoOutputEdit.text().strip())
+        )
+        layout.addWidget(gopro)
+
         # The scan list belongs to the device connection workflow.  Keep it in
         # the same panel so choosing a device and connecting it are adjacent.
         scanResultsLayout = QVBoxLayout()
@@ -822,8 +890,10 @@ class TrignoWindow(QMainWindow):
         scanResultsHeader.addWidget(self.selectedScannedDeviceLabel)
         FluentThemeManager.set_property(self.assignTrainerButton, "fluentAppearance", "success")
         FluentThemeManager.set_property(self.assignPedalButton, "fluentAppearance", "warning")
+        FluentThemeManager.set_property(self.assignGoProButton, "fluentAppearance", "primary")
         scanResultsHeader.addWidget(self.assignTrainerButton)
         scanResultsHeader.addWidget(self.assignPedalButton)
+        scanResultsHeader.addWidget(self.assignGoProButton)
         scanResultsHeader.addWidget(self.scanTrainerButton)
         scanResultsLayout.addLayout(scanResultsHeader)
         self.scanResultsScroll = QScrollArea()
@@ -2491,6 +2561,20 @@ class TrignoWindow(QMainWindow):
     def setTrainerConnectionState(self, connected: bool) -> None:
         self.setConnectionIndicator(self.trainerConnectionLabel, "阻力計", connected)
 
+    def setGoProConnectionState(self, connected: bool, recording: bool = False) -> None:
+        """Update the GoPro control state shown in the upper-right header."""
+        self.goproIsConnected = connected
+        if recording:
+            # BLE write acknowledgement only confirms delivery to the camera;
+            # this lightweight protocol has no encoding-state response.
+            state, severity = "錄影指令已送出（未確認）", "warning"
+        elif connected:
+            state, severity = "控制已驗證", "success"
+        else:
+            state, severity = "未連線", "danger"
+        self.goproConnectionLabel.setText(f"● GoPro：{state}")
+        FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", severity)
+
     def setDatabaseConnectionState(self, connected: bool) -> None:
         self.setConnectionIndicator(self.databaseConnectionLabel, "資料庫", connected)
 
@@ -2739,6 +2823,234 @@ class TrignoWindow(QMainWindow):
         if hasattr(self, "eventLog"):
             self.eventLog.appendPlainText(f"{datetime.now():%H:%M:%S}  {message}")
 
+    def testGoProConnection(self) -> None:
+        """Discover and connect to the camera without changing its recording state."""
+        if self.goproWorker and self.goproWorker.isRunning():
+            QMessageBox.information(self, "GoPro 連線", "GoPro 指令正在執行，請稍候。")
+            return
+        self.goproTestButton.setEnabled(False)
+        self.goproDisconnectButton.setEnabled(True)
+        self.goproStatusLabel.setText("正在以藍牙配對並驗證 GoPro 控制權限…")
+        self.goproConnectionLabel.setText("● GoPro：連線中")
+        FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", "warning")
+        self.appendLog("GoPro | pairing and verifying Bluetooth control…")
+        # Keep this verified BLE session open.  Collection can then send the
+        # shutter command immediately instead of reconnecting several seconds
+        # later.
+        worker = GoProCommandWorker("connect", self.goproAddress or None, self.goproIdentifier or None)
+        self.goproWorker = worker
+        worker.completed.connect(self.goProCommandCompleted)
+        worker.failed.connect(lambda message: self.goProCommandFailed("verify", message))
+        worker.diagnostic.connect(self.goProDiagnostic)
+        worker.finished.connect(self.goProCommandFinished)
+        worker.start()
+
+    def disconnectGoPro(self) -> None:
+        """Close the held BLE session without affecting other collection data."""
+        if self.goproWorker and self.goproWorker.isRunning() and self.goproWorker.action == "connect":
+            self.appendLog("GoPro | disconnect requested")
+            self.goproStatusLabel.setText("正在中斷 GoPro 藍牙連線…")
+            self.goproDisconnectButton.setEnabled(False)
+            self.goproWorker.request_disconnect()
+            return
+        self.setGoProConnectionState(False)
+        self.goproDisconnectButton.setEnabled(False)
+        self.goproStatusLabel.setText("GoPro 已中斷")
+
+    def chooseGoProVideoOutput(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self, "選擇 GoPro 影片儲存資料夾", self.goproVideoOutputEdit.text() or self.pathEdit.text(),
+        )
+        if directory:
+            self.goproVideoOutputEdit.setText(directory)
+            self.settings.setValue("gopro/video_output_dir", directory)
+
+    def downloadLatestGoProVideo(self) -> None:
+        """Automatically join the GoPro AP, then download its latest MP4."""
+        self.connectGoProWifiThen("latest")
+
+    def chooseGoProVideoToDownload(self) -> None:
+        """Automatically join the GoPro AP, then show the camera MP4 list."""
+        self.connectGoProWifiThen("choose")
+
+    def connectGoProWifiThen(self, action: str) -> None:
+        """Switch Windows to the paired camera AP before a media operation."""
+        if self.goproDownloadWorker and self.goproDownloadWorker.isRunning():
+            QMessageBox.information(self, "GoPro 影片", "影片正在下載中。")
+            return
+        if (self.goproMediaListWorker and self.goproMediaListWorker.isRunning()) or (
+            self.goproWifiWorker and self.goproWifiWorker.isRunning()
+        ):
+            return
+        if not self.goproWifiSsid or not self.goproWifiPassword:
+            QMessageBox.warning(self, "GoPro Wi-Fi", "請先按「配對並測試 GoPro」，讓程式讀取相機的 Wi-Fi 資訊。")
+            return
+        self.goproDownloadButton.setEnabled(False)
+        self.goproChooseVideoButton.setEnabled(False)
+        self.goproWifiNextAction = action
+        self.goproDownloadStatusLabel.setText("正在自動連線至 GoPro Wi-Fi…")
+        self.appendLog(f"GoPro | connecting Windows to camera Wi-Fi: {self.goproWifiSsid}")
+        worker = GoProWifiConnectWorker(self.goproWifiSsid, self.goproWifiPassword)
+        self.goproWifiWorker = worker
+        worker.connected.connect(self.goProWifiConnected)
+        worker.failed.connect(self.goProWifiFailed)
+        worker.finished.connect(self.goProWifiFinished)
+        worker.start()
+
+    def goProWifiConnected(self) -> None:
+        action, self.goproWifiNextAction = self.goproWifiNextAction, None
+        self.appendLog("GoPro | Windows connected to GoPro Wi-Fi")
+        if action == "latest":
+            self.downloadGoProVideo(None)
+            return
+        self.goproDownloadStatusLabel.setText("已連上 GoPro Wi-Fi；正在讀取影片清單…")
+        worker = GoProMediaListWorker()
+        self.goproMediaListWorker = worker
+        worker.completed.connect(self.goProMediaListReady)
+        worker.failed.connect(self.goProMediaListFailed)
+        worker.finished.connect(self.goProMediaListFinished)
+        worker.start()
+
+    def goProWifiFailed(self, message: str) -> None:
+        self.goproWifiNextAction = None
+        self.goproDownloadStatusLabel.setText("無法自動連上 GoPro Wi-Fi；請確認相機開機且在附近")
+        self.appendLog(f"GoPro | automatic Wi-Fi connection failed: {message or 'Unknown error'}")
+
+    def goProWifiFinished(self) -> None:
+        worker, self.goproWifiWorker = self.goproWifiWorker, None
+        if worker:
+            worker.deleteLater()
+        if not (self.goproDownloadWorker and self.goproDownloadWorker.isRunning()) and not (
+            self.goproMediaListWorker and self.goproMediaListWorker.isRunning()
+        ):
+            self.goproDownloadButton.setEnabled(True)
+            self.goproChooseVideoButton.setEnabled(True)
+
+    def readGoProMediaList(self) -> None:
+        """Fetch the list once Wi-Fi has been connected by the preceding worker."""
+        if self.goproMediaListWorker and self.goproMediaListWorker.isRunning():
+            return
+        self.goproDownloadStatusLabel.setText("正在讀取 GoPro 影片清單…")
+        self.appendLog("GoPro | reading media list from the connected GoPro Wi-Fi")
+        worker = GoProMediaListWorker()
+        self.goproMediaListWorker = worker
+        worker.completed.connect(self.goProMediaListReady)
+        worker.failed.connect(self.goProMediaListFailed)
+        worker.finished.connect(self.goProMediaListFinished)
+        worker.start()
+
+    def goProMediaListReady(self, videos: object) -> None:
+        selections = list(videos)
+        labels = [f"{folder}/{name}" for folder, name in selections]
+        label, accepted = QInputDialog.getItem(
+            self, "選擇 GoPro 影片", "MP4 影片：", labels, 0, False,
+        )
+        if not accepted:
+            self.goproDownloadStatusLabel.setText("已取消選擇影片")
+            return
+        selection = selections[labels.index(label)]
+        self.downloadGoProVideo(selection)
+
+    def goProMediaListFailed(self, message: str) -> None:
+        self.goproDownloadStatusLabel.setText("讀取影片清單失敗；請確認 Windows 已連上 GoPro Wi-Fi")
+        self.appendLog(f"GoPro | media list failed: {message or 'Unknown error'}")
+
+    def goProMediaListFinished(self) -> None:
+        worker, self.goproMediaListWorker = self.goproMediaListWorker, None
+        if worker:
+            worker.deleteLater()
+        if not (self.goproDownloadWorker and self.goproDownloadWorker.isRunning()):
+            self.goproDownloadButton.setEnabled(True)
+            self.goproChooseVideoButton.setEnabled(True)
+
+    def downloadGoProVideo(self, selection: tuple[str, str] | None) -> None:
+        """Download one selected video, or the newest video when selection is None."""
+        if self.goproDownloadWorker and self.goproDownloadWorker.isRunning():
+            QMessageBox.information(self, "GoPro 影片", "影片正在下載中。")
+            return
+        configured = self.goproVideoOutputEdit.text().strip()
+        root = Path(configured or self.pathEdit.text().strip() or QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DocumentsLocation
+        ))
+        destination = root if configured else root / "gopro_videos"
+        collision = "rename"
+        if selection and (destination / selection[1]).exists():
+            prompt = QMessageBox(self)
+            prompt.setWindowTitle("同名 GoPro 影片")
+            prompt.setText(f"{selection[1]} 已存在。要如何處理？")
+            overwrite = prompt.addButton("覆寫", QMessageBox.ButtonRole.DestructiveRole)
+            rename = prompt.addButton("重新命名", QMessageBox.ButtonRole.AcceptRole)
+            skip = prompt.addButton("略過", QMessageBox.ButtonRole.RejectRole)
+            prompt.exec()
+            clicked = prompt.clickedButton()
+            collision = "overwrite" if clicked is overwrite else "skip" if clicked is skip else "rename"
+            if collision == "skip":
+                self.goproDownloadStatusLabel.setText(f"已略過：{selection[1]}")
+                self.goproDownloadButton.setEnabled(True)
+                self.goproChooseVideoButton.setEnabled(True)
+                return
+        self.goproDownloadButton.setEnabled(False)
+        self.goproChooseVideoButton.setEnabled(False)
+        title = "選擇的影片" if selection else "最新影片"
+        self.goproDownloadName = selection[1] if selection else "最新影片"
+        self.goproDownloadStartedAt = time.monotonic()
+        self.goproDownloadStatusLabel.setText(f"正在下載{title}…")
+        self.appendLog(f"GoPro | downloading {title} from the connected GoPro Wi-Fi")
+        worker = GoProDownloadWorker(destination, selection, collision)
+        self.goproDownloadWorker = worker
+        worker.file_started.connect(self.goProDownloadFileStarted)
+        worker.progress.connect(self.goProDownloadProgress)
+        worker.completed.connect(self.goProDownloadCompleted)
+        worker.failed.connect(self.goProDownloadFailed)
+        worker.finished.connect(self.goProDownloadFinished)
+        worker.start()
+
+    def goProDownloadFileStarted(self, name: str) -> None:
+        self.goproDownloadName = name
+        self.goproDownloadStatusLabel.setText(f"正在下載：{name}")
+
+    def goProDownloadProgress(self, received: int, total: int) -> None:
+        elapsed = max(time.monotonic() - self.goproDownloadStartedAt, 0.001)
+        if total:
+            rate = received / elapsed
+            remaining = max(0, int((total - received) / rate)) if rate else 0
+            self.goproDownloadStatusLabel.setText(
+                f"正在下載：{self.goproDownloadName} — {received / total:.0%}，剩約 {remaining} 秒"
+            )
+        else:
+            self.goproDownloadStatusLabel.setText(
+                f"正在下載：{self.goproDownloadName} — {received / 1024 / 1024:.1f} MB"
+            )
+
+    def goProDownloadCompleted(self, path: object) -> None:
+        video_path = Path(str(path))
+        self.goproDownloadStatusLabel.setText(f"已下載：{video_path.name}")
+        self.appendLog(f"GoPro | video downloaded: {video_path}")
+        session = self.rideSession or self.latestRideSession
+        if session is not None:
+            session.setdefault("gopro", {})["downloaded_video"] = str(video_path)
+            # A collection that has already ended has had its analysis JSON
+            # written. Update that metadata after a later download as well.
+            if self.rideSession is None and self.collectionOutput:
+                try:
+                    save_session(analysisOutputPath(self.collectionOutput), session)
+                except (OSError, ValueError) as exc:
+                    self.appendLog(f"GoPro | video link could not be saved to analysis JSON: {exc}")
+
+    def goProDownloadFailed(self, message: str) -> None:
+        detail = message or "Unknown download error"
+        self.goproDownloadStatusLabel.setText(
+            "下載失敗：GoPro Wi-Fi 無回應。請在 Windows Wi-Fi 選取相機的 GP-xxxx 網路後再試"
+        )
+        self.appendLog(f"GoPro | video download failed: {detail}")
+
+    def goProDownloadFinished(self) -> None:
+        worker, self.goproDownloadWorker = self.goproDownloadWorker, None
+        if worker:
+            worker.deleteLater()
+        self.goproDownloadButton.setEnabled(True)
+        self.goproChooseVideoButton.setEnabled(True)
+
     def setStreaming(self, streaming: bool) -> None:
         testing = self.testWorker is not None
         self.startButton.setEnabled(not streaming and not testing)
@@ -2753,7 +3065,13 @@ class TrignoWindow(QMainWindow):
         self.pathEdit.setEnabled(not streaming and self.recordCheck.isChecked())
         self.browseButton.setEnabled(not streaming and self.recordCheck.isChecked())
         self.recordingIndicator.setVisible(streaming)
-        for check in (self.useEmgCheck, self.useTrainerCheck, self.usePedalCheck):
+        if hasattr(self, "goproTestButton"):
+            self.goproTestButton.setEnabled(not streaming and not (self.goproWorker and self.goproWorker.isRunning()))
+        if hasattr(self, "goproDisconnectButton"):
+            self.goproDisconnectButton.setEnabled(
+                not streaming and bool(self.goproWorker and self.goproWorker.isRunning())
+            )
+        for check in (self.useEmgCheck, self.useTrainerCheck, self.usePedalCheck, self.useGoProCheck):
             check.setEnabled(not streaming)
 
     def chooseOutput(self) -> None:
@@ -4098,8 +4416,12 @@ class TrignoWindow(QMainWindow):
         if self.calibrationOnly:
             self.startCalibrationStream()
             return
-        if not any((self.useEmgCheck.isChecked(), self.useTrainerCheck.isChecked(), self.usePedalCheck.isChecked())):
+        if not any((self.useEmgCheck.isChecked(), self.useTrainerCheck.isChecked(), self.usePedalCheck.isChecked(), self.useGoProCheck.isChecked())):
             QMessageBox.warning(self, "尚未選擇設備", "請在第一頁至少勾選一個本次要測試的設備。")
+            self.tabs.setCurrentWidget(self.settingsTab)
+            return
+        if self.useGoProCheck.isChecked() and not self.goproAddress:
+            QMessageBox.warning(self, "GoPro 尚未選擇", "請先在設定頁掃描 GoPro、點選它，並按「設定為 GoPro」。")
             self.tabs.setCurrentWidget(self.settingsTab)
             return
         if not self.useEmgCheck.isChecked():
@@ -4165,6 +4487,10 @@ class TrignoWindow(QMainWindow):
         self.streamWorker.finished.connect(self.streamFinished)
         self.setStreaming(True)
         self.streamWorker.start()
+        # Start the camera as collection begins.  Waiting for a later EMG
+        # status callback made the GoPro appear unresponsive after this button
+        # was pressed; beginGoProRecording guards against duplicate requests.
+        self.beginGoProRecording()
 
     def startCalibrationStream(self) -> None:
         host = self.hostEdit.text().strip()
@@ -4259,6 +4585,7 @@ class TrignoWindow(QMainWindow):
         self.bikeOnlySession = True
         self.beginTrainerRecording()
         self.beginPedalRecording()
+        self.beginGoProRecording()
         self.setStreaming(True)
         self.setEmgStatus("僅收集騎乘裝置資料", "streaming")
         self.startCountdown()
@@ -4266,6 +4593,7 @@ class TrignoWindow(QMainWindow):
     def stopStream(self) -> None:
         if self.remainingSeconds > 0:
             self.collectionStoppedEarly = True
+        self.stopGoProRecording()
         if self.bikeOnlySession:
             self.finishBikeOnlySession()
             return
@@ -4276,6 +4604,7 @@ class TrignoWindow(QMainWindow):
 
     def finishBikeOnlySession(self) -> None:
         self.countdownTimer.stop()
+        self.stopGoProRecording()
         self.closeTrainerRecording()
         self.closePedalRecording()
         self.finishRideAnalysis()
@@ -4293,11 +4622,133 @@ class TrignoWindow(QMainWindow):
         if text == "串流中" and (not self.calibrationOnly or self.calibrationRecording):
             self.beginTrainerRecording()
             self.beginPedalRecording()
+            self.beginGoProRecording()
         if text == "串流中":
             if self.calibrationOnly:
                 self.startCalibrationCountdown()
             else:
                 self.startCountdown()
+
+    def beginGoProRecording(self) -> None:
+        """Start GoPro asynchronously once the data collection is live."""
+        if not self.useGoProCheck.isChecked():
+            return
+        if self.goproRecordingStarted:
+            self.appendLog("GoPro | start skipped: app already marked the camera as recording")
+            return
+        if self.goproWorker and self.goproWorker.isRunning():
+            if self.goproWorker.action == "connect":
+                self.appendLog("GoPro | sending start through the pre-connected Bluetooth session")
+                self.goproConnectionLabel.setText("● GoPro：正在啟動錄影")
+                FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", "warning")
+                self.goproWorker.request_start()
+            else:
+                self.appendLog("GoPro | previous command is still running")
+            return
+        self.appendLog("GoPro | no pre-connected session; connect and test GoPro first")
+        self.goproStatusLabel.setText("請先按「配對並測試 GoPro」，保持連線後再開始收集。")
+
+    def stopGoProRecording(self) -> None:
+        """Request camera stop without blocking the EMG/CSV shutdown path."""
+        # A start worker now owns one persistent BLE session.  Do not open a
+        # competing second connection: ask that same worker to send Stop.
+        if self.goproWorker and self.goproWorker.isRunning() and self.goproWorker.action == "connect":
+            if self.goproStopRequested:
+                return
+            self.goproStopRequested = True
+            self.goproRecordingStarted = False
+            self.appendLog("GoPro | stop requested on the active Bluetooth session")
+            self.goproConnectionLabel.setText("● GoPro：正在停止錄影")
+            FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", "warning")
+            self.goproWorker.request_stop()
+            return
+        if not self.goproRecordingStarted:
+            return
+        self.goproRecordingStarted = False
+        self.appendLog("GoPro | stopping recording…")
+        self.goproConnectionLabel.setText("● GoPro：正在停止錄影")
+        FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", "warning")
+        worker = GoProCommandWorker("stop", self.goproAddress or None, self.goproIdentifier or None)
+        self.goproWorker = worker
+        worker.completed.connect(self.goProCommandCompleted)
+        worker.failed.connect(lambda message: self.goProCommandFailed("stop", message))
+        worker.finished.connect(self.goProCommandFinished)
+        worker.start()
+
+    def goProCommandCompleted(self, result: GoProResult) -> None:
+        self.goproAddress = result.address
+        self.settings.setValue("gopro/address", result.address)
+        if result.wifi_ssid and result.wifi_password:
+            self.goproWifiSsid = result.wifi_ssid
+            self.goproWifiPassword = result.wifi_password
+        timestamp = result.timestamp.isoformat(timespec="milliseconds")
+        if result.action == "start":
+            self.goproRecordingStarted = True
+            self.setGoProConnectionState(True, recording=True)
+        elif result.action == "stop":
+            self.goproRecordingStarted = False
+            self.goproStopRequested = False
+            self.setGoProConnectionState(True)
+        else:
+            self.setGoProConnectionState(True)
+        if result.action == "verify" and hasattr(self, "goproStatusLabel"):
+            self.goproStatusLabel.setText(f"已連線：{result.name}（{result.address}）；未開始錄影")
+            self.goproDisconnectButton.setEnabled(True)
+        elif result.action == "start" and hasattr(self, "goproStatusLabel"):
+            self.goproStatusLabel.setText("錄影指令已送出；請確認 GoPro 螢幕上的紅點／計時器")
+        elif result.action == "stop" and hasattr(self, "goproStatusLabel"):
+            self.goproStatusLabel.setText("已連線；GoPro 已停止錄影")
+        if self.rideSession is not None:
+            video = self.rideSession.setdefault("gopro", {})
+            video[f"{result.action}_timestamp"] = timestamp
+            video["camera_name"] = result.name
+            video["bluetooth_address"] = result.address
+            for detail in result.details:
+                if detail.startswith("Camera model: "):
+                    video["camera_model"] = detail.removeprefix("Camera model: ")
+                elif detail.startswith("Firmware revision: "):
+                    video["firmware_revision"] = detail.removeprefix("Firmware revision: ")
+        self.appendLog(f"GoPro | {result.action} succeeded: {result.name} at {timestamp}")
+        for detail in result.details:
+            self.appendLog(f"GoPro | {detail}")
+
+    def goProDiagnostic(self, message: str) -> None:
+        """Log BLE notifications and promote successful shutter responses to UI state."""
+        self.appendLog(f"GoPro | {message}")
+        # Open GoPro command response format is: length, command id, status.
+        # 02 01 00 therefore confirms shutter (01) succeeded (00).
+        if message.strip().endswith("02 01 00") and self.goproRecordingStarted:
+            self.goproConnectionLabel.setText("● GoPro：錄影中（已確認）")
+            FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", "success")
+            if hasattr(self, "goproStatusLabel"):
+                self.goproStatusLabel.setText("GoPro 錄影中；已收到快門成功回覆")
+
+    def goProCommandFailed(self, action: str, message: str) -> None:
+        # A camera is optional: data acquisition remains valid when it is absent.
+        self.goproRecordingStarted = False
+        self.setGoProConnectionState(False)
+        if hasattr(self, "goproDisconnectButton"):
+            self.goproDisconnectButton.setEnabled(False)
+        if action == "verify" and hasattr(self, "goproStatusLabel"):
+            self.goproStatusLabel.setText(f"連線失敗：{message}")
+        elif hasattr(self, "goproStatusLabel"):
+            self.goproStatusLabel.setText(f"GoPro {action} 失敗：{message}")
+        self.appendLog(f"GoPro | {action} failed (EMG collection continues): {message}")
+
+    def goProCommandFinished(self) -> None:
+        worker, self.goproWorker = self.goproWorker, None
+        self.goproStopRequested = False
+        if worker:
+            worker.deleteLater()
+            if worker.action == "connect" and not self.goproRecordingStarted:
+                self.setGoProConnectionState(False)
+                if hasattr(self, "goproDisconnectButton"):
+                    self.goproDisconnectButton.setEnabled(False)
+        if hasattr(self, "goproTestButton"):
+            self.goproTestButton.setEnabled(not self.streamWorker and not self.bikeOnlySession and not self.goproRecordingStarted)
+        if self.goproStopPending:
+            self.goproStopPending = False
+            QTimer.singleShot(0, self.stopGoProRecording)
 
     def beginTrainerRecording(self) -> None:
         self.beginCollectionDistance()
@@ -4701,6 +5152,7 @@ class TrignoWindow(QMainWindow):
         if worker:
             worker.deleteLater()
         self.countdownTimer.stop()
+        self.stopGoProRecording()
         self.closeTrainerRecording()
         self.closePedalRecording()
         if not self.calibrationOnly:
@@ -4833,7 +5285,7 @@ class TrignoWindow(QMainWindow):
         for address, name in sorted(devices, key=lambda item: item[1].casefold()):
             button = QPushButton(f"{name or 'Unknown device'}  ·  {address}")
             button.setCheckable(True)
-            button.setToolTip("點選此裝置，再在上方設定為阻力計或踏板")
+            button.setToolTip("點選此裝置，再在上方設定為阻力計、踏板或 GoPro")
             button.setFixedWidth(500)
             FluentThemeManager.set_property(button, "fluentRole", "scanResult")
             button.clicked.connect(
@@ -4855,6 +5307,7 @@ class TrignoWindow(QMainWindow):
         self.selectedScannedDeviceLabel.setText(label)
         self.assignTrainerButton.setEnabled(True)
         self.assignPedalButton.setEnabled(True)
+        self.assignGoProButton.setEnabled(True)
         self.appendLog(f"Device selected | {label}")
 
     def assignSelectedScannedDevice(self, role: str) -> None:
@@ -4873,6 +5326,14 @@ class TrignoWindow(QMainWindow):
             self.pedalDevices.clear()
             self.pedalDevices.addItem(label, address)
             self.pedalDevices.setCurrentIndex(0)
+        elif role == "GoPro":
+            self.goproAddress = address
+            suffix = name.rsplit(" ", 1)[-1]
+            self.goproIdentifier = suffix if suffix.isdigit() else ""
+            self.settings.setValue("gopro/address", address)
+            self.settings.setValue("gopro/identifier", self.goproIdentifier)
+            self.setGoProConnectionState(False)
+            self.goproStatusLabel.setText(f"已選擇：{label}；可按「測試 GoPro 連線」")
         self.appendLog(f"Device assignment | {role}: {label}")
 
     def closeEvent(self, event) -> None:  # noqa: N802
@@ -4908,6 +5369,28 @@ class TrignoWindow(QMainWindow):
                 event.ignore()
                 QTimer.singleShot(150, self.close)
                 return
+        if self.goproWorker and self.goproWorker.isRunning():
+            self.goproWorker.request_disconnect()
+            if not self.goproWorker.wait(5000):
+                self.appendLog("GoPro Bluetooth session is still stopping; close delayed")
+                event.ignore()
+                QTimer.singleShot(150, self.close)
+                return
+        if self.goproDownloadWorker and self.goproDownloadWorker.isRunning():
+            self.appendLog("GoPro video download is still running; close delayed")
+            event.ignore()
+            QTimer.singleShot(250, self.close)
+            return
+        if self.goproMediaListWorker and self.goproMediaListWorker.isRunning():
+            self.appendLog("GoPro media list is still loading; close delayed")
+            event.ignore()
+            QTimer.singleShot(250, self.close)
+            return
+        if self.goproWifiWorker and self.goproWifiWorker.isRunning():
+            self.appendLog("GoPro Wi-Fi connection is still running; close delayed")
+            event.ignore()
+            QTimer.singleShot(250, self.close)
+            return
         if self.bikeOnlySession:
             self.finishBikeOnlySession()
         if self.trainerWorker.isRunning():
