@@ -1,4 +1,5 @@
 from __future__ import annotations
+import csv
 import sys
 import time
 from dataclasses import asdict
@@ -24,8 +25,8 @@ from delsys.pedal.recording import PedalCsvRecorder, pedalOutputPath
 from delsys.pedal.analysis import analyze_pedal_records, pedal_analysis_lines, pedal_summary_lines, summarize_pedal_records
 from delsys.pedal.worker import PedalWorker
 from delsys.pedal.fit_export import exportPedalFit
-from delsys.pedal.fit_import import load_pedal_fit
-from delsys.pedal.angle_emg import (AngleSettings, analysis_summary_text, analyze_angle_emg,export_angle_emg, phase_intensities)
+from delsys.pedal.csv_import import is_calibrated_angle_csv, load_pedal_csv
+from delsys.pedal.angle_emg import (AngleSettings, _angles, analysis_summary_text, analyze_angle_emg,export_angle_emg, phase_intensities)
 from delsys.cycling_bluetooth import CyclingDeviceScanWorker
 from delsys.fluent_theme import FluentThemeManager
 from delsys.session_analysis import (add_point, analyze, compare_rms, load_session, new_session, peak_envelope, save_session)
@@ -600,6 +601,7 @@ class TrignoWindow(QMainWindow):
         self.angleAnalysisResult: dict | None = None
         self.angleEmgPath: Path | None = None
         self.anglePedalPath: Path | None = None
+        self.pendingAutoAngleAnalysis = False
         self.calibrationSession: CalibrationSession | None = None
         self.calibrationOnly = False
         self.calibrationRecording = False
@@ -1114,13 +1116,17 @@ class TrignoWindow(QMainWindow):
         FluentThemeManager.set_property(self.rideStateLabel, "fluentSeverity", "info")
         actions = QHBoxLayout()
         actions.setSpacing(4)
-        self.importFitButton = QPushButton("匯入FIT檔")
-        self.importFitButton.setAccessibleName("匯入 FIT 活動檔")
-        self.importFitButton.setToolTip("匯入 .fit 檔並顯示功率、踏頻與左右平衡摘要")
-        FluentThemeManager.set_property(self.importFitButton, "fluentAppearance", "primary")
+        self.importPedalCsvButton = QPushButton("匯入踏板 CSV")
+        self.importPedalCsvButton.setAccessibleName("匯入踏板 CSV")
+        self.importPedalCsvButton.setToolTip("匯入踏板 CSV 供踏板摘要與角度分析共用；也可匯入校正角度 CSV 供角度分析")
+        FluentThemeManager.set_property(self.importPedalCsvButton, "fluentAppearance", "primary")
         self.importEmgAnalysisButton = QPushButton("匯入原始 EMG")
         self.importEmgAnalysisButton.setToolTip("匯入原始 EMG CSV，重新產生 RMS 平均、Peak 與包絡線分析")
         FluentThemeManager.set_property(self.importEmgAnalysisButton, "fluentAppearance", "primary")
+        self.angleExportButton = QPushButton("匯出角度分析")
+        self.angleExportButton.setAccessibleName("匯出踩踏角度分析結果")
+        self.angleExportButton.setEnabled(False)
+        FluentThemeManager.set_property(self.angleExportButton, "fluentAppearance", "dark")
         self.currentSessionSummaryButton = QPushButton("顯示本次收集")
         self.currentSessionSummaryButton.setEnabled(False)
         self.currentSessionSummaryButton.setToolTip("切換回本程式最新收集的踏板資料")
@@ -1130,7 +1136,8 @@ class TrignoWindow(QMainWindow):
         FluentThemeManager.set_property(self.exportReportButton, "fluentAppearance", "success")
         actions.addWidget(self.currentSessionSummaryButton)
         actions.addWidget(self.importEmgAnalysisButton)
-        actions.addWidget(self.importFitButton)
+        actions.addWidget(self.importPedalCsvButton)
+        actions.addWidget(self.angleExportButton)
         actions.addWidget(self.exportReportButton)
         heading.addLayout(actions)
         heading.addSpacing(12)
@@ -1196,7 +1203,7 @@ class TrignoWindow(QMainWindow):
         pedalInfoLayout.setSpacing(8)
         pedalInfoLayout.addWidget(QLabel("踏板資訊", objectName="sectionTitle"))
         self.summaryDetails = QLabel(objectName="muted")
-        self.summaryDetails.setText("完成踏板收集，或匯入FIT檔後，摘要會顯示在這裡")
+        self.summaryDetails.setText("完成踏板收集，或匯入踏板 CSV 後，摘要會顯示在這裡")
         self.summaryDetails.setTextFormat(Qt.TextFormat.PlainText)
         self.summaryDetails.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.summaryDetails.setWordWrap(True)
@@ -1328,112 +1335,22 @@ class TrignoWindow(QMainWindow):
         compareLayout.addWidget(self.comparisonNotes)
         self.comparisonTab = comparePage
         anglePage = QWidget()
-        angleLayout = QHBoxLayout(anglePage)
-        angleLayout.setSpacing(12)
-        angleSetupFrame = QFrame()
-        angleSetupFrame.setFixedWidth(230)
-        angleSetupLayout = QVBoxLayout(angleSetupFrame)
-        angleSetupLayout.setContentsMargins(14, 12, 14, 12)
-        angleSetupLayout.setSpacing(8)
-        angleFiles = QVBoxLayout()
-        self.angleEmgButton = QPushButton("選擇 EMG CSV")
-        self.angleEmgButton.setAccessibleDescription("選擇原始肌電資料 CSV 檔")
-        self.anglePedalButton = QPushButton("選擇踏板 CSV")
-        self.anglePedalButton.setAccessibleDescription("選擇同一次騎乘的踏板或校正角度 CSV 檔")
-        self.angleRunButton = QPushButton("開始分析", objectName="primary")
-        self.angleExportButton = QPushButton("匯出分析結果")
-        self.angleExportButton.setEnabled(False)
-        FluentThemeManager.set_property(self.angleEmgButton, "fluentAppearance", "primary")
-        FluentThemeManager.set_property(self.anglePedalButton, "fluentAppearance", "warning")
-        FluentThemeManager.set_property(self.angleRunButton, "fluentAppearance", "success")
-        FluentThemeManager.set_property(self.angleExportButton, "fluentAppearance", "dark")
-        for widget in (self.angleEmgButton, self.anglePedalButton, self.angleRunButton, self.angleExportButton):
-            widget.setFixedWidth(202)
-            widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            angleFiles.addWidget(widget, 0, Qt.AlignLeft)
-        angleFiles.addStretch()
-        angleSetupLayout.addLayout(angleFiles)
-
+        angleLayout = QVBoxLayout(anglePage)
+        angleLayout.setSpacing(8)
+        angleSources = QHBoxLayout()
+        self.angleEmgLabel = QLabel("EMG：請使用右上角「匯入原始 EMG」")
+        self.angleEmgLabel.setWordWrap(True)
+        self.angleEmgLabel.setToolTip("角度分析使用右上角匯入的原始 EMG，或本次收集的 EMG。")
+        self.anglePedalLabel = QLabel("踏板：請使用右上角「匯入踏板 CSV」")
+        self.anglePedalLabel.setWordWrap(True)
+        self.anglePedalLabel.setToolTip("角度分析使用右上角匯入的踏板 CSV，或本次收集的踏板 CSV。")
+        angleSources.addWidget(self.angleEmgLabel, 1)
+        angleSources.addWidget(self.anglePedalLabel, 1)
+        angleLayout.addLayout(angleSources)
         self.angleStatusLabel = QLabel(objectName="muted")
         self.angleStatusLabel.setWordWrap(True)
-        # Keep status updates available to the workflow without consuming chart space.
-        self.angleStatusLabel.hide()
-
-        self.angleAdvancedToggle = QToolButton()
-        self.angleAdvancedToggle.setText("進階設定")
-        self.angleAdvancedToggle.setCheckable(True)
-        self.angleAdvancedToggle.setArrowType(Qt.RightArrow)
-        self.angleAdvancedToggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.angleAdvancedToggle.setAccessibleName("展開進階分析設定")
-        self.angleAdvancedToggle.setToolTip("調整分析時間、同步校正與匯出內容")
-        angleSetupLayout.addWidget(self.angleAdvancedToggle, alignment=Qt.AlignLeft)
-        self.angleAdvancedPanel = QFrame()
-        FluentThemeManager.set_property(self.angleAdvancedPanel, "fluentRole", "surface")
-        self.angleAdvancedPanel.setVisible(False)
-        advancedOptions = QVBoxLayout(self.angleAdvancedPanel)
-        advancedOptions.setContentsMargins(6, 8, 6, 8)
-        advancedOptions.setSpacing(6)
-        self.angleRangeSpins = []
-        for label, key, default in (("前段起", "start0", 5), ("前段迄", "start1", 65),("後段起", "end0", 240), ("後段迄", "end1", 300)):
-            spin = QDoubleSpinBox()
-            spin.setRange(0, 100000)
-            spin.setSuffix("")
-            spin.setFixedWidth(54)
-            spin.setValue(float(self.settings.value(f"angle/{key}", default)))
-            spin.setAccessibleName(label)
-            self.angleRangeSpins.append(spin)
-        def comparison_range_row(label: str, start: QDoubleSpinBox, end: QDoubleSpinBox) -> QHBoxLayout:
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(5)
-            row.addWidget(QLabel(label))
-            row.addStretch(1)
-            row.addWidget(start)
-            row.addWidget(QLabel("至"))
-            row.addWidget(end)
-            return row
-
-        advancedOptions.addLayout(comparison_range_row("前段範圍（秒）", self.angleRangeSpins[0], self.angleRangeSpins[1]))
-        advancedOptions.addLayout(comparison_range_row("後段範圍（秒）", self.angleRangeSpins[2], self.angleRangeSpins[3]))
-        self.angleAutoScaleCheck = QCheckBox("自動同步 EMG")
-        self.angleAutoScaleCheck.setChecked(str(self.settings.value("angle/auto_scale", "true")).lower() == "true")
-        self.angleScaleSpin = QDoubleSpinBox()
-        self.angleScaleSpin.setDecimals(5)
-        self.angleScaleSpin.setRange(.8, 1.2)
-        self.angleScaleSpin.setSingleStep(.001)
-        self.angleScaleSpin.setValue(float(self.settings.value("angle/scale", 1.0)))
-        self.angleScaleSpin.setEnabled(not self.angleAutoScaleCheck.isChecked())
-        self.angleOffsetSpin = QDoubleSpinBox()
-        self.angleOffsetSpin.setRange(-30, 30)
-        self.angleOffsetSpin.setDecimals(3)
-        self.angleOffsetSpin.setSuffix("")
-        self.angleOffsetSpin.setFixedWidth(58)
-        self.angleOffsetSpin.setValue(float(self.settings.value("angle/offset_s", 0)))
-        self.angleAutoOffsetCheck = QCheckBox("依典型角度估起點")
-        self.angleAutoOffsetCheck.setToolTip("僅適用已校正上死點的角度 CSV；估計值有文獻與同步誤差。")
-        self.angleAutoOffsetCheck.setChecked(str(self.settings.value("angle/auto_offset", "false")).lower() == "true")
-        self.angleOffsetSpin.setEnabled(not self.angleAutoOffsetCheck.isChecked())
-        self.angleScaleSpin.setFixedWidth(58)
-        scaleRow = QHBoxLayout()
-        scaleRow.setContentsMargins(0, 0, 0, 0)
-        scaleRow.addWidget(self.angleAutoScaleCheck)
-        scaleRow.addStretch(1)
-        scaleRow.addWidget(QLabel("手動比例"))
-        scaleRow.addWidget(self.angleScaleSpin)
-        advancedOptions.addLayout(scaleRow)
-        offsetRow = QHBoxLayout()
-        offsetRow.setContentsMargins(0, 0, 0, 0)
-        offsetRow.addWidget(QLabel("起點偏移（秒）"))
-        offsetRow.addStretch(1)
-        offsetRow.addWidget(self.angleOffsetSpin)
-        advancedOptions.addLayout(offsetRow)
-        self.angleAutoOffsetCheck.setText("依模型推估起點")
-        advancedOptions.addWidget(self.angleAutoOffsetCheck)
-        self.angleIncludeRawCheck = QCheckBox("匯出完整同步 EMG")
-        self.angleIncludeRawCheck.setChecked(True)
-        self.angleIncludeRawCheck.setAccessibleDescription("取消勾選可縮小匯出的資料夾")
-        advancedOptions.addWidget(self.angleIncludeRawCheck)
-        angleSetupLayout.addWidget(self.angleAdvancedPanel)
+        self.angleStatusLabel.setText("請先用右上角匯入原始 EMG 與同次騎乘的踏板 CSV。")
+        angleLayout.addWidget(self.angleStatusLabel)
         self.angleViews = QTabWidget()
         self.angleViews.setUsesScrollButtons(True)
         overviewPage = QWidget()
@@ -1737,12 +1654,8 @@ class TrignoWindow(QMainWindow):
             ("數值與判讀", reportTextPage),
         ):
             self.angleViews.addTab(page, title)
-        angleLayout.addWidget(angleSetupFrame, 0, Qt.AlignTop)
         angleLayout.addWidget(self.angleViews, 1)
         self.summaryTabs.insertTab(2, anglePage, "踩踏角度分析")
-        self.angleEmgButton.clicked.connect(self.chooseAngleEmg)
-        self.anglePedalButton.clicked.connect(self.chooseAnglePedal)
-        self.angleRunButton.clicked.connect(self.runAngleAnalysis)
         self.angleExportButton.clicked.connect(self.exportAngleAnalysis)
         self.angleMuscleCombo.currentIndexChanged.connect(self.refreshAngleCurve)
         self.anglePhaseSpin.valueChanged.connect(self.refreshAnglePhase)
@@ -1753,9 +1666,6 @@ class TrignoWindow(QMainWindow):
         self.angleReportFatigueMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportFatigueTrends)
         self.angleReportProfileMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportProfiles)
         self.angleReportPolarMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportPolarProfiles)
-        self.angleAutoScaleCheck.toggled.connect(lambda checked: self.angleScaleSpin.setEnabled(not checked))
-        self.angleAutoOffsetCheck.toggled.connect(lambda checked: self.angleOffsetSpin.setEnabled(not checked))
-        self.angleAdvancedToggle.toggled.connect(self.setAngleAdvancedVisible)
         self.lockAnalysisPlots(
             self.powerAnalysisPlot, self.cadenceAnalysisPlot, self.balanceAnalysisPlot,
             self.rmsAverageBarPlot, self.rmsPeakBarPlot, self.emgEnvelopePlot,
@@ -1766,7 +1676,7 @@ class TrignoWindow(QMainWindow):
         )
         self.summaryTabs.setCurrentIndex(0)
         layout.addWidget(self.summaryTabs, 1)
-        self.importFitButton.clicked.connect(self.importFitSummary)
+        self.importPedalCsvButton.clicked.connect(self.importPedalCsvSummary)
         self.importEmgAnalysisButton.clicked.connect(self.importEmgAnalysis)
         self.currentSessionSummaryButton.clicked.connect(self.showCurrentSessionSummary)
         self.analysisFtpSpin.valueChanged.connect(self.refreshSummaryAnalysis)
@@ -2818,9 +2728,15 @@ class TrignoWindow(QMainWindow):
         return max(0.0, time.monotonic() - self.rideStartedAt)
 
     def beginRideAnalysis(self) -> None:
+        self.pendingAutoAngleAnalysis = False
         self.angleEmgPath = None
         self.anglePedalPath = None
         self.angleAnalysisResult = None
+        self.updateAngleFileStatus()
+        self.angleOverviewLabel.setText("本次收集完成後，會在這裡顯示角度分析。")
+        self.angleStatusLabel.setText("等待本次 EMG 與踏板資料完成收集。")
+        self.angleComparisonTable.setRowCount(0)
+        self.clearAngleReportTables()
         self.discardCurrentCollection = False
         self.databaseLastTestId = None
         self.angleExportButton.setEnabled(False)
@@ -2841,6 +2757,29 @@ class TrignoWindow(QMainWindow):
         self.refreshRideAnalysis()
         self.refreshComparison()
 
+    def startAutomaticAngleAnalysis(self) -> None:
+        if not self.pendingAutoAngleAnalysis:
+            return
+        if self.angleEmgPath is None or self.anglePedalPath is None:
+            self.pendingAutoAngleAnalysis = False
+            self.updateAngleFileStatus()
+            return
+        if self.angleAnalysisWorker is not None:
+            self.angleStatusLabel.setText("前次角度分析完成後，會分析新匯入的資料。")
+            return
+        self.pendingAutoAngleAnalysis = False
+        self.updateAngleFileStatus()
+        self.tabs.setCurrentWidget(self.summaryTab)
+        self.summaryTabs.setCurrentIndex(2)
+        self.angleViews.setCurrentIndex(0)
+        self.angleOverviewLabel.setText("正在分析 EMG 與踏板角度…")
+        self.runAngleAnalysis()
+
+    def queueAngleAnalysis(self) -> None:
+        if self.angleEmgPath is not None and self.anglePedalPath is not None:
+            self.pendingAutoAngleAnalysis = True
+            QTimer.singleShot(0, self.startAutomaticAngleAnalysis)
+
     def finishRideAnalysis(self) -> None:
         session, self.rideSession = self.rideSession, None
         if session is None:
@@ -2854,6 +2793,7 @@ class TrignoWindow(QMainWindow):
         self.collectedRideSession = session
         self.angleEmgPath = self.collectionOutput if self.collectionOutput and self.collectionOutput.is_file() else None
         self.anglePedalPath = self.pedalOutput if self.pedalOutput and self.pedalOutput.is_file() else None
+        self.updateAngleFileStatus()
         self.summarySourceLabel.setText("資料來源：本次騎乘，分析完成")
         if self.collectionOutput:
             path = analysisOutputPath(self.collectionOutput)
@@ -2865,6 +2805,13 @@ class TrignoWindow(QMainWindow):
                 QMessageBox.warning(self, "無法保存分析", str(exc))
         self.refreshRideAnalysis()
         self.refreshComparison()
+        if self.angleEmgPath is not None and self.anglePedalPath is not None and not self.collectionError:
+            self.pendingAutoAngleAnalysis = True
+            self.startAutomaticAngleAnalysis()
+        elif self.collectionError:
+            self.angleStatusLabel.setText(f"本次收集有錯誤，未啟動角度分析：{self.collectionError}")
+        elif self.angleEmgPath is None or self.anglePedalPath is None:
+            self.angleStatusLabel.setText("本次沒有完整的 EMG 與踏板 CSV，無法產生踩踏角度分析。")
 
     def requestDiscardCurrentTest(self) -> None:
         """Ask before permanently deleting the current collection and its database rows."""
@@ -2900,7 +2847,9 @@ class TrignoWindow(QMainWindow):
         self.angleEmgPath = None
         self.anglePedalPath = None
         self.angleAnalysisResult = None
+        self.pendingAutoAngleAnalysis = False
         self.angleExportButton.setEnabled(False)
+        self.updateAngleFileStatus()
         self.currentSessionSummaryButton.setEnabled(False)
         self.exportReportButton.setEnabled(False)
         self.rideMuscleTable.setRowCount(0)
@@ -3032,6 +2981,11 @@ class TrignoWindow(QMainWindow):
             return
         path = Path(filename)
         baselines = {str(slot): asdict(record) for slot, record in self.baselineManager.records.items()}
+        self.pendingAutoAngleAnalysis = False
+        self.angleEmgPath = None
+        self.angleAnalysisResult = None
+        self.angleExportButton.setEnabled(False)
+        self.updateAngleFileStatus()
         self.importEmgAnalysisButton.setEnabled(False)
         worker = EMGAnalysisImportWorker(path, list(self.mappings), baselines, asdict(self.collectionSubject), self.filterSettings,)
         self.emgAnalysisImportWorker = worker
@@ -3044,14 +2998,22 @@ class TrignoWindow(QMainWindow):
     def emgAnalysisImported(self, session: dict, filename: str) -> None:
         self.latestRideSession = session
         self.angleEmgPath = Path(filename)
-        paired_pedal = pedalOutputPath(self.angleEmgPath)
-        self.anglePedalPath = paired_pedal if paired_pedal.is_file() else None
+        if self.anglePedalPath != pedalOutputPath(self.angleEmgPath):
+            self.anglePedalPath = None
+            if self.pedalSummarySource == "imported":
+                self.summaryRecords = []
+                self.refreshSummaryAnalysis()
+        self.updateAngleFileStatus()
         self.angleAnalysisResult = None
         self.angleExportButton.setEnabled(False)
         self.collectedRideSession = None
-        self.summarySourceLabel.setText(f"資料來源：匯入 EMG CSV — {Path(filename).name}")
+        source = f"資料來源：匯入 EMG CSV — {Path(filename).name}"
+        if self.anglePedalPath is not None:
+            source += f"；踏板 CSV — {self.anglePedalPath.name}"
+        self.summarySourceLabel.setText(source)
         self.refreshRideAnalysis()
         self.summaryTabs.setCurrentIndex(0)
+        self.queueAngleAnalysis()
 
     def emgAnalysisImportFailed(self, message: str) -> None:
         QMessageBox.warning(self, "匯入 EMG 資料失敗", message)
@@ -3333,75 +3295,58 @@ class TrignoWindow(QMainWindow):
         self.databaseComparisonPlots.append(plot)
         layout.insertWidget(max(0, layout.count() - 1), card)
 
-    def setAngleAdvancedVisible(self, visible: bool) -> None:
-        self.angleAdvancedPanel.setVisible(visible)
-        self.angleAdvancedToggle.setArrowType(Qt.DownArrow if visible else Qt.RightArrow)
-        self.angleAdvancedToggle.setText("收合進階設定" if visible else "進階設定")
-
     def updateAngleFileStatus(self) -> None:
         emg = getattr(self, "angleEmgPath", None)
         pedal = getattr(self, "anglePedalPath", None)
+        self.angleEmgLabel.setText(f"EMG：{emg.name}" if emg else "EMG：請使用右上角「匯入原始 EMG」")
+        self.angleEmgLabel.setToolTip(str(emg) if emg else "角度分析使用右上角匯入的原始 EMG，或本次收集的 EMG。")
+        self.anglePedalLabel.setText(f"踏板：{pedal.name}" if pedal else "踏板：請使用右上角「匯入踏板 CSV」")
+        self.anglePedalLabel.setToolTip(str(pedal) if pedal else "角度分析使用右上角匯入的踏板 CSV，或本次收集的踏板 CSV。")
         if emg and pedal:
-            self.angleStatusLabel.setText("檔案已選好，按「開始分析」即可使用建議設定；需要調整時再展開「進階設定」。")
+            self.angleStatusLabel.setText("EMG 與踏板資料已備妥，正在準備自動分析。")
         elif emg:
-            self.angleStatusLabel.setText("已選擇 EMG CSV；請再選擇同一次騎乘的踏板 CSV。")
+            self.angleStatusLabel.setText("已匯入 EMG CSV；請在右上角匯入同次騎乘的踏板 CSV。")
         elif pedal:
-            self.angleStatusLabel.setText("已選擇踏板 CSV；請再選擇同一次騎乘的 EMG CSV。")
-
-    def chooseAngleEmg(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "選擇原始 EMG CSV", self.pathEdit.text().strip(), "CSV (*.csv)")
-        if path:
-            self.angleEmgPath = Path(path)
-            self.angleEmgButton.setText(f"EMG：{self.angleEmgPath.name}")
-            self.angleEmgButton.setToolTip(str(self.angleEmgPath))
-            self.angleAnalysisResult = None
-            self.angleExportButton.setEnabled(False)
-            self.updateAngleFileStatus()
-
-    def chooseAnglePedal(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "選擇踏板或校正角度 CSV", self.pathEdit.text().strip(), "CSV (*.csv)")
-        if path:
-            self.anglePedalPath = Path(path)
-            self.anglePedalButton.setText(f"踏板：{self.anglePedalPath.name}")
-            self.anglePedalButton.setToolTip(str(self.anglePedalPath))
-            self.angleAnalysisResult = None
-            self.angleExportButton.setEnabled(False)
-            self.updateAngleFileStatus()
+            self.angleStatusLabel.setText("已選擇踏板 CSV；請使用右上角「匯入原始 EMG」。")
+        else:
+            self.angleStatusLabel.setText("請先用右上角匯入原始 EMG 與同次騎乘的踏板 CSV。")
 
     def runAngleAnalysis(self) -> None:
         if self.angleAnalysisWorker is not None:
             return
-        emg = self.angleEmgPath or (self.collectionOutput if self.collectionOutput and self.collectionOutput.is_file() else None)
-        pedal = self.anglePedalPath or (self.pedalOutput if self.pedalOutput and self.pedalOutput.is_file() else None)
+        emg = self.angleEmgPath
+        pedal = self.anglePedalPath
         if emg is None or pedal is None:
-            self.angleStatusLabel.setText("請先選擇原始 EMG CSV 與踏板 CSV（或已校正角度 CSV）。")
+            self.angleStatusLabel.setText("請先用右上角匯入原始 EMG 與踏板 CSV。")
             return
-        import csv
         try:
             with emg.open("r", encoding="utf-8-sig", newline="") as stream:
                 headers = next(csv.reader(stream))
             sides, side_source = recordingChannelSides(emg, headers, self.mappings)
             if not sides:
                 raise ValueError("沒有通道符合設定頁的肌肉側別對應；請檢查感測器名稱與 -L/-R 縮寫。")
-            values = [spin.value() for spin in self.angleRangeSpins]
-            settings = AngleSettings((values[0], values[1]), (values[2], values[3]),
-                                     scale=None if self.angleAutoScaleCheck.isChecked() else self.angleScaleSpin.value(),
-                                     offset_s=None if self.angleAutoOffsetCheck.isChecked() else self.angleOffsetSpin.value())
+            with pedal.open("r", encoding="utf-8-sig", newline="") as stream:
+                reader = csv.DictReader(stream)
+                time_column = "session_seconds" if "session_seconds" in (reader.fieldnames or ()) else "t_session_s"
+                if time_column not in (reader.fieldnames or ()):
+                    raise ValueError("踏板 CSV 沒有可用的騎乘時間欄位。")
+                pedal_duration = max((float(row[time_column]) for row in reader), default=0.0)
+            emg_rows = (self.collectedRideSession or self.latestRideSession or {}).get("emg", [])
+            emg_duration = max((float(row["time_s"]) for row in emg_rows), default=pedal_duration)
+            duration = min(pedal_duration, emg_duration)
+            if duration < 35:
+                raise ValueError("EMG／踏板共同資料不足 35 秒；請收集更多完整踩踏圈。")
+            window = min(60.0, max(10.0, (duration - 5.0) / 3.0))
+            settings = AngleSettings((5.0, round(5.0 + window, 2)),
+                                     (round(duration - window, 2), round(duration, 2)),
+                                     scale=None, offset_s=0.0)
             settings.validate()
         except (OSError, StopIteration, ValueError) as exc:
             self.angleStatusLabel.setText(f"無法分析：{exc}")
+            self.angleOverviewLabel.setText(f"本次角度分析未完成：{exc}")
             return
-        for key, value in zip(("start0", "start1", "end0", "end1"), values):
-            self.settings.setValue(f"angle/{key}", value)
-        self.settings.setValue("angle/offset_s", self.angleOffsetSpin.value())
-        self.settings.setValue("angle/auto_offset", self.angleAutoOffsetCheck.isChecked())
-        self.settings.setValue("angle/auto_scale", self.angleAutoScaleCheck.isChecked())
-        self.settings.setValue("angle/scale", self.angleScaleSpin.value())
         self.angleAnalysisResult = None
         self.angleExportButton.setEnabled(False)
-        self.angleRunButton.setEnabled(False)
-        self.angleEmgButton.setEnabled(False)
-        self.anglePedalButton.setEnabled(False)
         self.angleStatusLabel.setText("正在背景分析原始 EMG 與踏板資料…")
         worker = AngleAnalysisWorker(emg, pedal, sides, settings, side_source)
         self.angleAnalysisWorker = worker
@@ -3412,6 +3357,9 @@ class TrignoWindow(QMainWindow):
         worker.start()
 
     def angleAnalysisCompleted(self, result: dict) -> None:
+        worker = self.angleAnalysisWorker
+        if worker is None or worker.emg_path != self.angleEmgPath or worker.pedal_path != self.anglePedalPath:
+            return
         self.angleAnalysisResult = result
         sync = result["sync"]
         reference_quality = (f'｜{len(sync["references"])} 個參考通道，最佳殘差 '
@@ -4033,17 +3981,22 @@ class TrignoWindow(QMainWindow):
             self.angleViews.setCurrentWidget(self.angleDetailPage)
 
     def angleAnalysisFailed(self, message: str) -> None:
+        worker = self.angleAnalysisWorker
+        if worker is None or worker.emg_path != self.angleEmgPath or worker.pedal_path != self.anglePedalPath:
+            return
         self.angleStatusLabel.setText(f"分析失敗：{message}")
+        self.angleOverviewLabel.setText(f"本次角度分析未完成：{message}")
 
     def angleAnalysisFinished(self) -> None:
         self.angleAnalysisWorker = None
-        self.angleRunButton.setEnabled(True)
-        self.angleEmgButton.setEnabled(True)
-        self.anglePedalButton.setEnabled(True)
+        if self.pendingAutoAngleAnalysis:
+            QTimer.singleShot(0, self.startAutomaticAngleAnalysis)
 
     def exportAngleAnalysis(self) -> None:
         if self.angleAnalysisResult is None or self.angleExportWorker is not None:
             return
+        self.tabs.setCurrentWidget(self.summaryTab)
+        self.summaryTabs.setCurrentIndex(2)
         folder = QFileDialog.getExistingDirectory(self, "選擇角度分析匯出資料夾", self.pathEdit.text().strip())
         if not folder:
             return
@@ -4055,7 +4008,7 @@ class TrignoWindow(QMainWindow):
             suffix += 1
         self.angleExportButton.setEnabled(False)
         self.angleStatusLabel.setText("正在背景匯出同步 CSV、分析表與圖片…")
-        worker = AngleExportWorker(self.angleAnalysisResult, target, self.angleIncludeRawCheck.isChecked())
+        worker = AngleExportWorker(self.angleAnalysisResult, target, True)
         self.angleExportWorker = worker
         worker.completed.connect(lambda path: self.angleStatusLabel.setText(f"角度分析已匯出至 {path}"))
         worker.failed.connect(lambda message: self.angleStatusLabel.setText(f"匯出失敗：{message}"))
@@ -4383,14 +4336,14 @@ class TrignoWindow(QMainWindow):
     def setSummaryRecords(self, records: list[dict], source: str) -> None:
         """Render one standardized summary on the persistent summary page."""
         self.summaryRecords = list(records)
-        self.pedalSummarySource = "fit" if "匯入 FIT" in source else "current"
+        self.pedalSummarySource = "imported" if "匯入踏板 CSV" in source else "current"
         self.summarySourceLabel.setText(source)
         self.refreshSummaryAnalysis()
 
     def refreshSummaryAnalysis(self) -> None:
         """Refresh the numerical report and time-series plots for the selected source."""
         if not self.summaryRecords:
-            self.summaryDetails.setText("完成踏板收集，或匯入FIT檔後，摘要會顯示在這裡")
+            self.summaryDetails.setText("完成踏板收集，或匯入踏板 CSV 後，摘要會顯示在這裡")
             for label in self.pedalMetricCards.values():
                 label.setText("--")
             if self.pedalZoneTable is not None:
@@ -4502,18 +4455,39 @@ class TrignoWindow(QMainWindow):
         self.currentSessionSummaryButton.setEnabled(True)
         self.setSummaryRecords(self.latestPedalRecords, "資料來源：本程式最新收集的踏板資料")
 
-    def importFitSummary(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "匯入 FIT", "", "FIT files (*.fit *.FIT)")
+    def importPedalCsvSummary(self) -> None:
+        start_dir = str(self.angleEmgPath.parent) if self.angleEmgPath else self.pathEdit.text().strip()
+        path, _ = QFileDialog.getOpenFileName(self, "匯入踏板或校正角度 CSV", start_dir, "CSV (*.csv)")
         if not path:
             return
+        selected = Path(path)
         try:
-            records = load_pedal_fit(Path(path))
-        except Exception as exc:
-            QMessageBox.warning(self, "無法匯入 FIT", f"讀取 FIT 檔失敗：{exc}")
+            calibrated = is_calibrated_angle_csv(selected)
+            if calibrated:
+                _angles(selected)
+                records = None
+            else:
+                records = load_pedal_csv(selected)
+        except (OSError, UnicodeError, ValueError, csv.Error) as exc:
+            QMessageBox.warning(self, "無法匯入踏板 CSV", str(exc))
             return
-        self.setSummaryRecords(records, f"資料來源：匯入 FIT — {Path(path).name}")
-        self.summaryTabs.setCurrentIndex(1)
-        self.appendLog(f"已匯入 FIT 摘要：{Path(path).name}（{len(records)} 筆 record）")
+        self.anglePedalPath = selected
+        self.angleAnalysisResult = None
+        self.angleExportButton.setEnabled(False)
+        self.updateAngleFileStatus()
+        if calibrated:
+            self.summaryRecords = []
+            self.pedalSummarySource = "imported"
+            self.refreshSummaryAnalysis()
+            self.summaryDetails.setText("已匯入校正角度 CSV；此檔沒有功率摘要。")
+            self.summarySourceLabel.setText(f"資料來源：匯入校正角度 CSV — {selected.name}")
+            self.summaryTabs.setCurrentIndex(2)
+            self.appendLog(f"已匯入校正角度 CSV：{selected.name}")
+        else:
+            self.setSummaryRecords(records, f"資料來源：匯入踏板 CSV — {selected.name}")
+            self.summaryTabs.setCurrentIndex(1)
+            self.appendLog(f"已匯入踏板 CSV：{selected.name}（{len(records)} 筆資料）")
+        self.queueAngleAnalysis()
 
     def collectionMetadataReady(self, metadata: dict) -> None:
         if self.infoRecorder is None:
