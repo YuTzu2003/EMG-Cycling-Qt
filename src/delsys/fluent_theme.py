@@ -13,6 +13,7 @@ class FluentThemeManager(QObject):
         "border_primary": "#d1d1d1", "focus_border": "#0f6cbd",
         "brand_background": "#0f6cbd", "brand_hover": "#115ea3",
         "brand_pressed": "#0c3b5e", "brand_foreground": "#ffffff",
+        "gopro": "#6b4fa3", "gopro_hover": "#5b428c",
         "selection_background": "#cfe4fa", "selected_surface": "#e5e7eb", "info": "#0f6cbd", "info_surface": "#e8f2fc", "success": "#107c10",
         "success_surface": "#dff6dd", "warning": "#8a6100",
         "warning_surface": "#fff4ce", "danger": "#c50f1f", "danger_surface": "#fde7e9",
@@ -24,6 +25,7 @@ class FluentThemeManager(QObject):
         "border_primary": "#5a5a5a", "focus_border": "#479ef5",
         "brand_background": "#479ef5", "brand_hover": "#62abf5",
         "brand_pressed": "#2886de", "brand_foreground": "#0f0f0f",
+        "gopro": "#c5a6ff", "gopro_hover": "#d4bdff",
         "selection_background": "#1a4f78", "selected_surface": "#3a3a3a", "info": "#479ef5", "info_surface": "#173a5e", "success": "#6ccb5f",
         "success_surface": "#163d18", "warning": "#f9c74f",
         "warning_surface": "#4c3b0a", "danger": "#ff99a4", "danger_surface": "#4c1d25",
@@ -92,6 +94,8 @@ class FluentThemeManager(QObject):
         QPushButton[fluentAppearance="success"], QPushButton#record {{ background: {t['success']}; color: {t['brand_foreground']}; border-color: {t['success']}; font-weight: 600; }}
         QPushButton[fluentAppearance="danger"] {{ background: {t['danger']}; color: {t['brand_foreground']}; border-color: {t['danger']}; font-weight: 600; }}
         QPushButton[fluentAppearance="warning"] {{ background: {t['warning']}; color: {t['brand_foreground']}; border-color: {t['warning']}; font-weight: 600; }}
+        QPushButton[fluentAppearance="gopro"] {{ background: {t['gopro']}; color: {t['brand_foreground']}; border-color: {t['gopro']}; font-weight: 600; }}
+        QPushButton[fluentAppearance="gopro"]:hover {{ background: {t['gopro_hover']}; }}
         QPushButton[fluentRole="scanResult"] {{ text-align: left; background: transparent; border: 0; padding: 4px 6px; }}
         QPushButton[fluentRole="scanResult"]:hover, QPushButton[fluentRole="scanResult"][fluentSelected="true"] {{ background: {t['selected_surface']}; border: 1px solid {t['border_primary']}; }}
         QPushButton:disabled {{ color: {t['text_disabled']}; background: {t['surface_secondary']}; border-color: {t['border_primary']}; }}
