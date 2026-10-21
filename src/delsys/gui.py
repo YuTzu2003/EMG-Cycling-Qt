@@ -559,6 +559,10 @@ class TrignoWindow(QMainWindow):
         # camera-control state rather than a permanently open OS connection.
         self.goproIsConnected = False
         self.goproRecordingStarted = False
+        # The camera acknowledgement and command-completed signal can arrive
+        # in either order, so retain the acknowledgement independently.
+        self.goproStartConfirmed = False
+        self.goproAwaitingStartConfirmation = False
         self.goproStopPending = False
         self.goproStopRequested = False
         self.savedPedalAddress = str(self.settings.value("pedal/address", ""))
@@ -722,7 +726,7 @@ class TrignoWindow(QMainWindow):
         row.addSpacing(28)
         for text, attribute in (("EMG", "useEmgCheck"), ("阻力計", "useTrainerCheck"), ("踏板", "usePedalCheck"), ("GoPro 影片", "useGoProCheck")):
             check = QCheckBox(text)
-            check.setChecked(attribute != "useGoProCheck")
+            check.setChecked(True)
             setattr(self, attribute, check)
             row.addWidget(check)
             row.addSpacing(14)
@@ -857,21 +861,18 @@ class TrignoWindow(QMainWindow):
         goproLayout.addWidget(self.goproDownloadButton, 2, 0)
         goproLayout.addWidget(self.goproChooseVideoButton, 2, 1)
         goproLayout.addWidget(self.goproDownloadStatusLabel, 2, 2, 1, 2)
-        self.goproVideoOutputEdit = QLineEdit(str(self.settings.value("gopro/video_output_dir", "")))
-        self.goproVideoOutputEdit.setPlaceholderText("預設：CSV 輸出資料夾 / gopro_videos")
-        self.goproVideoOutputButton = QPushButton("選擇影片資料夾")
-        goproLayout.addWidget(QLabel("影片儲存位置"), 3, 0)
-        goproLayout.addWidget(self.goproVideoOutputEdit, 3, 1, 1, 2)
-        goproLayout.addWidget(self.goproVideoOutputButton, 3, 3)
-        goproLayout.setColumnStretch(3, 1)
+        self.goproVideoOutputEdit = QLineEdit()
+        self.goproVideoOutputEdit.setReadOnly(True)
+        self.goproVideoOutputEdit.setToolTip("影片位置與「收集資料」頁的資料輸出資料夾相同。")
+        goproLayout.addWidget(QLabel("影片下載位置（跟隨資料輸出）"), 3, 0)
+        goproLayout.addWidget(self.goproVideoOutputEdit, 3, 1, 1, 3)
+        goproLayout.setColumnStretch(2, 1)
         self.goproTestButton.clicked.connect(self.testGoProConnection)
         self.goproDisconnectButton.clicked.connect(self.disconnectGoPro)
         self.goproDownloadButton.clicked.connect(self.downloadLatestGoProVideo)
         self.goproChooseVideoButton.clicked.connect(self.chooseGoProVideoToDownload)
-        self.goproVideoOutputButton.clicked.connect(self.chooseGoProVideoOutput)
-        self.goproVideoOutputEdit.editingFinished.connect(
-            lambda: self.settings.setValue("gopro/video_output_dir", self.goproVideoOutputEdit.text().strip())
-        )
+        self.pathEdit.textChanged.connect(self.updateGoProVideoOutputHint)
+        self.updateGoProVideoOutputHint()
         layout.addWidget(gopro)
 
         # The scan list belongs to the device connection workflow.  Keep it in
@@ -890,7 +891,7 @@ class TrignoWindow(QMainWindow):
         scanResultsHeader.addWidget(self.selectedScannedDeviceLabel)
         FluentThemeManager.set_property(self.assignTrainerButton, "fluentAppearance", "success")
         FluentThemeManager.set_property(self.assignPedalButton, "fluentAppearance", "warning")
-        FluentThemeManager.set_property(self.assignGoProButton, "fluentAppearance", "primary")
+        FluentThemeManager.set_property(self.assignGoProButton, "fluentAppearance", "gopro")
         scanResultsHeader.addWidget(self.assignTrainerButton)
         scanResultsHeader.addWidget(self.assignPedalButton)
         scanResultsHeader.addWidget(self.assignGoProButton)
@@ -2568,11 +2569,15 @@ class TrignoWindow(QMainWindow):
             # BLE write acknowledgement only confirms delivery to the camera;
             # this lightweight protocol has no encoding-state response.
             state, severity = "錄影指令已送出（未確認）", "warning"
+            tooltip = "已送出開始錄影指令，正在等待 GoPro 的快門成功回覆。"
         elif connected:
-            state, severity = "控制已驗證", "success"
+            state, severity = "已連線（待命）", "success"
+            tooltip = "已完成 GoPro 藍牙控制測試；開始收集時可直接同步開始錄影。"
         else:
             state, severity = "未連線", "danger"
+            tooltip = "尚未建立可用的 GoPro 藍牙控制連線。"
         self.goproConnectionLabel.setText(f"● GoPro：{state}")
+        self.goproConnectionLabel.setToolTip(tooltip)
         FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", severity)
 
     def setDatabaseConnectionState(self, connected: bool) -> None:
@@ -2857,13 +2862,15 @@ class TrignoWindow(QMainWindow):
         self.goproDisconnectButton.setEnabled(False)
         self.goproStatusLabel.setText("GoPro 已中斷")
 
-    def chooseGoProVideoOutput(self) -> None:
-        directory = QFileDialog.getExistingDirectory(
-            self, "選擇 GoPro 影片儲存資料夾", self.goproVideoOutputEdit.text() or self.pathEdit.text(),
-        )
-        if directory:
-            self.goproVideoOutputEdit.setText(directory)
-            self.settings.setValue("gopro/video_output_dir", directory)
+    def updateGoProVideoOutputHint(self) -> None:
+        """Show the video directory derived from the collection output folder."""
+        if not hasattr(self, "goproVideoOutputEdit"):
+            return
+        csv_root = self.pathEdit.text().strip()
+        root = Path(csv_root) if csv_root else Path(QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DocumentsLocation
+        ))
+        self.goproVideoOutputEdit.setText(str(root))
 
     def downloadLatestGoProVideo(self) -> None:
         """Automatically join the GoPro AP, then download its latest MP4."""
@@ -2968,11 +2975,10 @@ class TrignoWindow(QMainWindow):
         if self.goproDownloadWorker and self.goproDownloadWorker.isRunning():
             QMessageBox.information(self, "GoPro 影片", "影片正在下載中。")
             return
-        configured = self.goproVideoOutputEdit.text().strip()
-        root = Path(configured or self.pathEdit.text().strip() or QStandardPaths.writableLocation(
+        root = Path(self.pathEdit.text().strip() or QStandardPaths.writableLocation(
             QStandardPaths.StandardLocation.DocumentsLocation
         ))
-        destination = root if configured else root / "gopro_videos"
+        destination = root
         collision = "rename"
         if selection and (destination / selection[1]).exists():
             prompt = QMessageBox(self)
@@ -4416,6 +4422,12 @@ class TrignoWindow(QMainWindow):
         if self.calibrationOnly:
             self.startCalibrationStream()
             return
+        if self.useGoProCheck.isChecked() and not self.goproAddress:
+            # GoPro is optional. Do not prevent EMG/trainer/pedal collection
+            # just because the camera was left checked without configuration.
+            self.useGoProCheck.setChecked(False)
+            self.goproStatusLabel.setText("尚未選擇 GoPro；本次將不錄影，其他資料照常收集")
+            self.appendLog("GoPro | no camera selected; collection continues without video")
         if not any((self.useEmgCheck.isChecked(), self.useTrainerCheck.isChecked(), self.usePedalCheck.isChecked(), self.useGoProCheck.isChecked())):
             QMessageBox.warning(self, "尚未選擇設備", "請在第一頁至少勾選一個本次要測試的設備。")
             self.tabs.setCurrentWidget(self.settingsTab)
@@ -4639,6 +4651,8 @@ class TrignoWindow(QMainWindow):
         if self.goproWorker and self.goproWorker.isRunning():
             if self.goproWorker.action == "connect":
                 self.appendLog("GoPro | sending start through the pre-connected Bluetooth session")
+                self.goproStartConfirmed = False
+                self.goproAwaitingStartConfirmation = True
                 self.goproConnectionLabel.setText("● GoPro：正在啟動錄影")
                 FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", "warning")
                 self.goproWorker.request_start()
@@ -4656,6 +4670,7 @@ class TrignoWindow(QMainWindow):
             if self.goproStopRequested:
                 return
             self.goproStopRequested = True
+            self.goproAwaitingStartConfirmation = False
             self.goproRecordingStarted = False
             self.appendLog("GoPro | stop requested on the active Bluetooth session")
             self.goproConnectionLabel.setText("● GoPro：正在停止錄影")
@@ -4664,6 +4679,7 @@ class TrignoWindow(QMainWindow):
             return
         if not self.goproRecordingStarted:
             return
+        self.goproAwaitingStartConfirmation = False
         self.goproRecordingStarted = False
         self.appendLog("GoPro | stopping recording…")
         self.goproConnectionLabel.setText("● GoPro：正在停止錄影")
@@ -4685,8 +4701,11 @@ class TrignoWindow(QMainWindow):
         if result.action == "start":
             self.goproRecordingStarted = True
             self.setGoProConnectionState(True, recording=True)
+            if self.goproStartConfirmed:
+                self.setGoProRecordingConfirmed()
         elif result.action == "stop":
             self.goproRecordingStarted = False
+            self.goproAwaitingStartConfirmation = False
             self.goproStopRequested = False
             self.setGoProConnectionState(True)
         else:
@@ -4717,15 +4736,23 @@ class TrignoWindow(QMainWindow):
         self.appendLog(f"GoPro | {message}")
         # Open GoPro command response format is: length, command id, status.
         # 02 01 00 therefore confirms shutter (01) succeeded (00).
-        if message.strip().endswith("02 01 00") and self.goproRecordingStarted:
-            self.goproConnectionLabel.setText("● GoPro：錄影中（已確認）")
-            FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", "success")
-            if hasattr(self, "goproStatusLabel"):
-                self.goproStatusLabel.setText("GoPro 錄影中；已收到快門成功回覆")
+        if message.strip().endswith("02 01 00") and self.goproAwaitingStartConfirmation:
+            self.goproStartConfirmed = True
+            if self.goproRecordingStarted:
+                self.setGoProRecordingConfirmed()
+
+    def setGoProRecordingConfirmed(self) -> None:
+        """Show a camera-confirmed recording state in the connection badge."""
+        self.goproConnectionLabel.setText("● GoPro：錄影中（已確認）")
+        self.goproConnectionLabel.setToolTip("GoPro 已回覆快門指令成功，正在錄影。")
+        FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", "success")
+        if hasattr(self, "goproStatusLabel"):
+            self.goproStatusLabel.setText("GoPro 錄影中；已收到快門成功回覆")
 
     def goProCommandFailed(self, action: str, message: str) -> None:
         # A camera is optional: data acquisition remains valid when it is absent.
         self.goproRecordingStarted = False
+        self.goproAwaitingStartConfirmation = False
         self.setGoProConnectionState(False)
         if hasattr(self, "goproDisconnectButton"):
             self.goproDisconnectButton.setEnabled(False)

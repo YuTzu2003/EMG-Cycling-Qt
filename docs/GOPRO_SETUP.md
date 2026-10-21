@@ -22,11 +22,10 @@ To download a video:
 The app reads the GoPro Wi-Fi SSID and password during Bluetooth verification,
 enables the camera access point, then asks Windows to join it automatically
 before reading or downloading media. The password stays only in application
-memory and is never added to the event log or session files. By default, the
-file is saved to `gopro_videos` below the configured CSV output folder. Use
-**選擇影片資料夾** to choose a different location. If a selected file already
-exists, the app asks whether to overwrite, rename, or skip it. The app does
-not delete camera files.
+memory and is never added to the event log or session files. The file is saved
+directly in the same data output folder selected on the collection page. If a
+selected file already exists, the app asks whether to overwrite, rename, or
+skip it. The app does not delete camera files.
 
 The collection page now has a **GoPro 影片** checkbox. When selected, the
 application discovers a nearby camera over Bluetooth and sends the Open GoPro
