@@ -17,6 +17,7 @@ recordings/
 *.txt
 *.lock
 .python-version
+cohn_db.json
 
 # Virtual environments
 .venv
