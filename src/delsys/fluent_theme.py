@@ -66,7 +66,7 @@ class FluentThemeManager(QObject):
     @staticmethod
     def _qss(t: dict[str, str]) -> str:
         return f"""
-        QWidget {{ color: {t['text_primary']}; font-family: 'Segoe UI'; font-size: 12px; }}
+        QWidget {{ color: {t['text_primary']}; font-family: 'Microsoft JhengHei UI', 'Microsoft JhengHei', 'Segoe UI', sans-serif; font-size: 12px; }}
         QToolTip {{ background: {t['surface_background']}; color: {t['text_primary']}; border: 1px solid {t['border_primary']}; padding: 4px 6px; }}
         QMainWindow, QWidget#root {{ background: {t['window_background']}; }}
         QTabWidget::pane {{ background: {t['window_background']}; border: 1px solid {t['border_primary']}; border-radius: 6px; top: -1px; }}

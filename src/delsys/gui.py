@@ -1,4 +1,5 @@
 from __future__ import annotations
+import csv
 import sys
 import time
 from dataclasses import asdict
@@ -24,8 +25,8 @@ from delsys.pedal.recording import PedalCsvRecorder, pedalOutputPath
 from delsys.pedal.analysis import analyze_pedal_records, pedal_analysis_lines, pedal_summary_lines, summarize_pedal_records
 from delsys.pedal.worker import PedalWorker
 from delsys.pedal.fit_export import exportPedalFit
-from delsys.pedal.fit_import import load_pedal_fit
-from delsys.pedal.angle_emg import (AngleSettings, analysis_summary_text, analyze_angle_emg,export_angle_emg, phase_intensities)
+from delsys.pedal.csv_import import is_calibrated_angle_csv, load_pedal_csv
+from delsys.pedal.angle_emg import (AngleSettings, _angles, analysis_summary_text, analyze_angle_emg,export_angle_emg, phase_intensities)
 from delsys.cycling_bluetooth import CyclingDeviceScanWorker
 from delsys.gopro import GoProCommandWorker, GoProDownloadWorker, GoProMediaListWorker, GoProResult, GoProWifiConnectWorker
 from delsys.fluent_theme import FluentThemeManager
@@ -622,6 +623,7 @@ class TrignoWindow(QMainWindow):
         self.angleAnalysisResult: dict | None = None
         self.angleEmgPath: Path | None = None
         self.anglePedalPath: Path | None = None
+        self.pendingAutoAngleAnalysis = False
         self.calibrationSession: CalibrationSession | None = None
         self.calibrationOnly = False
         self.calibrationRecording = False
@@ -724,7 +726,7 @@ class TrignoWindow(QMainWindow):
         row.setAlignment(Qt.AlignmentFlag.AlignLeft)
         row.addWidget(QLabel("測試項目", objectName="sectionTitle"))
         row.addSpacing(28)
-        for text, attribute in (("EMG", "useEmgCheck"), ("阻力計", "useTrainerCheck"), ("踏板", "usePedalCheck"), ("GoPro 影片", "useGoProCheck")):
+        for text, attribute in (("EMG", "useEmgCheck"), ("阻力計", "useTrainerCheck"), ("踏板", "usePedalCheck"), ("攝影機", "useGoProCheck")):
             check = QCheckBox(text)
             check.setChecked(True)
             setattr(self, attribute, check)
@@ -776,11 +778,50 @@ class TrignoWindow(QMainWindow):
         subjectLayout.addWidget(self.patientNameEdit, 1, 3)
         subjectLayout.addWidget(QLabel("性別"), 1, 4)
         subjectLayout.addWidget(self.genderCombo, 1, 5)
+        subjectLayout.addWidget(QLabel("\u8cc7\u6599\u8f38\u51fa"), 1, 6)
+        self.pathEdit = QLineEdit()
+        self.pathEdit.setPlaceholderText("\u8acb\u9078\u64c7 CSV \u8207\u651d\u5f71\u6a5f\u5f71\u7247\u7684\u8f38\u51fa\u8cc7\u6599\u593e")
+        self.pathEdit.setText(str(self.settings.value("output/directory", "")).strip())
+        self.browseButton = QPushButton("\u9078\u64c7\u8cc7\u6599\u593e")
+        self.browseButton.setToolTip("\u9078\u64c7 CSV \u8207\u651d\u5f71\u6a5f\u5f71\u7247\u5171\u7528\u7684\u8f38\u51fa\u8cc7\u6599\u593e")
+        subjectLayout.addWidget(self.pathEdit, 1, 7)
+        subjectLayout.addWidget(self.browseButton, 1, 8)
         self.patientIdEdit.setFixedWidth(160)
         self.patientNameEdit.setFixedWidth(180)
         self.genderCombo.setFixedWidth(100)
-        subjectLayout.setColumnStretch(6, 1)
+        subjectLayout.setColumnStretch(7, 1)
+        self.browseButton.clicked.connect(self.chooseOutput)
+        self.pathEdit.editingFinished.connect(self.saveOutputDirectory)
         layout.addWidget(subject)
+
+        connectionColumns = QHBoxLayout()
+        connectionColumns.setSpacing(10)
+        leftConnectionColumn = QVBoxLayout()
+        leftConnectionColumn.setSpacing(10)
+        rightConnectionColumn = QVBoxLayout()
+        rightConnectionColumn.setSpacing(10)
+        connectionColumns.addLayout(leftConnectionColumn, 1)
+        connectionColumns.addLayout(rightConnectionColumn, 1)
+        layout.addLayout(connectionColumns)
+
+        usageGuide = QFrame()
+        self.usageGuide = usageGuide
+        FluentThemeManager.set_property(usageGuide, "fluentRole", "surface")
+        usageGuideLayout = QVBoxLayout(usageGuide)
+        usageGuideLayout.setContentsMargins(14, 12, 14, 12)
+        usageGuideLayout.setSpacing(8)
+        usageGuideLayout.addWidget(QLabel("\u64cd\u4f5c\u8aaa\u660e", objectName="sectionTitle"))
+        usageGuideText = QLabel(
+            "1. \u586b\u5beb\u53d7\u8a66\u8005\u8cc7\u6599\u8207\u8cc7\u6599\u8f38\u51fa\u8cc7\u6599\u593e\n"
+            "2. \u6307\u5b9a\u963b\u529b\u8a08\u3001\u8e0f\u677f\u8207\u651d\u5f71\u6a5f\u88dd\u7f6e\n"
+            "3. \u6e2c\u8a66 EMG \u3001\u651d\u5f71\u6a5f\u8207\u8cc7\u6599\u5eab\u9023\u7dda\n"
+            "4. \u78ba\u8a8d\u5404\u88dd\u7f6e\u8207\u8cc7\u6599\u5eab\u7684\u9023\u7dda\u72c0\u614b\n"
+            "5. \u5b8c\u6210\u5f8c\u524d\u5f80\u300c\u6536\u96c6\u8cc7\u6599\u300d\u958b\u59cb\u6e2c\u8a66"
+        , objectName="muted")
+        usageGuideText.setWordWrap(True)
+        usageGuideLayout.addWidget(usageGuideText)
+        usageGuideLayout.addStretch(1)
+        leftConnectionColumn.addWidget(usageGuide)
 
         bluetooth = QFrame()
         FluentThemeManager.set_property(bluetooth, "fluentRole", "surface")
@@ -797,10 +838,10 @@ class TrignoWindow(QMainWindow):
         bluetoothLayout.addLayout(bluetoothHeader)
         bluetoothLayout.addWidget(self.trainerTab)
         self.selectedScannedDeviceLabel = QLabel("未選擇裝置", objectName="muted")
-        self.selectedScannedDeviceLabel.setMaximumWidth(300)
+        self.selectedScannedDeviceLabel.setMaximumWidth(180)
         self.assignTrainerButton = QPushButton("設定為阻力計")
         self.assignPedalButton = QPushButton("設定為踏板")
-        self.assignGoProButton = QPushButton("設定為 GoPro")
+        self.assignGoProButton = QPushButton("設定為攝影機")
         self.assignTrainerButton.setEnabled(False)
         self.assignPedalButton.setEnabled(False)
         self.assignGoProButton.setEnabled(False)
@@ -809,7 +850,7 @@ class TrignoWindow(QMainWindow):
         FluentThemeManager.set_property(self.assignGoProButton, "fluentAppearance", "dark")
         self.assignTrainerButton.clicked.connect(lambda: self.assignSelectedScannedDevice("阻力計"))
         self.assignPedalButton.clicked.connect(lambda: self.assignSelectedScannedDevice("踏板"))
-        self.assignGoProButton.clicked.connect(lambda: self.assignSelectedScannedDevice("GoPro"))
+        self.assignGoProButton.clicked.connect(lambda: self.assignSelectedScannedDevice("攝影機"))
 
         emg = QFrame()
         FluentThemeManager.set_property(emg, "fluentRole", "surface")
@@ -817,23 +858,88 @@ class TrignoWindow(QMainWindow):
         emgLayout.setContentsMargins(14, 12, 14, 12)
         emgLayout.setHorizontalSpacing(12)
         emgLayout.setVerticalSpacing(10)
-        emgLayout.addWidget(QLabel("EMG 連線", objectName="sectionTitle"), 0, 0, 1, 4)
+        emgLayout.addWidget(QLabel("\u0045\u004d\u0047 \u611f\u6e2c\u5668\u5c0d\u61c9\u9023\u7dda", objectName="sectionTitle"), 0, 0, 1, 4)
         emgLayout.addWidget(QLabel("Server"), 1, 0)
         emgLayout.addWidget(self.hostEdit, 1, 1)
         self.testButton.setText("測試 EMG 連線")
         FluentThemeManager.set_property(self.testButton, "fluentAppearance", "dark")
         self.testButton.setFixedWidth(180)
         emgLayout.addWidget(self.testButton, 1, 2)
-        mappingButton = QPushButton("設定感測器對應")
-        mappingButton.setAccessibleName("設定感測器對應")
-        mappingButton.setFixedWidth(180)
-        mappingButton.clicked.connect(self.editMappings)
-        emgLayout.addWidget(mappingButton, 1, 3)
-        emgLayout.setColumnStretch(4, 1)
-        self.activeSlotsLabel = QLabel("尚未取得 EMG 感測器狀態", objectName="muted")
-        self.activeSlotsLabel.setWordWrap(True)
-        emgLayout.addWidget(self.activeSlotsLabel, 2, 0, 1, 4)
-        layout.addWidget(emg)
+        self.saveInlineMappingsButton = QPushButton("\u5132\u5b58\u611f\u6e2c\u5668\u5c0d\u61c9")
+        self.saveInlineMappingsButton.setFixedWidth(180)
+        FluentThemeManager.set_property(self.saveInlineMappingsButton, "fluentAppearance", "dark")
+        self.saveInlineMappingsButton.clicked.connect(self.saveInlineMappings)
+        emgLayout.addWidget(self.saveInlineMappingsButton, 1, 3)
+        emgLayout.setColumnStretch(1, 1)
+
+        inlineMappingPanel = QFrame()
+        inlineMappingLayout = QVBoxLayout(inlineMappingPanel)
+        inlineMappingLayout.setContentsMargins(0, 8, 0, 0)
+        inlineMappingLayout.setSpacing(6)
+        self.inlineMappingEdits: list[tuple[QLineEdit, QLineEdit, QLineEdit]] = []
+        mappingContent = QWidget()
+        mappingGrid = QGridLayout(mappingContent)
+        mappingGrid.setContentsMargins(0, 0, 0, 0)
+        mappingGrid.setHorizontalSpacing(6)
+        mappingGrid.setVerticalSpacing(4)
+        for column, title in enumerate(("Slot", "\u72c0\u614b", "\u90e8\u4f4d", "English EMG name", "\u7e2e\u5beb")):
+            header = QLabel(title, objectName="editorHeader")
+            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            mappingGrid.addWidget(header, 0, column)
+        for row, mapping in enumerate(self.mappings, start=1):
+            slot = QLabel(f"S{mapping.slot:02d}")
+            slot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            mappingGrid.addWidget(slot, row, 0)
+            state = QLabel("\u5df2\u555f\u7528" if self.sensorActive[mapping.slot - 1] else "\u5f85\u9023\u7dda")
+            state.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            FluentThemeManager.set_property(state, "fluentSeverity", "success" if self.sensorActive[mapping.slot - 1] else "info")
+            mappingGrid.addWidget(state, row, 1)
+            chinese = QLineEdit(mapping.chinese_name)
+            english = QLineEdit(mapping.english_name)
+            abbreviation = QLineEdit(mapping.abbreviation)
+            mappingGrid.addWidget(chinese, row, 2)
+            mappingGrid.addWidget(english, row, 3)
+            mappingGrid.addWidget(abbreviation, row, 4)
+            self.inlineMappingEdits.append((chinese, english, abbreviation))
+        mappingGrid.setColumnStretch(2, 1)
+        mappingGrid.setColumnStretch(3, 2)
+        mappingGrid.setColumnStretch(4, 1)
+        inlineMappingLayout.addWidget(mappingContent)
+        emgLayout.addWidget(inlineMappingPanel, 3, 0, 1, 4)
+        leftConnectionColumn.addWidget(emg)
+
+        gopro = QFrame()
+        FluentThemeManager.set_property(gopro, "fluentRole", "surface")
+        goproLayout = QGridLayout(gopro)
+        goproLayout.setContentsMargins(14, 12, 14, 12)
+        goproLayout.setHorizontalSpacing(12)
+        goproLayout.setVerticalSpacing(8)
+        goproLayout.addWidget(QLabel("攝影機連線", objectName="sectionTitle"), 0, 0, 1, 4)
+        self.goproTestButton = QPushButton("配對並測試攝影機")
+        self.goproTestButton.setFixedWidth(180)
+        FluentThemeManager.set_property(self.goproTestButton, "fluentAppearance", "dark")
+        self.goproDisconnectButton = QPushButton("中斷攝影機")
+        self.goproDisconnectButton.setEnabled(False)
+        self.goproStatusLabel = QLabel("尚未測試；請先讓相機進入配對模式，測試不會開始錄影", objectName="muted")
+        self.goproStatusLabel.setWordWrap(True)
+        goproLayout.addWidget(self.goproTestButton, 1, 0)
+        goproLayout.addWidget(self.goproDisconnectButton, 1, 1)
+        goproLayout.addWidget(self.goproStatusLabel, 1, 2, 1, 2)
+        self.goproDownloadButton = QPushButton("下載最新影片")
+        self.goproDownloadButton.setToolTip("自動連上攝影機 Wi-Fi，下載最新 MP4")
+        FluentThemeManager.set_property(self.goproDownloadButton, "fluentAppearance", "primary")
+        self.goproChooseVideoButton = QPushButton("選擇影片下載")
+        self.goproDownloadStatusLabel = QLabel("配對成功後可自動連上攝影機 Wi-Fi 並下載", objectName="muted")
+        self.goproDownloadStatusLabel.setWordWrap(True)
+        goproLayout.addWidget(self.goproDownloadButton, 2, 0)
+        goproLayout.addWidget(self.goproChooseVideoButton, 2, 1)
+        goproLayout.addWidget(self.goproDownloadStatusLabel, 2, 2, 1, 2)
+        goproLayout.setColumnStretch(2, 1)
+        self.goproTestButton.clicked.connect(self.testGoProConnection)
+        self.goproDisconnectButton.clicked.connect(self.disconnectGoPro)
+        self.goproDownloadButton.clicked.connect(self.downloadLatestGoProVideo)
+        self.goproChooseVideoButton.clicked.connect(self.chooseGoProVideoToDownload)
+        rightConnectionColumn.addWidget(gopro)
 
         gopro = QFrame()
         FluentThemeManager.set_property(gopro, "fluentRole", "surface")
@@ -885,25 +991,29 @@ class TrignoWindow(QMainWindow):
         scanResultsLayout.itemAt(0).widget().hide()
         scanResultsLayout.itemAt(1).widget().hide()
         scanResultsHeader = QHBoxLayout()
-        scanResultsHeader.addWidget(QLabel("掃描到的裝置", objectName="sectionTitle"))
+        scanResultsHeader.addWidget(QLabel("\u6383\u63cf\u5230\u7684\u88dd\u7f6e", objectName="sectionTitle"))
         scanResultsHeader.addStretch()
-        scanResultsHeader.addWidget(QLabel("已選：", objectName="muted"))
-        scanResultsHeader.addWidget(self.selectedScannedDeviceLabel)
+        scanResultsLayout.addLayout(scanResultsHeader)
+        scanAssignmentRow = QHBoxLayout()
+        scanAssignmentRow.addWidget(QLabel("\u5df2\u9078\uff1a", objectName="muted"))
+        scanAssignmentRow.addWidget(self.selectedScannedDeviceLabel)
+        scanAssignmentRow.addStretch()
         FluentThemeManager.set_property(self.assignTrainerButton, "fluentAppearance", "success")
         FluentThemeManager.set_property(self.assignPedalButton, "fluentAppearance", "warning")
         FluentThemeManager.set_property(self.assignGoProButton, "fluentAppearance", "gopro")
-        scanResultsHeader.addWidget(self.assignTrainerButton)
-        scanResultsHeader.addWidget(self.assignPedalButton)
-        scanResultsHeader.addWidget(self.assignGoProButton)
-        scanResultsHeader.addWidget(self.scanTrainerButton)
-        scanResultsLayout.addLayout(scanResultsHeader)
+        scanAssignmentRow.addWidget(self.assignTrainerButton)
+        scanAssignmentRow.addWidget(self.assignPedalButton)
+        scanAssignmentRow.addWidget(self.assignGoProButton)
+        scanAssignmentRow.addWidget(self.scanTrainerButton)
+        scanResultsLayout.addLayout(scanAssignmentRow)
         self.scanResultsScroll = QScrollArea()
         self.scanResultsScroll.setWidgetResizable(True)
         self.scanResultsScroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scanResultsScroll.setStyleSheet(
             "QScrollArea, QScrollArea::viewport { border: 0; background: transparent; }"
         )
-        self.scanResultsScroll.setFixedHeight(180)
+        self.scanResultsScroll.setMinimumHeight(180)
+        self.scanResultsScroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         scanResultsContent = QWidget()
         FluentThemeManager.set_property(scanResultsContent, "fluentRole", "scanResultsContent")
         self.scanResultsLayout = QVBoxLayout(scanResultsContent)
@@ -911,9 +1021,9 @@ class TrignoWindow(QMainWindow):
         self.scanResultsLayout.setSpacing(3)
         self.scanResultsLayout.addStretch()
         self.scanResultsScroll.setWidget(scanResultsContent)
-        scanResultsLayout.addWidget(self.scanResultsScroll)
+        scanResultsLayout.addWidget(self.scanResultsScroll, 1)
         bluetoothLayout.addLayout(scanResultsLayout)
-        layout.addWidget(bluetooth)
+        rightConnectionColumn.addWidget(bluetooth, 1)
 
         database = QFrame()
         FluentThemeManager.set_property(database, "fluentRole", "surface")
@@ -931,18 +1041,18 @@ class TrignoWindow(QMainWindow):
         self.databaseNameCombo.setEnabled(False)
         self.databaseNameCombo.setPlaceholderText("先測試連線以載入資料庫")
         self.databaseTestButton = QPushButton("測試連線")
-        FluentThemeManager.set_property(self.databaseTestButton, "fluentAppearance", "primary")
+        FluentThemeManager.set_property(self.databaseTestButton, "fluentAppearance", "dark")
         self.databaseServerEdit.setFixedWidth(160)
         self.databaseUserEdit.setFixedWidth(130)
         self.databasePasswordEdit.setFixedWidth(130)
-        self.databaseTestButton.setFixedWidth(96)
+        self.databaseTestButton.setFixedWidth(180)
         credentialsRow = QHBoxLayout()
         credentialsRow.setSpacing(6)
         credentialsRow.addWidget(QLabel("Server"))
         credentialsRow.addWidget(self.databaseServerEdit)
-        credentialsRow.addWidget(QLabel("帳號"))
+        credentialsRow.addWidget(QLabel("\u5e33\u865f"))
         credentialsRow.addWidget(self.databaseUserEdit)
-        credentialsRow.addWidget(QLabel("密碼"))
+        credentialsRow.addWidget(QLabel("\u5bc6\u78bc"))
         credentialsRow.addWidget(self.databasePasswordEdit)
         credentialsRow.addWidget(self.databaseTestButton)
         credentialsRow.addStretch()
@@ -952,12 +1062,16 @@ class TrignoWindow(QMainWindow):
         databaseRow.addWidget(QLabel("資料庫"))
         databaseRow.addWidget(self.databaseNameCombo, 1)
         databaseLayout.addLayout(databaseRow)
+        databaseLayout.removeWidget(self.databaseStatusLabel)
+        self.databaseStatusLabel.setWordWrap(True)
+        databaseLayout.addWidget(self.databaseStatusLabel)
         self.databaseTestButton.clicked.connect(self.testDatabaseConnection)
         self.databaseServerEdit.textEdited.connect(self.databaseConnectionEdited)
         self.databaseUserEdit.textEdited.connect(self.databaseConnectionEdited)
         self.databasePasswordEdit.textEdited.connect(self.databaseConnectionEdited)
         self.databaseNameCombo.currentTextChanged.connect(self.databaseConnectionEdited)
-        layout.insertWidget(1, database)
+        usageGuide.setFixedHeight(database.sizeHint().height())
+        rightConnectionColumn.insertWidget(0, database)
 
         resistance = QFrame()
         FluentThemeManager.set_property(resistance, "fluentRole", "surface")
@@ -1178,20 +1292,28 @@ class TrignoWindow(QMainWindow):
         layout.setContentsMargins(16, 12, 16, 16)
         layout.setSpacing(10)
         heading = QHBoxLayout()
-        self.summarySourceLabel = QLabel("尚未有騎乘資料。", objectName="muted")
+        self.summarySourceLabel = QLabel("分析資料：EMG 未匯入 ｜ 踏板 未匯入", objectName="muted")
         heading.addWidget(self.summarySourceLabel)
         heading.addStretch()
         self.rideStateLabel = QLabel("等待騎乘", objectName="status")
         FluentThemeManager.set_property(self.rideStateLabel, "fluentSeverity", "info")
         actions = QHBoxLayout()
         actions.setSpacing(4)
-        self.importFitButton = QPushButton("匯入FIT檔")
-        self.importFitButton.setAccessibleName("匯入 FIT 活動檔")
-        self.importFitButton.setToolTip("匯入 .fit 檔並顯示功率、踏頻與左右平衡摘要")
-        FluentThemeManager.set_property(self.importFitButton, "fluentAppearance", "primary")
+        self.importPedalCsvButton = QPushButton("匯入踏板 CSV")
+        self.importPedalCsvButton.setAccessibleName("匯入踏板 CSV")
+        self.importPedalCsvButton.setToolTip("匯入踏板 CSV 供踏板摘要與角度分析共用；也可匯入校正角度 CSV 供角度分析")
+        FluentThemeManager.set_property(self.importPedalCsvButton, "fluentAppearance", "primary")
         self.importEmgAnalysisButton = QPushButton("匯入原始 EMG")
         self.importEmgAnalysisButton.setToolTip("匯入原始 EMG CSV，重新產生 RMS 平均、Peak 與包絡線分析")
         FluentThemeManager.set_property(self.importEmgAnalysisButton, "fluentAppearance", "primary")
+        self.angleSettingsButton = QPushButton("角度分析設定")
+        self.angleSettingsButton.setToolTip("設定前後段比較時間，以及 EMG 與踏板的同步校正方式")
+        self.angleSettingsButton.setAccessibleName("踩踏角度分析設定")
+        FluentThemeManager.set_property(self.angleSettingsButton, "fluentAppearance", "dark")
+        self.angleExportButton = QPushButton("匯出角度分析")
+        self.angleExportButton.setAccessibleName("匯出踩踏角度分析結果")
+        self.angleExportButton.setEnabled(False)
+        FluentThemeManager.set_property(self.angleExportButton, "fluentAppearance", "dark")
         self.currentSessionSummaryButton = QPushButton("顯示本次收集")
         self.currentSessionSummaryButton.setEnabled(False)
         self.currentSessionSummaryButton.setToolTip("切換回本程式最新收集的踏板資料")
@@ -1201,7 +1323,9 @@ class TrignoWindow(QMainWindow):
         FluentThemeManager.set_property(self.exportReportButton, "fluentAppearance", "success")
         actions.addWidget(self.currentSessionSummaryButton)
         actions.addWidget(self.importEmgAnalysisButton)
-        actions.addWidget(self.importFitButton)
+        actions.addWidget(self.importPedalCsvButton)
+        actions.addWidget(self.angleSettingsButton)
+        actions.addWidget(self.angleExportButton)
         actions.addWidget(self.exportReportButton)
         heading.addLayout(actions)
         heading.addSpacing(12)
@@ -1267,7 +1391,7 @@ class TrignoWindow(QMainWindow):
         pedalInfoLayout.setSpacing(8)
         pedalInfoLayout.addWidget(QLabel("踏板資訊", objectName="sectionTitle"))
         self.summaryDetails = QLabel(objectName="muted")
-        self.summaryDetails.setText("完成踏板收集，或匯入FIT檔後，摘要會顯示在這裡")
+        self.summaryDetails.setText("完成踏板收集，或匯入踏板 CSV 後，摘要會顯示在這裡")
         self.summaryDetails.setTextFormat(Qt.TextFormat.PlainText)
         self.summaryDetails.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.summaryDetails.setWordWrap(True)
@@ -1399,112 +1523,8 @@ class TrignoWindow(QMainWindow):
         compareLayout.addWidget(self.comparisonNotes)
         self.comparisonTab = comparePage
         anglePage = QWidget()
-        angleLayout = QHBoxLayout(anglePage)
-        angleLayout.setSpacing(12)
-        angleSetupFrame = QFrame()
-        angleSetupFrame.setFixedWidth(230)
-        angleSetupLayout = QVBoxLayout(angleSetupFrame)
-        angleSetupLayout.setContentsMargins(14, 12, 14, 12)
-        angleSetupLayout.setSpacing(8)
-        angleFiles = QVBoxLayout()
-        self.angleEmgButton = QPushButton("選擇 EMG CSV")
-        self.angleEmgButton.setAccessibleDescription("選擇原始肌電資料 CSV 檔")
-        self.anglePedalButton = QPushButton("選擇踏板 CSV")
-        self.anglePedalButton.setAccessibleDescription("選擇同一次騎乘的踏板或校正角度 CSV 檔")
-        self.angleRunButton = QPushButton("開始分析", objectName="primary")
-        self.angleExportButton = QPushButton("匯出分析結果")
-        self.angleExportButton.setEnabled(False)
-        FluentThemeManager.set_property(self.angleEmgButton, "fluentAppearance", "primary")
-        FluentThemeManager.set_property(self.anglePedalButton, "fluentAppearance", "warning")
-        FluentThemeManager.set_property(self.angleRunButton, "fluentAppearance", "success")
-        FluentThemeManager.set_property(self.angleExportButton, "fluentAppearance", "dark")
-        for widget in (self.angleEmgButton, self.anglePedalButton, self.angleRunButton, self.angleExportButton):
-            widget.setFixedWidth(202)
-            widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            angleFiles.addWidget(widget, 0, Qt.AlignLeft)
-        angleFiles.addStretch()
-        angleSetupLayout.addLayout(angleFiles)
-
-        self.angleStatusLabel = QLabel(objectName="muted")
-        self.angleStatusLabel.setWordWrap(True)
-        # Keep status updates available to the workflow without consuming chart space.
-        self.angleStatusLabel.hide()
-
-        self.angleAdvancedToggle = QToolButton()
-        self.angleAdvancedToggle.setText("進階設定")
-        self.angleAdvancedToggle.setCheckable(True)
-        self.angleAdvancedToggle.setArrowType(Qt.RightArrow)
-        self.angleAdvancedToggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self.angleAdvancedToggle.setAccessibleName("展開進階分析設定")
-        self.angleAdvancedToggle.setToolTip("調整分析時間、同步校正與匯出內容")
-        angleSetupLayout.addWidget(self.angleAdvancedToggle, alignment=Qt.AlignLeft)
-        self.angleAdvancedPanel = QFrame()
-        FluentThemeManager.set_property(self.angleAdvancedPanel, "fluentRole", "surface")
-        self.angleAdvancedPanel.setVisible(False)
-        advancedOptions = QVBoxLayout(self.angleAdvancedPanel)
-        advancedOptions.setContentsMargins(6, 8, 6, 8)
-        advancedOptions.setSpacing(6)
-        self.angleRangeSpins = []
-        for label, key, default in (("前段起", "start0", 5), ("前段迄", "start1", 65),("後段起", "end0", 240), ("後段迄", "end1", 300)):
-            spin = QDoubleSpinBox()
-            spin.setRange(0, 100000)
-            spin.setSuffix("")
-            spin.setFixedWidth(54)
-            spin.setValue(float(self.settings.value(f"angle/{key}", default)))
-            spin.setAccessibleName(label)
-            self.angleRangeSpins.append(spin)
-        def comparison_range_row(label: str, start: QDoubleSpinBox, end: QDoubleSpinBox) -> QHBoxLayout:
-            row = QHBoxLayout()
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(5)
-            row.addWidget(QLabel(label))
-            row.addStretch(1)
-            row.addWidget(start)
-            row.addWidget(QLabel("至"))
-            row.addWidget(end)
-            return row
-
-        advancedOptions.addLayout(comparison_range_row("前段範圍（秒）", self.angleRangeSpins[0], self.angleRangeSpins[1]))
-        advancedOptions.addLayout(comparison_range_row("後段範圍（秒）", self.angleRangeSpins[2], self.angleRangeSpins[3]))
-        self.angleAutoScaleCheck = QCheckBox("自動同步 EMG")
-        self.angleAutoScaleCheck.setChecked(str(self.settings.value("angle/auto_scale", "true")).lower() == "true")
-        self.angleScaleSpin = QDoubleSpinBox()
-        self.angleScaleSpin.setDecimals(5)
-        self.angleScaleSpin.setRange(.8, 1.2)
-        self.angleScaleSpin.setSingleStep(.001)
-        self.angleScaleSpin.setValue(float(self.settings.value("angle/scale", 1.0)))
-        self.angleScaleSpin.setEnabled(not self.angleAutoScaleCheck.isChecked())
-        self.angleOffsetSpin = QDoubleSpinBox()
-        self.angleOffsetSpin.setRange(-30, 30)
-        self.angleOffsetSpin.setDecimals(3)
-        self.angleOffsetSpin.setSuffix("")
-        self.angleOffsetSpin.setFixedWidth(58)
-        self.angleOffsetSpin.setValue(float(self.settings.value("angle/offset_s", 0)))
-        self.angleAutoOffsetCheck = QCheckBox("依典型角度估起點")
-        self.angleAutoOffsetCheck.setToolTip("僅適用已校正上死點的角度 CSV；估計值有文獻與同步誤差。")
-        self.angleAutoOffsetCheck.setChecked(str(self.settings.value("angle/auto_offset", "false")).lower() == "true")
-        self.angleOffsetSpin.setEnabled(not self.angleAutoOffsetCheck.isChecked())
-        self.angleScaleSpin.setFixedWidth(58)
-        scaleRow = QHBoxLayout()
-        scaleRow.setContentsMargins(0, 0, 0, 0)
-        scaleRow.addWidget(self.angleAutoScaleCheck)
-        scaleRow.addStretch(1)
-        scaleRow.addWidget(QLabel("手動比例"))
-        scaleRow.addWidget(self.angleScaleSpin)
-        advancedOptions.addLayout(scaleRow)
-        offsetRow = QHBoxLayout()
-        offsetRow.setContentsMargins(0, 0, 0, 0)
-        offsetRow.addWidget(QLabel("起點偏移（秒）"))
-        offsetRow.addStretch(1)
-        offsetRow.addWidget(self.angleOffsetSpin)
-        advancedOptions.addLayout(offsetRow)
-        self.angleAutoOffsetCheck.setText("依模型推估起點")
-        advancedOptions.addWidget(self.angleAutoOffsetCheck)
-        self.angleIncludeRawCheck = QCheckBox("匯出完整同步 EMG")
-        self.angleIncludeRawCheck.setChecked(True)
-        self.angleIncludeRawCheck.setAccessibleDescription("取消勾選可縮小匯出的資料夾")
-        advancedOptions.addWidget(self.angleIncludeRawCheck)
-        angleSetupLayout.addWidget(self.angleAdvancedPanel)
+        angleLayout = QVBoxLayout(anglePage)
+        angleLayout.setSpacing(8)
         self.angleViews = QTabWidget()
         self.angleViews.setUsesScrollButtons(True)
         overviewPage = QWidget()
@@ -1516,6 +1536,9 @@ class TrignoWindow(QMainWindow):
         self.angleOverviewLabel.setAccessibleName("踩踏角度分析摘要")
         overviewLayout.addWidget(self.angleOverviewLabel)
         overviewLayout.addStretch(1)
+        # Keep progress and failures in the analysis overview instead of a
+        # separate banner above the angle charts.
+        self.angleStatusLabel = self.angleOverviewLabel
 
         phasePage = QWidget()
         phaseLayout = QVBoxLayout(phasePage)
@@ -1808,12 +1831,8 @@ class TrignoWindow(QMainWindow):
             ("數值與判讀", reportTextPage),
         ):
             self.angleViews.addTab(page, title)
-        angleLayout.addWidget(angleSetupFrame, 0, Qt.AlignTop)
         angleLayout.addWidget(self.angleViews, 1)
         self.summaryTabs.insertTab(2, anglePage, "踩踏角度分析")
-        self.angleEmgButton.clicked.connect(self.chooseAngleEmg)
-        self.anglePedalButton.clicked.connect(self.chooseAnglePedal)
-        self.angleRunButton.clicked.connect(self.runAngleAnalysis)
         self.angleExportButton.clicked.connect(self.exportAngleAnalysis)
         self.angleMuscleCombo.currentIndexChanged.connect(self.refreshAngleCurve)
         self.anglePhaseSpin.valueChanged.connect(self.refreshAnglePhase)
@@ -1824,9 +1843,6 @@ class TrignoWindow(QMainWindow):
         self.angleReportFatigueMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportFatigueTrends)
         self.angleReportProfileMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportProfiles)
         self.angleReportPolarMuscleCombo.currentIndexChanged.connect(self.refreshAngleReportPolarProfiles)
-        self.angleAutoScaleCheck.toggled.connect(lambda checked: self.angleScaleSpin.setEnabled(not checked))
-        self.angleAutoOffsetCheck.toggled.connect(lambda checked: self.angleOffsetSpin.setEnabled(not checked))
-        self.angleAdvancedToggle.toggled.connect(self.setAngleAdvancedVisible)
         self.lockAnalysisPlots(
             self.powerAnalysisPlot, self.cadenceAnalysisPlot, self.balanceAnalysisPlot,
             self.rmsAverageBarPlot, self.rmsPeakBarPlot, self.emgEnvelopePlot,
@@ -1837,8 +1853,9 @@ class TrignoWindow(QMainWindow):
         )
         self.summaryTabs.setCurrentIndex(0)
         layout.addWidget(self.summaryTabs, 1)
-        self.importFitButton.clicked.connect(self.importFitSummary)
+        self.importPedalCsvButton.clicked.connect(self.importPedalCsvSummary)
         self.importEmgAnalysisButton.clicked.connect(self.importEmgAnalysis)
+        self.angleSettingsButton.clicked.connect(self.openAngleAnalysisSettings)
         self.currentSessionSummaryButton.clicked.connect(self.showCurrentSessionSummary)
         self.analysisFtpSpin.valueChanged.connect(self.refreshSummaryAnalysis)
         self.envelopeMuscleCombo.currentIndexChanged.connect(self.refreshRideAnalysis)
@@ -1936,7 +1953,7 @@ class TrignoWindow(QMainWindow):
         self.baseLabel.hide()
         controls = QHBoxLayout()
         self.hostEdit = QLineEdit("127.0.0.1")
-        self.hostEdit.setMaximumWidth(200)
+        self.hostEdit.setMinimumWidth(160)
         self.testButton, self.startButton, self.stopButton = QPushButton("測試連線"), QPushButton("開始串流", objectName="record"), QPushButton("停止")
         self.discardButton = QPushButton("捨棄本次測試")
         self.calibrateButton = QPushButton("測量 20 秒基準")
@@ -2021,16 +2038,6 @@ class TrignoWindow(QMainWindow):
             self.pedalMetricValues[key] = value
             pedalMetrics.addWidget(card, 1)
         layout.addLayout(pedalMetrics)
-        recording = QHBoxLayout()
-        self.recordCheck = QCheckBox("測量完成後輸出 CSV")
-        self.recordCheck.setChecked(True)
-        self.recordCheck.setEnabled(False)
-        self.pathEdit = QLineEdit()
-        self.pathEdit.setPlaceholderText("請選擇資料輸出資料夾")
-        self.browseButton = QPushButton("選擇資料夾")
-        for widget in (self.recordCheck, self.pathEdit, self.browseButton):
-            recording.addWidget(widget)
-        layout.addLayout(recording)
         body = QHBoxLayout()
         panel = self.createSensorPanel()
         self.bodyMap = BodyMapPanel(COLORS)
@@ -2056,7 +2063,6 @@ class TrignoWindow(QMainWindow):
         self.startButton.clicked.connect(self.startStream)
         self.stopButton.clicked.connect(self.stopStream)
         self.discardButton.clicked.connect(self.requestDiscardCurrentTest)
-        self.browseButton.clicked.connect(self.chooseOutput)
         self.plotTimer = QTimer(self)
         self.plotTimer.setInterval(80)
         self.plotTimer.timeout.connect(self.refreshPlots)
@@ -2166,7 +2172,7 @@ class TrignoWindow(QMainWindow):
         trainerRow.addWidget(trainerTitle)
         self.trainerDevices = QComboBox()
         self.trainerDevices.setEditable(True)
-        self.trainerDevices.setFixedWidth(280)
+        self.trainerDevices.setFixedWidth(260)
         self.trainerDevices.setPlaceholderText("選擇阻力計")
         trainerRow.addWidget(self.trainerDevices)
         self.connectTrainerButton = QPushButton("連線")
@@ -2174,6 +2180,7 @@ class TrignoWindow(QMainWindow):
         FluentThemeManager.set_property(self.connectTrainerButton, "fluentAppearance", "dark")
         trainerRow.addWidget(self.connectTrainerButton)
         self.trainerTelemetryLabel = QLabel("阻力計即時騎乘資料：--", objectName="muted")
+        self.trainerTelemetryLabel.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         trainerRow.addWidget(self.trainerTelemetryLabel)
         trainerRow.addStretch()
         self.resistanceTab.show()
@@ -2186,7 +2193,7 @@ class TrignoWindow(QMainWindow):
         pedalRow.addWidget(pedalTitle)
         self.pedalDevices = QComboBox()
         self.pedalDevices.setEditable(True)
-        self.pedalDevices.setFixedWidth(280)
+        self.pedalDevices.setFixedWidth(260)
         self.pedalDevices.setPlaceholderText("選擇主踏板")
         pedalRow.addWidget(self.pedalDevices)
         self.connectPedalButton = QPushButton("連線")
@@ -2194,6 +2201,7 @@ class TrignoWindow(QMainWindow):
         FluentThemeManager.set_property(self.connectPedalButton, "fluentAppearance", "dark")
         pedalRow.addWidget(self.connectPedalButton)
         self.pedalTelemetryLabel = QLabel("踏板即時功率資料：--", objectName="muted")
+        self.pedalTelemetryLabel.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         pedalRow.addWidget(self.pedalTelemetryLabel)
         pedalRow.addStretch()
         layout.addLayout(pedalRow)
@@ -2563,20 +2571,20 @@ class TrignoWindow(QMainWindow):
         self.setConnectionIndicator(self.trainerConnectionLabel, "阻力計", connected)
 
     def setGoProConnectionState(self, connected: bool, recording: bool = False) -> None:
-        """Update the GoPro control state shown in the upper-right header."""
+        """Update the 攝影機 control state shown in the upper-right header."""
         self.goproIsConnected = connected
         if recording:
             # BLE write acknowledgement only confirms delivery to the camera;
             # this lightweight protocol has no encoding-state response.
             state, severity = "錄影指令已送出（未確認）", "warning"
-            tooltip = "已送出開始錄影指令，正在等待 GoPro 的快門成功回覆。"
+            tooltip = "已送出開始錄影指令，正在等待攝影機的快門成功回覆。"
         elif connected:
             state, severity = "已連線（待命）", "success"
-            tooltip = "已完成 GoPro 藍牙控制測試；開始收集時可直接同步開始錄影。"
+            tooltip = "已完成攝影機藍牙控制測試；開始收集時可直接同步開始錄影。"
         else:
             state, severity = "未連線", "danger"
-            tooltip = "尚未建立可用的 GoPro 藍牙控制連線。"
-        self.goproConnectionLabel.setText(f"● GoPro：{state}")
+            tooltip = "尚未建立可用的攝影機藍牙控制連線。"
+        self.goproConnectionLabel.setText(f"● 攝影機：{state}")
         self.goproConnectionLabel.setToolTip(tooltip)
         FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", severity)
 
@@ -2614,6 +2622,31 @@ class TrignoWindow(QMainWindow):
             self.updateSensorRows()
             self.syncMuscleMap()
             self.rebuildPlots()
+
+    def saveInlineMappings(self) -> None:
+        """Persist mappings edited directly in the EMG connection panel."""
+        mappings = [
+            SensorMapping(slot, chinese.text().strip(), english.text().strip(), abbreviation.text().strip())
+            for slot, (chinese, english, abbreviation) in enumerate(self.inlineMappingEdits, 1)
+        ]
+        duplicates = duplicateMappingSlots(mappings)
+        if duplicates:
+            conflicts = "\n".join(
+                f"{muscle.title()} ({side.upper() or '?'}): " + ", ".join(f"S{slot:02d}" for slot in slots)
+                for (muscle, side), slots in duplicates.items()
+            )
+            QMessageBox.warning(
+                self,
+                "\u611f\u6e2c\u5668\u5c0d\u61c9",
+                "\u767c\u73fe\u91cd\u8907\u7684\u808c\u8089\u8207\u5074\u5225\u5c0d\u61c9\uff1a\n" + conflicts,
+            )
+            return
+        self.mappings = mappings
+        saveMappings(MAPPING_PATH, self.mappings)
+        self.updateSensorRows()
+        self.syncMuscleMap()
+        self.rebuildPlots()
+        self.appendLog("\u5df2\u5132\u5b58 EMG \u611f\u6e2c\u5668\u5c0d\u61c9")
 
     def updateSensorRows(self) -> None:
         for index, mapping in enumerate(self.mappings):
@@ -2831,14 +2864,14 @@ class TrignoWindow(QMainWindow):
     def testGoProConnection(self) -> None:
         """Discover and connect to the camera without changing its recording state."""
         if self.goproWorker and self.goproWorker.isRunning():
-            QMessageBox.information(self, "GoPro 連線", "GoPro 指令正在執行，請稍候。")
+            QMessageBox.information(self, "攝影機連線", "攝影機指令正在執行，請稍候。")
             return
         self.goproTestButton.setEnabled(False)
         self.goproDisconnectButton.setEnabled(True)
-        self.goproStatusLabel.setText("正在以藍牙配對並驗證 GoPro 控制權限…")
-        self.goproConnectionLabel.setText("● GoPro：連線中")
+        self.goproStatusLabel.setText("正在以藍牙配對並驗證攝影機控制權限…")
+        self.goproConnectionLabel.setText("● 攝影機：連線中")
         FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", "warning")
-        self.appendLog("GoPro | pairing and verifying Bluetooth control…")
+        self.appendLog("攝影機 | pairing and verifying Bluetooth control…")
         # Keep this verified BLE session open.  Collection can then send the
         # shutter command immediately instead of reconnecting several seconds
         # later.
@@ -2853,50 +2886,40 @@ class TrignoWindow(QMainWindow):
     def disconnectGoPro(self) -> None:
         """Close the held BLE session without affecting other collection data."""
         if self.goproWorker and self.goproWorker.isRunning() and self.goproWorker.action == "connect":
-            self.appendLog("GoPro | disconnect requested")
-            self.goproStatusLabel.setText("正在中斷 GoPro 藍牙連線…")
+            self.appendLog("攝影機 | disconnect requested")
+            self.goproStatusLabel.setText("正在中斷攝影機藍牙連線…")
             self.goproDisconnectButton.setEnabled(False)
             self.goproWorker.request_disconnect()
             return
         self.setGoProConnectionState(False)
         self.goproDisconnectButton.setEnabled(False)
-        self.goproStatusLabel.setText("GoPro 已中斷")
-
-    def updateGoProVideoOutputHint(self) -> None:
-        """Show the video directory derived from the collection output folder."""
-        if not hasattr(self, "goproVideoOutputEdit"):
-            return
-        csv_root = self.pathEdit.text().strip()
-        root = Path(csv_root) if csv_root else Path(QStandardPaths.writableLocation(
-            QStandardPaths.StandardLocation.DocumentsLocation
-        ))
-        self.goproVideoOutputEdit.setText(str(root))
+        self.goproStatusLabel.setText("攝影機已中斷")
 
     def downloadLatestGoProVideo(self) -> None:
-        """Automatically join the GoPro AP, then download its latest MP4."""
+        """Automatically join the 攝影機 AP, then download its latest MP4."""
         self.connectGoProWifiThen("latest")
 
     def chooseGoProVideoToDownload(self) -> None:
-        """Automatically join the GoPro AP, then show the camera MP4 list."""
+        """Automatically join the 攝影機 AP, then show the camera MP4 list."""
         self.connectGoProWifiThen("choose")
 
     def connectGoProWifiThen(self, action: str) -> None:
         """Switch Windows to the paired camera AP before a media operation."""
         if self.goproDownloadWorker and self.goproDownloadWorker.isRunning():
-            QMessageBox.information(self, "GoPro 影片", "影片正在下載中。")
+            QMessageBox.information(self, "攝影機 影片", "影片正在下載中。")
             return
         if (self.goproMediaListWorker and self.goproMediaListWorker.isRunning()) or (
             self.goproWifiWorker and self.goproWifiWorker.isRunning()
         ):
             return
         if not self.goproWifiSsid or not self.goproWifiPassword:
-            QMessageBox.warning(self, "GoPro Wi-Fi", "請先按「配對並測試 GoPro」，讓程式讀取相機的 Wi-Fi 資訊。")
+            QMessageBox.warning(self, "攝影機 Wi-Fi", "請先按「配對並測試攝影機」，讓程式讀取相機的 Wi-Fi 資訊。")
             return
         self.goproDownloadButton.setEnabled(False)
         self.goproChooseVideoButton.setEnabled(False)
         self.goproWifiNextAction = action
-        self.goproDownloadStatusLabel.setText("正在自動連線至 GoPro Wi-Fi…")
-        self.appendLog(f"GoPro | connecting Windows to camera Wi-Fi: {self.goproWifiSsid}")
+        self.goproDownloadStatusLabel.setText("正在自動連線至攝影機 Wi-Fi…")
+        self.appendLog(f"攝影機 | 正在連線至攝影機 Wi-Fi：{self.goproWifiSsid}")
         worker = GoProWifiConnectWorker(self.goproWifiSsid, self.goproWifiPassword)
         self.goproWifiWorker = worker
         worker.connected.connect(self.goProWifiConnected)
@@ -2906,11 +2929,11 @@ class TrignoWindow(QMainWindow):
 
     def goProWifiConnected(self) -> None:
         action, self.goproWifiNextAction = self.goproWifiNextAction, None
-        self.appendLog("GoPro | Windows connected to GoPro Wi-Fi")
+        self.appendLog("攝影機 | Windows connected to 攝影機 Wi-Fi")
         if action == "latest":
             self.downloadGoProVideo(None)
             return
-        self.goproDownloadStatusLabel.setText("已連上 GoPro Wi-Fi；正在讀取影片清單…")
+        self.goproDownloadStatusLabel.setText("已連上攝影機 Wi-Fi；正在讀取影片清單…")
         worker = GoProMediaListWorker()
         self.goproMediaListWorker = worker
         worker.completed.connect(self.goProMediaListReady)
@@ -2920,8 +2943,8 @@ class TrignoWindow(QMainWindow):
 
     def goProWifiFailed(self, message: str) -> None:
         self.goproWifiNextAction = None
-        self.goproDownloadStatusLabel.setText("無法自動連上 GoPro Wi-Fi；請確認相機開機且在附近")
-        self.appendLog(f"GoPro | automatic Wi-Fi connection failed: {message or 'Unknown error'}")
+        self.goproDownloadStatusLabel.setText("無法自動連上攝影機 Wi-Fi；請確認相機開機且在附近")
+        self.appendLog(f"攝影機 | 自動連線 Wi-Fi 失敗：{message or 'Unknown error'}")
 
     def goProWifiFinished(self) -> None:
         worker, self.goproWifiWorker = self.goproWifiWorker, None
@@ -2937,8 +2960,8 @@ class TrignoWindow(QMainWindow):
         """Fetch the list once Wi-Fi has been connected by the preceding worker."""
         if self.goproMediaListWorker and self.goproMediaListWorker.isRunning():
             return
-        self.goproDownloadStatusLabel.setText("正在讀取 GoPro 影片清單…")
-        self.appendLog("GoPro | reading media list from the connected GoPro Wi-Fi")
+        self.goproDownloadStatusLabel.setText("正在讀取 攝影機 影片清單…")
+        self.appendLog("攝影機 | reading media list from the connected 攝影機 Wi-Fi")
         worker = GoProMediaListWorker()
         self.goproMediaListWorker = worker
         worker.completed.connect(self.goProMediaListReady)
@@ -2950,7 +2973,7 @@ class TrignoWindow(QMainWindow):
         selections = list(videos)
         labels = [f"{folder}/{name}" for folder, name in selections]
         label, accepted = QInputDialog.getItem(
-            self, "選擇 GoPro 影片", "MP4 影片：", labels, 0, False,
+            self, "選擇 攝影機 影片", "MP4 影片：", labels, 0, False,
         )
         if not accepted:
             self.goproDownloadStatusLabel.setText("已取消選擇影片")
@@ -2959,8 +2982,8 @@ class TrignoWindow(QMainWindow):
         self.downloadGoProVideo(selection)
 
     def goProMediaListFailed(self, message: str) -> None:
-        self.goproDownloadStatusLabel.setText("讀取影片清單失敗；請確認 Windows 已連上 GoPro Wi-Fi")
-        self.appendLog(f"GoPro | media list failed: {message or 'Unknown error'}")
+        self.goproDownloadStatusLabel.setText("讀取影片清單失敗；請確認 Windows 已連上 攝影機 Wi-Fi")
+        self.appendLog(f"攝影機 | 讀取影片清單失敗：{message or 'Unknown error'}")
 
     def goProMediaListFinished(self) -> None:
         worker, self.goproMediaListWorker = self.goproMediaListWorker, None
@@ -2973,16 +2996,18 @@ class TrignoWindow(QMainWindow):
     def downloadGoProVideo(self, selection: tuple[str, str] | None) -> None:
         """Download one selected video, or the newest video when selection is None."""
         if self.goproDownloadWorker and self.goproDownloadWorker.isRunning():
-            QMessageBox.information(self, "GoPro 影片", "影片正在下載中。")
+            QMessageBox.information(self, "攝影機 影片", "影片正在下載中。")
             return
-        root = Path(self.pathEdit.text().strip() or QStandardPaths.writableLocation(
-            QStandardPaths.StandardLocation.DocumentsLocation
-        ))
+        output_directory = self.pathEdit.text().strip()
+        if not output_directory:
+            self.goproDownloadStatusLabel.setText("請先在「設定 → 資料輸出」選擇 CSV 與影片共用的資料夾")
+            return
+        root = Path(output_directory).expanduser()
         destination = root
         collision = "rename"
         if selection and (destination / selection[1]).exists():
             prompt = QMessageBox(self)
-            prompt.setWindowTitle("同名 GoPro 影片")
+            prompt.setWindowTitle("同名 攝影機 影片")
             prompt.setText(f"{selection[1]} 已存在。要如何處理？")
             overwrite = prompt.addButton("覆寫", QMessageBox.ButtonRole.DestructiveRole)
             rename = prompt.addButton("重新命名", QMessageBox.ButtonRole.AcceptRole)
@@ -3001,7 +3026,7 @@ class TrignoWindow(QMainWindow):
         self.goproDownloadName = selection[1] if selection else "最新影片"
         self.goproDownloadStartedAt = time.monotonic()
         self.goproDownloadStatusLabel.setText(f"正在下載{title}…")
-        self.appendLog(f"GoPro | downloading {title} from the connected GoPro Wi-Fi")
+        self.appendLog(f"攝影機 | 正在從已連線的攝影機 Wi-Fi 下載{title}")
         worker = GoProDownloadWorker(destination, selection, collision)
         self.goproDownloadWorker = worker
         worker.file_started.connect(self.goProDownloadFileStarted)
@@ -3031,7 +3056,7 @@ class TrignoWindow(QMainWindow):
     def goProDownloadCompleted(self, path: object) -> None:
         video_path = Path(str(path))
         self.goproDownloadStatusLabel.setText(f"已下載：{video_path.name}")
-        self.appendLog(f"GoPro | video downloaded: {video_path}")
+        self.appendLog(f"攝影機 | 已下載影片：{video_path}")
         session = self.rideSession or self.latestRideSession
         if session is not None:
             session.setdefault("gopro", {})["downloaded_video"] = str(video_path)
@@ -3041,14 +3066,14 @@ class TrignoWindow(QMainWindow):
                 try:
                     save_session(analysisOutputPath(self.collectionOutput), session)
                 except (OSError, ValueError) as exc:
-                    self.appendLog(f"GoPro | video link could not be saved to analysis JSON: {exc}")
+                    self.appendLog(f"攝影機 | 無法將影片連結寫入分析 JSON：{exc}")
 
     def goProDownloadFailed(self, message: str) -> None:
         detail = message or "Unknown download error"
         self.goproDownloadStatusLabel.setText(
-            "下載失敗：GoPro Wi-Fi 無回應。請在 Windows Wi-Fi 選取相機的 GP-xxxx 網路後再試"
+            "下載失敗：攝影機 Wi-Fi 無回應。請在 Windows Wi-Fi 選取相機的 GP-xxxx 網路後再試"
         )
-        self.appendLog(f"GoPro | video download failed: {detail}")
+        self.appendLog(f"攝影機 | 影片下載失敗：{detail}")
 
     def goProDownloadFinished(self) -> None:
         worker, self.goproDownloadWorker = self.goproDownloadWorker, None
@@ -3065,11 +3090,10 @@ class TrignoWindow(QMainWindow):
         self.discardButton.setEnabled(streaming or self.collectedRideSession is not None)
         self.hostEdit.setEnabled(not streaming and not testing)
         self.testButton.setEnabled(not streaming and not testing)
-        self.recordCheck.setEnabled(False)
         self.durationMinutesSpin.setEnabled(not streaming)
         self.durationSecondsSpin.setEnabled(not streaming)
-        self.pathEdit.setEnabled(not streaming and self.recordCheck.isChecked())
-        self.browseButton.setEnabled(not streaming and self.recordCheck.isChecked())
+        self.pathEdit.setEnabled(not streaming)
+        self.browseButton.setEnabled(not streaming)
         self.recordingIndicator.setVisible(streaming)
         if hasattr(self, "goproTestButton"):
             self.goproTestButton.setEnabled(not streaming and not (self.goproWorker and self.goproWorker.isRunning()))
@@ -3084,6 +3108,10 @@ class TrignoWindow(QMainWindow):
         directory = QFileDialog.getExistingDirectory(self, "選擇 CSV 輸出資料夾", self.pathEdit.text())
         if directory:
             self.pathEdit.setText(directory)
+            self.saveOutputDirectory()
+
+    def saveOutputDirectory(self) -> None:
+        self.settings.setValue("output/directory", self.pathEdit.text().strip())
 
     def testConnection(self) -> None:
         host = self.hostEdit.text().strip()
@@ -3142,9 +3170,15 @@ class TrignoWindow(QMainWindow):
         return max(0.0, time.monotonic() - self.rideStartedAt)
 
     def beginRideAnalysis(self) -> None:
+        self.pendingAutoAngleAnalysis = False
         self.angleEmgPath = None
         self.anglePedalPath = None
         self.angleAnalysisResult = None
+        self.updateAngleFileStatus()
+        self.angleOverviewLabel.setText("本次收集完成後，會在這裡顯示肌電與踩踏相位聯合分析。")
+        self.angleStatusLabel.setText("等待本次 EMG 與踏板資料完成收集。")
+        self.angleComparisonTable.setRowCount(0)
+        self.clearAngleReportTables()
         self.discardCurrentCollection = False
         self.databaseLastTestId = None
         self.angleExportButton.setEnabled(False)
@@ -3161,9 +3195,31 @@ class TrignoWindow(QMainWindow):
         self.latestRideSession = self.rideSession
         self.collectedRideSession = self.rideSession
         self.currentSessionSummaryButton.setEnabled(True)
-        self.summarySourceLabel.setText("資料來源：本次騎乘，收集中")
         self.refreshRideAnalysis()
         self.refreshComparison()
+
+    def startAutomaticAngleAnalysis(self) -> None:
+        if not self.pendingAutoAngleAnalysis:
+            return
+        if self.angleEmgPath is None or self.anglePedalPath is None:
+            self.pendingAutoAngleAnalysis = False
+            self.updateAngleFileStatus()
+            return
+        if self.angleAnalysisWorker is not None:
+            self.angleStatusLabel.setText("前次相位聯合分析完成後，會分析新匯入的資料。")
+            return
+        self.pendingAutoAngleAnalysis = False
+        self.updateAngleFileStatus()
+        self.tabs.setCurrentWidget(self.summaryTab)
+        self.summaryTabs.setCurrentIndex(2)
+        self.angleViews.setCurrentIndex(0)
+        self.angleOverviewLabel.setText("正在分析 EMG 與踏板角度…")
+        self.runAngleAnalysis()
+
+    def queueAngleAnalysis(self) -> None:
+        if self.angleEmgPath is not None and self.anglePedalPath is not None:
+            self.pendingAutoAngleAnalysis = True
+            QTimer.singleShot(0, self.startAutomaticAngleAnalysis)
 
     def finishRideAnalysis(self) -> None:
         session, self.rideSession = self.rideSession, None
@@ -3178,7 +3234,7 @@ class TrignoWindow(QMainWindow):
         self.collectedRideSession = session
         self.angleEmgPath = self.collectionOutput if self.collectionOutput and self.collectionOutput.is_file() else None
         self.anglePedalPath = self.pedalOutput if self.pedalOutput and self.pedalOutput.is_file() else None
-        self.summarySourceLabel.setText("資料來源：本次騎乘，分析完成")
+        self.updateAngleFileStatus()
         if self.collectionOutput:
             path = analysisOutputPath(self.collectionOutput)
             try:
@@ -3189,6 +3245,13 @@ class TrignoWindow(QMainWindow):
                 QMessageBox.warning(self, "無法保存分析", str(exc))
         self.refreshRideAnalysis()
         self.refreshComparison()
+        if self.angleEmgPath is not None and self.anglePedalPath is not None and not self.collectionError:
+            self.pendingAutoAngleAnalysis = True
+            self.startAutomaticAngleAnalysis()
+        elif self.collectionError:
+            self.angleStatusLabel.setText(f"本次收集有錯誤，未啟動相位聯合分析：{self.collectionError}")
+        elif self.angleEmgPath is None or self.anglePedalPath is None:
+            self.angleStatusLabel.setText("本次沒有完整的 EMG 與踏板 CSV，無法產生肌電與踩踏相位聯合分析。")
 
     def requestDiscardCurrentTest(self) -> None:
         """Ask before permanently deleting the current collection and its database rows."""
@@ -3224,7 +3287,9 @@ class TrignoWindow(QMainWindow):
         self.angleEmgPath = None
         self.anglePedalPath = None
         self.angleAnalysisResult = None
+        self.pendingAutoAngleAnalysis = False
         self.angleExportButton.setEnabled(False)
+        self.updateAngleFileStatus()
         self.currentSessionSummaryButton.setEnabled(False)
         self.exportReportButton.setEnabled(False)
         self.rideMuscleTable.setRowCount(0)
@@ -3356,6 +3421,11 @@ class TrignoWindow(QMainWindow):
             return
         path = Path(filename)
         baselines = {str(slot): asdict(record) for slot, record in self.baselineManager.records.items()}
+        self.pendingAutoAngleAnalysis = False
+        self.angleEmgPath = None
+        self.angleAnalysisResult = None
+        self.angleExportButton.setEnabled(False)
+        self.updateAngleFileStatus()
         self.importEmgAnalysisButton.setEnabled(False)
         worker = EMGAnalysisImportWorker(path, list(self.mappings), baselines, asdict(self.collectionSubject), self.filterSettings,)
         self.emgAnalysisImportWorker = worker
@@ -3368,14 +3438,19 @@ class TrignoWindow(QMainWindow):
     def emgAnalysisImported(self, session: dict, filename: str) -> None:
         self.latestRideSession = session
         self.angleEmgPath = Path(filename)
-        paired_pedal = pedalOutputPath(self.angleEmgPath)
-        self.anglePedalPath = paired_pedal if paired_pedal.is_file() else None
+        if self.anglePedalPath != pedalOutputPath(self.angleEmgPath):
+            self.anglePedalPath = None
+            if self.pedalSummarySource == "imported":
+                self.summaryRecords = []
+                self.refreshSummaryAnalysis()
+        self.updateAngleFileStatus()
         self.angleAnalysisResult = None
         self.angleExportButton.setEnabled(False)
         self.collectedRideSession = None
-        self.summarySourceLabel.setText(f"資料來源：匯入 EMG CSV — {Path(filename).name}")
+        self.updateAngleFileStatus()
         self.refreshRideAnalysis()
         self.summaryTabs.setCurrentIndex(0)
+        self.queueAngleAnalysis()
 
     def emgAnalysisImportFailed(self, message: str) -> None:
         QMessageBox.warning(self, "匯入 EMG 資料失敗", message)
@@ -3657,75 +3732,174 @@ class TrignoWindow(QMainWindow):
         self.databaseComparisonPlots.append(plot)
         layout.insertWidget(max(0, layout.count() - 1), card)
 
-    def setAngleAdvancedVisible(self, visible: bool) -> None:
-        self.angleAdvancedPanel.setVisible(visible)
-        self.angleAdvancedToggle.setArrowType(Qt.DownArrow if visible else Qt.RightArrow)
-        self.angleAdvancedToggle.setText("收合進階設定" if visible else "進階設定")
+    def openAngleAnalysisSettings(self) -> None:
+        """Edit the settings used by the next automatic angle analysis."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("踩踏角度分析設定")
+        dialog.setMinimumWidth(520)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.addWidget(QLabel(
+            "設定會套用到下一次自動分析；已有 EMG 與踏板資料時，儲存後會自動重新分析。",
+            objectName="muted",
+        ))
+
+        form = QGridLayout()
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+        automatic_range = QCheckBox("自動選取前後段比較時間")
+        has_legacy_ranges = (self.settings.contains("angle/start0")
+                             and not self.settings.contains("angle/automatic_range"))
+        automatic_range.setChecked(
+            str(self.settings.value("angle/automatic_range", not has_legacy_ranges)).lower() == "true"
+        )
+        automatic_range.setToolTip("依 EMG 與踏板共同資料長度選取開頭與結尾的分析時段。")
+        form.addWidget(automatic_range, 0, 0, 1, 4)
+
+        range_spins: list[QDoubleSpinBox] = []
+        for row, (label, start_key, end_key, defaults) in enumerate((
+            ("前段比較時間", "angle/start0", "angle/start1", (5.0, 65.0)),
+            ("後段比較時間", "angle/end0", "angle/end1", (240.0, 300.0)),
+        ), start=1):
+            first = QDoubleSpinBox()
+            second = QDoubleSpinBox()
+            for spin, key, default in ((first, start_key, defaults[0]), (second, end_key, defaults[1])):
+                spin.setRange(0.0, 100000.0)
+                spin.setDecimals(2)
+                spin.setSuffix(" 秒")
+                spin.setValue(float(self.settings.value(key, default)))
+                range_spins.append(spin)
+            form.addWidget(QLabel(label), row, 0)
+            form.addWidget(first, row, 1)
+            form.addWidget(QLabel("至"), row, 2)
+            form.addWidget(second, row, 3)
+
+        auto_scale = QCheckBox("自動校正 EMG 時鐘比例")
+        auto_scale.setChecked(str(self.settings.value("angle/auto_scale", "true")).lower() == "true")
+        scale = QDoubleSpinBox()
+        scale.setRange(0.8, 1.2)
+        scale.setDecimals(5)
+        scale.setSingleStep(0.001)
+        scale.setValue(float(self.settings.value("angle/scale", 1.0)))
+        form.addWidget(auto_scale, 3, 0, 1, 2)
+        form.addWidget(QLabel("手動比例"), 3, 2)
+        form.addWidget(scale, 3, 3)
+
+        auto_offset = QCheckBox("依典型角度估計起點偏移")
+        auto_offset.setToolTip("僅適用已校正上死點的角度 CSV，且需要足夠一致的肌肉訊號。")
+        auto_offset.setChecked(str(self.settings.value("angle/auto_offset", "false")).lower() == "true")
+        offset = QDoubleSpinBox()
+        offset.setRange(-30.0, 30.0)
+        offset.setDecimals(3)
+        offset.setSuffix(" 秒")
+        offset.setValue(float(self.settings.value("angle/offset_s", 0.0)))
+        form.addWidget(QLabel("起點偏移"), 4, 0)
+        form.addWidget(offset, 4, 1)
+        form.addWidget(auto_offset, 4, 2, 1, 2)
+        layout.addLayout(form)
+
+        def update_enabled() -> None:
+            for spin in range_spins:
+                spin.setEnabled(not automatic_range.isChecked())
+            scale.setEnabled(not auto_scale.isChecked())
+            offset.setEnabled(not auto_offset.isChecked())
+
+        automatic_range.toggled.connect(update_enabled)
+        auto_scale.toggled.connect(update_enabled)
+        auto_offset.toggled.connect(update_enabled)
+        update_enabled()
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("儲存並套用")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        values = [spin.value() for spin in range_spins]
+        try:
+            if not automatic_range.isChecked():
+                AngleSettings((values[0], values[1]), (values[2], values[3]),
+                              scale=None if auto_scale.isChecked() else scale.value(),
+                              offset_s=None if auto_offset.isChecked() else offset.value()).validate()
+        except ValueError as exc:
+            QMessageBox.warning(self, "角度分析設定無效", str(exc))
+            return
+        for key, value in zip(("start0", "start1", "end0", "end1"), values):
+            self.settings.setValue(f"angle/{key}", value)
+        self.settings.setValue("angle/automatic_range", automatic_range.isChecked())
+        self.settings.setValue("angle/auto_scale", auto_scale.isChecked())
+        self.settings.setValue("angle/scale", scale.value())
+        self.settings.setValue("angle/auto_offset", auto_offset.isChecked())
+        self.settings.setValue("angle/offset_s", offset.value())
+        self.queueAngleAnalysis()
 
     def updateAngleFileStatus(self) -> None:
         emg = getattr(self, "angleEmgPath", None)
         pedal = getattr(self, "anglePedalPath", None)
+        emg_name = emg.name if emg else "未匯入"
+        pedal_name = pedal.name if pedal else "未匯入"
+        self.summarySourceLabel.setText(f"分析資料：EMG {emg_name} ｜ 踏板 {pedal_name}")
         if emg and pedal:
-            self.angleStatusLabel.setText("檔案已選好，按「開始分析」即可使用建議設定；需要調整時再展開「進階設定」。")
+            self.angleStatusLabel.setText("EMG 與踏板資料已備妥，正在準備自動分析。")
         elif emg:
-            self.angleStatusLabel.setText("已選擇 EMG CSV；請再選擇同一次騎乘的踏板 CSV。")
+            self.angleStatusLabel.setText("已匯入 EMG CSV；請在右上角匯入同次騎乘的踏板 CSV。")
         elif pedal:
-            self.angleStatusLabel.setText("已選擇踏板 CSV；請再選擇同一次騎乘的 EMG CSV。")
-
-    def chooseAngleEmg(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "選擇原始 EMG CSV", self.pathEdit.text().strip(), "CSV (*.csv)")
-        if path:
-            self.angleEmgPath = Path(path)
-            self.angleEmgButton.setText(f"EMG：{self.angleEmgPath.name}")
-            self.angleEmgButton.setToolTip(str(self.angleEmgPath))
-            self.angleAnalysisResult = None
-            self.angleExportButton.setEnabled(False)
-            self.updateAngleFileStatus()
-
-    def chooseAnglePedal(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "選擇踏板或校正角度 CSV", self.pathEdit.text().strip(), "CSV (*.csv)")
-        if path:
-            self.anglePedalPath = Path(path)
-            self.anglePedalButton.setText(f"踏板：{self.anglePedalPath.name}")
-            self.anglePedalButton.setToolTip(str(self.anglePedalPath))
-            self.angleAnalysisResult = None
-            self.angleExportButton.setEnabled(False)
-            self.updateAngleFileStatus()
+            self.angleStatusLabel.setText("已選擇踏板 CSV；請使用右上角「匯入原始 EMG」。")
+        else:
+            self.angleStatusLabel.setText("請先用右上角匯入原始 EMG 與同次騎乘的踏板 CSV。")
 
     def runAngleAnalysis(self) -> None:
         if self.angleAnalysisWorker is not None:
             return
-        emg = self.angleEmgPath or (self.collectionOutput if self.collectionOutput and self.collectionOutput.is_file() else None)
-        pedal = self.anglePedalPath or (self.pedalOutput if self.pedalOutput and self.pedalOutput.is_file() else None)
+        emg = self.angleEmgPath
+        pedal = self.anglePedalPath
         if emg is None or pedal is None:
-            self.angleStatusLabel.setText("請先選擇原始 EMG CSV 與踏板 CSV（或已校正角度 CSV）。")
+            self.angleStatusLabel.setText("請先用右上角匯入原始 EMG 與踏板 CSV。")
             return
-        import csv
         try:
             with emg.open("r", encoding="utf-8-sig", newline="") as stream:
                 headers = next(csv.reader(stream))
             sides, side_source = recordingChannelSides(emg, headers, self.mappings)
             if not sides:
                 raise ValueError("沒有通道符合設定頁的肌肉側別對應；請檢查感測器名稱與 -L/-R 縮寫。")
-            values = [spin.value() for spin in self.angleRangeSpins]
-            settings = AngleSettings((values[0], values[1]), (values[2], values[3]),
-                                     scale=None if self.angleAutoScaleCheck.isChecked() else self.angleScaleSpin.value(),
-                                     offset_s=None if self.angleAutoOffsetCheck.isChecked() else self.angleOffsetSpin.value())
+            with pedal.open("r", encoding="utf-8-sig", newline="") as stream:
+                reader = csv.DictReader(stream)
+                time_column = "session_seconds" if "session_seconds" in (reader.fieldnames or ()) else "t_session_s"
+                if time_column not in (reader.fieldnames or ()):
+                    raise ValueError("踏板 CSV 沒有可用的騎乘時間欄位。")
+                pedal_duration = max((float(row[time_column]) for row in reader), default=0.0)
+            emg_rows = (self.collectedRideSession or self.latestRideSession or {}).get("emg", [])
+            emg_duration = max((float(row["time_s"]) for row in emg_rows), default=pedal_duration)
+            duration = min(pedal_duration, emg_duration)
+            if duration < 35:
+                raise ValueError("EMG／踏板共同資料不足 35 秒；請收集更多完整踩踏圈。")
+            automatic_range = str(self.settings.value("angle/automatic_range", "true")).lower() == "true"
+            if automatic_range:
+                window = min(60.0, max(10.0, (duration - 5.0) / 3.0))
+                start = (5.0, round(5.0 + window, 2))
+                end = (round(duration - window, 2), round(duration, 2))
+            else:
+                start = (float(self.settings.value("angle/start0", 5.0)),
+                         float(self.settings.value("angle/start1", 65.0)))
+                end = (float(self.settings.value("angle/end0", 240.0)),
+                       float(self.settings.value("angle/end1", 300.0)))
+            auto_scale = str(self.settings.value("angle/auto_scale", "true")).lower() == "true"
+            auto_offset = str(self.settings.value("angle/auto_offset", "false")).lower() == "true"
+            settings = AngleSettings(
+                start,
+                end,
+                scale=None if auto_scale else float(self.settings.value("angle/scale", 1.0)),
+                offset_s=None if auto_offset else float(self.settings.value("angle/offset_s", 0.0)),
+            )
             settings.validate()
         except (OSError, StopIteration, ValueError) as exc:
             self.angleStatusLabel.setText(f"無法分析：{exc}")
+            self.angleOverviewLabel.setText(f"本次相位聯合分析未完成：{exc}")
             return
-        for key, value in zip(("start0", "start1", "end0", "end1"), values):
-            self.settings.setValue(f"angle/{key}", value)
-        self.settings.setValue("angle/offset_s", self.angleOffsetSpin.value())
-        self.settings.setValue("angle/auto_offset", self.angleAutoOffsetCheck.isChecked())
-        self.settings.setValue("angle/auto_scale", self.angleAutoScaleCheck.isChecked())
-        self.settings.setValue("angle/scale", self.angleScaleSpin.value())
         self.angleAnalysisResult = None
         self.angleExportButton.setEnabled(False)
-        self.angleRunButton.setEnabled(False)
-        self.angleEmgButton.setEnabled(False)
-        self.anglePedalButton.setEnabled(False)
         self.angleStatusLabel.setText("正在背景分析原始 EMG 與踏板資料…")
         worker = AngleAnalysisWorker(emg, pedal, sides, settings, side_source)
         self.angleAnalysisWorker = worker
@@ -3736,6 +3910,9 @@ class TrignoWindow(QMainWindow):
         worker.start()
 
     def angleAnalysisCompleted(self, result: dict) -> None:
+        worker = self.angleAnalysisWorker
+        if worker is None or worker.emg_path != self.angleEmgPath or worker.pedal_path != self.anglePedalPath:
+            return
         self.angleAnalysisResult = result
         sync = result["sync"]
         reference_quality = (f'｜{len(sync["references"])} 個參考通道，最佳殘差 '
@@ -4357,17 +4534,22 @@ class TrignoWindow(QMainWindow):
             self.angleViews.setCurrentWidget(self.angleDetailPage)
 
     def angleAnalysisFailed(self, message: str) -> None:
+        worker = self.angleAnalysisWorker
+        if worker is None or worker.emg_path != self.angleEmgPath or worker.pedal_path != self.anglePedalPath:
+            return
         self.angleStatusLabel.setText(f"分析失敗：{message}")
+        self.angleOverviewLabel.setText(f"本次相位聯合分析未完成：{message}")
 
     def angleAnalysisFinished(self) -> None:
         self.angleAnalysisWorker = None
-        self.angleRunButton.setEnabled(True)
-        self.angleEmgButton.setEnabled(True)
-        self.anglePedalButton.setEnabled(True)
+        if self.pendingAutoAngleAnalysis:
+            QTimer.singleShot(0, self.startAutomaticAngleAnalysis)
 
     def exportAngleAnalysis(self) -> None:
         if self.angleAnalysisResult is None or self.angleExportWorker is not None:
             return
+        self.tabs.setCurrentWidget(self.summaryTab)
+        self.summaryTabs.setCurrentIndex(2)
         folder = QFileDialog.getExistingDirectory(self, "選擇角度分析匯出資料夾", self.pathEdit.text().strip())
         if not folder:
             return
@@ -4379,7 +4561,7 @@ class TrignoWindow(QMainWindow):
             suffix += 1
         self.angleExportButton.setEnabled(False)
         self.angleStatusLabel.setText("正在背景匯出同步 CSV、分析表與圖片…")
-        worker = AngleExportWorker(self.angleAnalysisResult, target, self.angleIncludeRawCheck.isChecked())
+        worker = AngleExportWorker(self.angleAnalysisResult, target, True)
         self.angleExportWorker = worker
         worker.completed.connect(lambda path: self.angleStatusLabel.setText(f"角度分析已匯出至 {path}"))
         worker.failed.connect(lambda message: self.angleStatusLabel.setText(f"匯出失敗：{message}"))
@@ -4426,14 +4608,14 @@ class TrignoWindow(QMainWindow):
             # GoPro is optional. Do not prevent EMG/trainer/pedal collection
             # just because the camera was left checked without configuration.
             self.useGoProCheck.setChecked(False)
-            self.goproStatusLabel.setText("尚未選擇 GoPro；本次將不錄影，其他資料照常收集")
-            self.appendLog("GoPro | no camera selected; collection continues without video")
+            self.goproStatusLabel.setText("尚未選擇 攝影機；本次將不錄影，其他資料照常收集")
+            self.appendLog("攝影機 | no camera selected; collection continues without video")
         if not any((self.useEmgCheck.isChecked(), self.useTrainerCheck.isChecked(), self.usePedalCheck.isChecked(), self.useGoProCheck.isChecked())):
             QMessageBox.warning(self, "尚未選擇設備", "請在第一頁至少勾選一個本次要測試的設備。")
             self.tabs.setCurrentWidget(self.settingsTab)
             return
         if self.useGoProCheck.isChecked() and not self.goproAddress:
-            QMessageBox.warning(self, "GoPro 尚未選擇", "請先在設定頁掃描 GoPro、點選它，並按「設定為 GoPro」。")
+            QMessageBox.warning(self, "攝影機 尚未選擇", "請先在設定頁掃描 攝影機、點選它，並按「設定為 攝影機」。")
             self.tabs.setCurrentWidget(self.settingsTab)
             return
         if not self.useEmgCheck.isChecked():
@@ -4642,25 +4824,25 @@ class TrignoWindow(QMainWindow):
                 self.startCountdown()
 
     def beginGoProRecording(self) -> None:
-        """Start GoPro asynchronously once the data collection is live."""
+        """Start 攝影機 asynchronously once the data collection is live."""
         if not self.useGoProCheck.isChecked():
             return
         if self.goproRecordingStarted:
-            self.appendLog("GoPro | start skipped: app already marked the camera as recording")
+            self.appendLog("攝影機 | start skipped: app already marked the camera as recording")
             return
         if self.goproWorker and self.goproWorker.isRunning():
             if self.goproWorker.action == "connect":
-                self.appendLog("GoPro | sending start through the pre-connected Bluetooth session")
+                self.appendLog("攝影機 | sending start through the pre-connected Bluetooth session")
                 self.goproStartConfirmed = False
                 self.goproAwaitingStartConfirmation = True
-                self.goproConnectionLabel.setText("● GoPro：正在啟動錄影")
+                self.goproConnectionLabel.setText("● 攝影機：正在啟動錄影")
                 FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", "warning")
                 self.goproWorker.request_start()
             else:
-                self.appendLog("GoPro | previous command is still running")
+                self.appendLog("攝影機 | previous command is still running")
             return
-        self.appendLog("GoPro | no pre-connected session; connect and test GoPro first")
-        self.goproStatusLabel.setText("請先按「配對並測試 GoPro」，保持連線後再開始收集。")
+        self.appendLog("攝影機 | no pre-connected session; connect and test 攝影機 first")
+        self.goproStatusLabel.setText("請先按「配對並測試 攝影機」，保持連線後再開始收集。")
 
     def stopGoProRecording(self) -> None:
         """Request camera stop without blocking the EMG/CSV shutdown path."""
@@ -4672,8 +4854,8 @@ class TrignoWindow(QMainWindow):
             self.goproStopRequested = True
             self.goproAwaitingStartConfirmation = False
             self.goproRecordingStarted = False
-            self.appendLog("GoPro | stop requested on the active Bluetooth session")
-            self.goproConnectionLabel.setText("● GoPro：正在停止錄影")
+            self.appendLog("攝影機 | stop requested on the active Bluetooth session")
+            self.goproConnectionLabel.setText("● 攝影機：正在停止錄影")
             FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", "warning")
             self.goproWorker.request_stop()
             return
@@ -4681,8 +4863,8 @@ class TrignoWindow(QMainWindow):
             return
         self.goproAwaitingStartConfirmation = False
         self.goproRecordingStarted = False
-        self.appendLog("GoPro | stopping recording…")
-        self.goproConnectionLabel.setText("● GoPro：正在停止錄影")
+        self.appendLog("攝影機 | stopping recording…")
+        self.goproConnectionLabel.setText("● 攝影機：正在停止錄影")
         FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", "warning")
         worker = GoProCommandWorker("stop", self.goproAddress or None, self.goproIdentifier or None)
         self.goproWorker = worker
@@ -4714,9 +4896,9 @@ class TrignoWindow(QMainWindow):
             self.goproStatusLabel.setText(f"已連線：{result.name}（{result.address}）；未開始錄影")
             self.goproDisconnectButton.setEnabled(True)
         elif result.action == "start" and hasattr(self, "goproStatusLabel"):
-            self.goproStatusLabel.setText("錄影指令已送出；請確認 GoPro 螢幕上的紅點／計時器")
+            self.goproStatusLabel.setText("錄影指令已送出；請確認 攝影機 螢幕上的紅點／計時器")
         elif result.action == "stop" and hasattr(self, "goproStatusLabel"):
-            self.goproStatusLabel.setText("已連線；GoPro 已停止錄影")
+            self.goproStatusLabel.setText("已連線；攝影機 已停止錄影")
         if self.rideSession is not None:
             video = self.rideSession.setdefault("gopro", {})
             video[f"{result.action}_timestamp"] = timestamp
@@ -4727,13 +4909,13 @@ class TrignoWindow(QMainWindow):
                     video["camera_model"] = detail.removeprefix("Camera model: ")
                 elif detail.startswith("Firmware revision: "):
                     video["firmware_revision"] = detail.removeprefix("Firmware revision: ")
-        self.appendLog(f"GoPro | {result.action} succeeded: {result.name} at {timestamp}")
+        self.appendLog(f"攝影機 | {result.action} 成功：{result.name}，時間 {timestamp}")
         for detail in result.details:
-            self.appendLog(f"GoPro | {detail}")
+            self.appendLog(f"攝影機 | {detail}")
 
     def goProDiagnostic(self, message: str) -> None:
         """Log BLE notifications and promote successful shutter responses to UI state."""
-        self.appendLog(f"GoPro | {message}")
+        self.appendLog(f"攝影機 | {message}")
         # Open GoPro command response format is: length, command id, status.
         # 02 01 00 therefore confirms shutter (01) succeeded (00).
         if message.strip().endswith("02 01 00") and self.goproAwaitingStartConfirmation:
@@ -4743,11 +4925,11 @@ class TrignoWindow(QMainWindow):
 
     def setGoProRecordingConfirmed(self) -> None:
         """Show a camera-confirmed recording state in the connection badge."""
-        self.goproConnectionLabel.setText("● GoPro：錄影中（已確認）")
-        self.goproConnectionLabel.setToolTip("GoPro 已回覆快門指令成功，正在錄影。")
+        self.goproConnectionLabel.setText("● 攝影機：錄影中（已確認）")
+        self.goproConnectionLabel.setToolTip("攝影機 已回覆快門指令成功，正在錄影。")
         FluentThemeManager.set_property(self.goproConnectionLabel, "fluentSeverity", "success")
         if hasattr(self, "goproStatusLabel"):
-            self.goproStatusLabel.setText("GoPro 錄影中；已收到快門成功回覆")
+            self.goproStatusLabel.setText("攝影機 錄影中；已收到快門成功回覆")
 
     def goProCommandFailed(self, action: str, message: str) -> None:
         # A camera is optional: data acquisition remains valid when it is absent.
@@ -4759,8 +4941,8 @@ class TrignoWindow(QMainWindow):
         if action == "verify" and hasattr(self, "goproStatusLabel"):
             self.goproStatusLabel.setText(f"連線失敗：{message}")
         elif hasattr(self, "goproStatusLabel"):
-            self.goproStatusLabel.setText(f"GoPro {action} 失敗：{message}")
-        self.appendLog(f"GoPro | {action} failed (EMG collection continues): {message}")
+            self.goproStatusLabel.setText(f"攝影機 {action} 失敗：{message}")
+        self.appendLog(f"攝影機 | {action} 失敗，EMG 收集持續進行：{message}")
 
     def goProCommandFinished(self) -> None:
         worker, self.goproWorker = self.goproWorker, None
@@ -4861,14 +5043,17 @@ class TrignoWindow(QMainWindow):
     def setSummaryRecords(self, records: list[dict], source: str) -> None:
         """Render one standardized summary on the persistent summary page."""
         self.summaryRecords = list(records)
-        self.pedalSummarySource = "fit" if "匯入 FIT" in source else "current"
-        self.summarySourceLabel.setText(source)
+        self.pedalSummarySource = "imported" if "匯入踏板 CSV" in source else "current"
+        if self.angleEmgPath is not None or self.anglePedalPath is not None:
+            self.updateAngleFileStatus()
+        else:
+            self.summarySourceLabel.setText(source)
         self.refreshSummaryAnalysis()
 
     def refreshSummaryAnalysis(self) -> None:
         """Refresh the numerical report and time-series plots for the selected source."""
         if not self.summaryRecords:
-            self.summaryDetails.setText("完成踏板收集，或匯入FIT檔後，摘要會顯示在這裡")
+            self.summaryDetails.setText("完成踏板收集，或匯入踏板 CSV 後，摘要會顯示在這裡")
             for label in self.pedalMetricCards.values():
                 label.setText("--")
             if self.pedalZoneTable is not None:
@@ -4969,7 +5154,7 @@ class TrignoWindow(QMainWindow):
                 self.pedalSummarySource = "current"
                 self.refreshSummaryAnalysis()
             self.latestRideSession = self.collectedRideSession
-            self.summarySourceLabel.setText("資料來源：本程式最新收集的騎乘資料")
+            self.updateAngleFileStatus()
             self.refreshRideAnalysis()
             self.refreshComparison()
             self.summaryTabs.setCurrentIndex(0)
@@ -4980,18 +5165,39 @@ class TrignoWindow(QMainWindow):
         self.currentSessionSummaryButton.setEnabled(True)
         self.setSummaryRecords(self.latestPedalRecords, "資料來源：本程式最新收集的踏板資料")
 
-    def importFitSummary(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "匯入 FIT", "", "FIT files (*.fit *.FIT)")
+    def importPedalCsvSummary(self) -> None:
+        start_dir = str(self.angleEmgPath.parent) if self.angleEmgPath else self.pathEdit.text().strip()
+        path, _ = QFileDialog.getOpenFileName(self, "匯入踏板或校正角度 CSV", start_dir, "CSV (*.csv)")
         if not path:
             return
+        selected = Path(path)
         try:
-            records = load_pedal_fit(Path(path))
-        except Exception as exc:
-            QMessageBox.warning(self, "無法匯入 FIT", f"讀取 FIT 檔失敗：{exc}")
+            calibrated = is_calibrated_angle_csv(selected)
+            if calibrated:
+                _angles(selected)
+                records = None
+            else:
+                records = load_pedal_csv(selected)
+        except (OSError, UnicodeError, ValueError, csv.Error) as exc:
+            QMessageBox.warning(self, "無法匯入踏板 CSV", str(exc))
             return
-        self.setSummaryRecords(records, f"資料來源：匯入 FIT — {Path(path).name}")
-        self.summaryTabs.setCurrentIndex(1)
-        self.appendLog(f"已匯入 FIT 摘要：{Path(path).name}（{len(records)} 筆 record）")
+        self.anglePedalPath = selected
+        self.angleAnalysisResult = None
+        self.angleExportButton.setEnabled(False)
+        self.updateAngleFileStatus()
+        if calibrated:
+            self.summaryRecords = []
+            self.pedalSummarySource = "imported"
+            self.refreshSummaryAnalysis()
+            self.summaryDetails.setText("已匯入校正角度 CSV；此檔沒有功率摘要。")
+            self.updateAngleFileStatus()
+            self.summaryTabs.setCurrentIndex(2)
+            self.appendLog(f"已匯入校正角度 CSV：{selected.name}")
+        else:
+            self.setSummaryRecords(records, f"資料來源：匯入踏板 CSV — {selected.name}")
+            self.summaryTabs.setCurrentIndex(1)
+            self.appendLog(f"已匯入踏板 CSV：{selected.name}（{len(records)} 筆資料）")
+        self.queueAngleAnalysis()
 
     def collectionMetadataReady(self, metadata: dict) -> None:
         if self.infoRecorder is None:
@@ -5312,7 +5518,7 @@ class TrignoWindow(QMainWindow):
         for address, name in sorted(devices, key=lambda item: item[1].casefold()):
             button = QPushButton(f"{name or 'Unknown device'}  ·  {address}")
             button.setCheckable(True)
-            button.setToolTip("點選此裝置，再在上方設定為阻力計、踏板或 GoPro")
+            button.setToolTip("點選此裝置，再在上方設定為阻力計、踏板或 攝影機")
             button.setFixedWidth(500)
             FluentThemeManager.set_property(button, "fluentRole", "scanResult")
             button.clicked.connect(
@@ -5353,14 +5559,14 @@ class TrignoWindow(QMainWindow):
             self.pedalDevices.clear()
             self.pedalDevices.addItem(label, address)
             self.pedalDevices.setCurrentIndex(0)
-        elif role == "GoPro":
+        elif role == "攝影機":
             self.goproAddress = address
             suffix = name.rsplit(" ", 1)[-1]
             self.goproIdentifier = suffix if suffix.isdigit() else ""
             self.settings.setValue("gopro/address", address)
             self.settings.setValue("gopro/identifier", self.goproIdentifier)
             self.setGoProConnectionState(False)
-            self.goproStatusLabel.setText(f"已選擇：{label}；可按「測試 GoPro 連線」")
+            self.goproStatusLabel.setText(f"已選擇：{label}；可按「測試攝影機連線」")
         self.appendLog(f"Device assignment | {role}: {label}")
 
     def closeEvent(self, event) -> None:  # noqa: N802
@@ -5399,22 +5605,22 @@ class TrignoWindow(QMainWindow):
         if self.goproWorker and self.goproWorker.isRunning():
             self.goproWorker.request_disconnect()
             if not self.goproWorker.wait(5000):
-                self.appendLog("GoPro Bluetooth session is still stopping; close delayed")
+                self.appendLog("攝影機 Bluetooth session is still stopping; close delayed")
                 event.ignore()
                 QTimer.singleShot(150, self.close)
                 return
         if self.goproDownloadWorker and self.goproDownloadWorker.isRunning():
-            self.appendLog("GoPro video download is still running; close delayed")
+            self.appendLog("攝影機 video download is still running; close delayed")
             event.ignore()
             QTimer.singleShot(250, self.close)
             return
         if self.goproMediaListWorker and self.goproMediaListWorker.isRunning():
-            self.appendLog("GoPro media list is still loading; close delayed")
+            self.appendLog("攝影機 media list is still loading; close delayed")
             event.ignore()
             QTimer.singleShot(250, self.close)
             return
         if self.goproWifiWorker and self.goproWifiWorker.isRunning():
-            self.appendLog("GoPro Wi-Fi connection is still running; close delayed")
+            self.appendLog("攝影機 Wi-Fi connection is still running; close delayed")
             event.ignore()
             QTimer.singleShot(250, self.close)
             return

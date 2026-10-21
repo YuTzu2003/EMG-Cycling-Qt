@@ -1,4 +1,4 @@
-"""Small, reusable Bluetooth controller for starting GoPro recordings.
+"""Small, reusable Bluetooth controller for starting 攝影機 recordings.
 
 The camera is deliberately controlled independently from the EMG data path:
 an unavailable camera reports an error but never interrupts EMG acquisition.
@@ -48,9 +48,9 @@ SET_WIFI_AP_ON = bytes((0x17, 0x01, 0x01))
 
 
 def frame_control_packet(payload: bytes) -> bytes:
-    """Frame a short Open GoPro payload for the GP-0072 data protocol."""
+    """Frame a short Open 攝影機 payload for the GP-0072 data protocol."""
     if len(payload) >= 0x1FFF:
-        raise ValueError("GoPro BLE payload is too long")
+        raise ValueError("攝影機 BLE payload is too long")
     return bytes((0x20 | (len(payload) >> 8), len(payload) & 0xFF)) + payload
 
 
@@ -99,11 +99,11 @@ async def read_wifi_credentials(client: BleakClient) -> tuple[str | None, str | 
 async def send_recording_command(
     action: str, address: str | None = None, identifier: str | None = None,
 ) -> GoProResult:
-    """Send the selected camera the minimal GoPro BLE control sequence."""
+    """Send the selected camera the minimal 攝影機 BLE control sequence."""
     if action not in {"verify", "start", "stop"}:
         raise ValueError("action must be 'verify', 'start', or 'stop'")
     if not address:
-        raise GoProError("No GoPro is selected. Scan, select the camera, then choose '設定為 GoPro'.")
+        raise GoProError("No 攝影機 is selected. Scan, select the camera, then choose '設定為 攝影機'.")
     details: list[str] = []
 
     async def write_command(client: BleakClient, label: str, payload: bytes) -> None:
@@ -118,7 +118,7 @@ async def send_recording_command(
     try:
         async with BleakClient(address, timeout=8.0) as client:
             if not client.is_connected:
-                raise GoProError(f"Could not connect to the selected GoPro ({address}).")
+                raise GoProError(f"Could not connect to the selected camera ({address}).")
             details.append(f"BLE connected: {address}")
             await append_device_info(client, details)
             # On Windows the system pairing dialog is optional for some
@@ -138,12 +138,12 @@ async def send_recording_command(
                 await asyncio.sleep(1.0)
             elif action == "stop":
                 await write_command(client, "Stop-recording shutter", STOP_RECORDING)
-            name = "GoPro"
+            name = "攝影機"
     except GoProError:
         raise
     except Exception as exc:
         detail = str(exc).strip() or repr(exc)
-        raise GoProError(f"GoPro {action} command failed: {detail}") from exc
+        raise GoProError(f"Camera {action} command failed: {detail}") from exc
     return GoProResult(action, address, name, datetime.now().astimezone(), tuple(details))
 
 
@@ -157,14 +157,14 @@ async def keep_ready_session(
 ) -> GoProResult:
     """Keep BLE connected after verification, then start/stop on request."""
     if not address:
-        raise GoProError("No GoPro is selected. Scan, select the camera, then choose '設定為 GoPro'.")
+        raise GoProError("No 攝影機 is selected. Scan, select the camera, then choose '設定為 攝影機'.")
     details: list[str] = []
     wifi_ssid: str | None = None
     wifi_password: str | None = None
 
     def result(action: str, result_details: tuple[str, ...]) -> GoProResult:
         return GoProResult(
-            action, address, "GoPro", datetime.now().astimezone(), result_details, wifi_ssid, wifi_password,
+            action, address, "攝影機", datetime.now().astimezone(), result_details, wifi_ssid, wifi_password,
         )
 
     async def write_command(client: BleakClient, label: str, payload: bytes) -> None:
@@ -179,7 +179,7 @@ async def keep_ready_session(
     try:
         async with BleakClient(address, timeout=8.0) as client:
             if not client.is_connected:
-                raise GoProError(f"Could not connect to the selected GoPro ({address}).")
+                raise GoProError(f"Could not connect to the selected camera ({address}).")
             details.append(f"BLE connected and held open: {address}")
             await append_device_info(client, details)
             try:
@@ -197,16 +197,16 @@ async def keep_ready_session(
                 details.append("Windows Bluetooth pairing: skipped or already paired")
             wifi_ssid, wifi_password = await read_wifi_credentials(client)
             if wifi_ssid and wifi_password:
-                details.append(f"GoPro Wi-Fi credentials available: {wifi_ssid}")
+                details.append(f"Camera Wi-Fi credentials available: {wifi_ssid}")
             else:
-                details.append("GoPro Wi-Fi credentials unavailable")
+                details.append("攝影機 Wi-Fi credentials unavailable")
             await write_command(client, "Set third-party client info", SET_THIRD_PARTY_CLIENT_INFO)
             try:
-                await write_command(client, "Enable GoPro Wi-Fi AP", SET_WIFI_AP_ON)
+                await write_command(client, "Enable 攝影機 Wi-Fi AP", SET_WIFI_AP_ON)
             except GoProError as exc:
                 # Recording control is still valid if this optional media
                 # download setup step is unavailable on a camera firmware.
-                details.append(f"Enable GoPro Wi-Fi AP: unavailable ({exc})")
+                details.append(f"Enable camera Wi-Fi AP: unavailable ({exc})")
             completed.emit(result("verify", tuple(details)))
 
             # Keep the verified BLE session warm.  It stays alive across
@@ -265,7 +265,7 @@ async def keep_ready_session(
         raise
     except Exception as exc:
         detail = str(exc).strip() or repr(exc)
-        raise GoProError(f"GoPro recording session failed: {detail}") from exc
+        raise GoProError(f"Camera recording session failed: {detail}") from exc
 
 
 class GoProCommandWorker(QThread):
@@ -315,7 +315,7 @@ class GoProCommandWorker(QThread):
 
 
 class GoProDownloadWorker(QThread):
-    """Download an MP4 from a GoPro Wi-Fi access point."""
+    """Download an MP4 from a 攝影機 Wi-Fi access point."""
 
     completed = Signal(object)
     failed = Signal(str)
@@ -405,7 +405,7 @@ class GoProDownloadWorker(QThread):
 
 
 class GoProMediaListWorker(QThread):
-    """Read the GoPro media list without downloading a file."""
+    """Read the 攝影機 media list without downloading a file."""
 
     completed = Signal(object)
     failed = Signal(str)
@@ -421,7 +421,7 @@ class GoProMediaListWorker(QThread):
 
 
 class GoProWifiConnectWorker(QThread):
-    """Connect Windows to the GoPro AP without parsing localized netsh output."""
+    """Connect Windows to the 攝影機 AP without parsing localized netsh output."""
 
     connected = Signal()
     failed = Signal(str)
@@ -435,7 +435,7 @@ class GoProWifiConnectWorker(QThread):
         profile_path: Path | None = None
         try:
             if not self.ssid or not self.password:
-                raise GoProError("GoPro Wi-Fi credentials are unavailable. Pair and test the camera again.")
+                raise GoProError("攝影機 Wi-Fi credentials are unavailable. Pair and test the camera again.")
             profile = f'''<?xml version="1.0"?>
 <WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
   <name>{xml_escape(self.ssid)}</name>
@@ -466,7 +466,7 @@ class GoProWifiConnectWorker(QThread):
                     return
                 except (URLError, OSError, ValueError, json.JSONDecodeError):
                     self.msleep(1000)
-            raise GoProError("Windows could not reach the GoPro Wi-Fi access point after 20 seconds.")
+            raise GoProError("Windows could not reach the 攝影機 Wi-Fi access point after 20 seconds.")
         except (GoProError, OSError, subprocess.SubprocessError) as exc:
             self.failed.emit(str(exc))
         finally:

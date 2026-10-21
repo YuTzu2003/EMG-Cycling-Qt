@@ -1,8 +1,8 @@
-# GoPro recording integration
+# 攝影機錄影整合
 
 ## Lower-latency start and video download
 
-After **配對並測試 GoPro** succeeds, the application keeps that BLE session
+After **配對並測試攝影機** succeeds, the application keeps that BLE session
 open and sends an Open GoPro keep-alive every three seconds. When collection
 starts, it can send the shutter command through that already-open session
 instead of reconnecting and pairing again. This reduces the software-side
@@ -10,7 +10,7 @@ delay, but is not a hardware trigger: use a visible/audible cue when you need
 frame-accurate alignment.
 
 Stopping a collection sends the shutter-off command but keeps the verified
-Bluetooth session ready for the next collection. Use **中斷 GoPro** (or close
+Bluetooth session ready for the next collection. Use **中斷攝影機** (or close
 the application) to release that session.
 
 To download a video:
@@ -19,26 +19,26 @@ To download a video:
 2. Press **下載最新影片** in Settings, or **選擇影片下載** to select an MP4
    from the camera list.
 
-The app reads the GoPro Wi-Fi SSID and password during Bluetooth verification,
+The app reads the camera Wi-Fi SSID and password during Bluetooth verification,
 enables the camera access point, then asks Windows to join it automatically
 before reading or downloading media. The password stays only in application
 memory and is never added to the event log or session files. The file is saved
-directly in the same data output folder selected on the collection page. If a
+directly in the same data output folder selected in the Settings page. If a
 selected file already exists, the app asks whether to overwrite, rename, or
 skip it. The app does not delete camera files.
 
-The collection page now has a **GoPro 影片** checkbox. When selected, the
+The collection page now has a **攝影機** checkbox. When selected, the
 application discovers a nearby camera over Bluetooth and sends the Open GoPro
 start/stop recording commands when a collection starts and ends. The Settings
 page test performs a real Open GoPro command/response check without recording.
 
 ## Before a recording
 
-1. Turn on the GoPro and enable Bluetooth / wireless connections.
+1. Turn on the camera and enable Bluetooth / wireless connections.
 2. Pair the camera with Windows if the camera prompts for pairing.
 3. Keep the camera nearby. The first command scans for a Bluetooth name that
    contains `GoPro`; its address is saved for the next collection.
-4. Select **GoPro 影片** on the collection page, then start the normal EMG
+4. Select **攝影機** on the collection page, then start the normal EMG
    collection.
 
 The event log records the camera name, Bluetooth address, and start/stop
@@ -48,7 +48,7 @@ to support later video/EMG alignment.
 ## Scope and limitations
 
 Video download is a separate, explicit action. When requested, it temporarily
-changes Windows to the GoPro Wi-Fi access point so the media HTTP API can be
+changes Windows to the camera Wi-Fi access point so the media HTTP API can be
 reached; do not start a download while network access is required for another
 task.
 
@@ -58,7 +58,7 @@ at recording start is recommended.
 
 ## Status, compatibility, and troubleshooting
 
-GoPro is optional: leaving **GoPro 影片** unchecked, not configuring a camera,
+The camera is optional: leaving **攝影機** unchecked, not configuring a camera,
 or losing its control connection never stops EMG, trainer, or pedal capture.
 
 The upper-right indicator has deliberately conservative meanings:
@@ -83,7 +83,7 @@ For frame-level
 synchronization, use a visible or audible cue and measure the offset.
 
 If recording does not start, include the **Camera model**, **Firmware
-revision**, and all `GoPro |` event-log lines when reporting the problem. Make
+revision**, and all `攝影機 |` event-log lines when reporting the problem. Make
 sure the camera can record normally, is in video mode, is awake, is not in USB
 mode, and is not being controlled by GoPro Quik or another application.
 
