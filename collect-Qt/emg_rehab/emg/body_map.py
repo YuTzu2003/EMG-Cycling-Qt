@@ -6,7 +6,7 @@ from PySide6.QtSvgWidgets import QGraphicsSvgItem
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QButtonGroup,QFrame,QGraphicsPathItem,QGraphicsScene,QGraphicsView,QHBoxLayout,QLabel,QPushButton,QVBoxLayout,QWidget,)
 from emg_rehab.emg.anatomy_svg_data import ANATOMY_SVG
-from modules.emg.sensor_mapping import SensorMapping
+from emg_rehab.emg.sensor_mapping import SensorMapping
 
 MUSCLE_ALIASES = {
     "biceps femoris": "biceps-femoris",

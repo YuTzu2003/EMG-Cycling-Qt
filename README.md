@@ -1,78 +1,57 @@
-# EMG Rehabilitation System
+﻿# EMG Rehabilitation System
 
-EMG 與踩踏資料的收集、病人管理及分析系統。桌面程式負責裝置設定與原始資料收集；Flask 網站負責病人資料、紀錄查閱、分析及比較。兩者共用 SQL Server 資料庫 `RehabPatients-ylh`。
-
-## 專案結構
+EMG ?萱頦????園???鈭箇恣????蝟餌絞???Ｙ?撘?鞎祈?蝵株身摰???鞈??園?嚗lask 蝬脩?鞎痊?犖鞈?????晞???瘥?????SQL Server 鞈?摨?`RehabPatients-ylh`??
+## 撠?蝯?
 
 ```text
-emg_rehab/              EMG 復健系統共用核心、資料庫存取與 Flask 網站
-  archive.py            病人、測試及原始檔案存取
-  storage_db.py         SQL Server 存取與每秒資料寫入
-  web.py                Flask 路由
-  templates/            網站頁面
-  static/               網站樣式
-emg_rehab_qt/           EMG 復健桌面收集專案
-  emg_rehab_qt/         Qt 介面、裝置連線及資料收集套件
-  app.py                Flask 網站啟動檔
-  main.py               Qt 桌面程式啟動檔
-  emg_acquisition.py    命令列收集程式啟動檔
-  pyproject.toml        Qt 專用依賴與啟動指令
-  README.md             Qt 安裝與操作說明
-sql/001_web_archive.sql 資料庫建表與既有病人資料匯入
-tests/                  網站與共用功能測試
-```
+emg_rehab/              EMG 敺拙蝟餌絞?梁?詨????澈摮???Flask 蝬脩?
+  archive.py            ?犖?葫閰血???瑼?摮?
+  storage_db.py         SQL Server 摮???蝘??神??  web.py                Flask 頝舐
+  templates/            蝬脩??
+  static/               蝬脩?璅??
+emg_rehab_qt/           EMG 敺拙獢?園?撠?
+  emg_rehab_qt/         Qt 隞??蝵桅???????隞?  app.py                Flask 蝬脩???瑼?  main.py               Qt 獢蝔???瑼?  emg_acquisition.py    ?賭誘???撘???
+  pyproject.toml        Qt 撠靘陷????隞?  README.md             Qt 摰???雿牧??sql/001_web_archive.sql 鞈?摨怠遣銵刻??Ｘ??犖鞈??臬
+tests/                  蝬脩???典??賣葫閰?```
 
-程式已直接放在專案根目錄，不需要設定 `PYTHONPATH=src`。Qt 的安裝與操作見 [Qt 說明](emg_rehab_qt/README.md)。
+蝔?撌脩?交?典?獢?桅?嚗??閬身摰?`PYTHONPATH=src`?t ??鋆???閬?[Qt 隤芣?](emg_rehab_qt/README.md)??
+## 摰????澈
 
-## 安裝與資料庫
-
-需要 Windows、Python 3.12 以上、SQL Server，以及 [uv](https://docs.astral.sh/uv/)。先在專案根目錄執行：
-
+?閬?Windows?ython 3.12 隞乩??QL Server嚗誑??[uv](https://docs.astral.sh/uv/)???典?獢?桅??瑁?嚗?
 ```powershell
 uv sync
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-如果本機已有 `.env`，保留現有密碼，無須重新複製。以下設定供網站及 Qt 共用：
-
+憒??祆?撌脫? `.env`嚗????蝣潘??⊿??銴ˊ?誑銝身摰?蝬脩???Qt ?梁嚗?
 ```dotenv
 DB_SERVER=127.0.0.1,1433
 DB_NAME=RehabPatients-ylh
 DB_USER=Rehab-User
-DB_PASSWORD=你的 SQL Server 密碼
-WEB_PASSWORD=網站登入密碼
-WEB_SECRET_KEY=足夠長的隨機簽章金鑰
+DB_PASSWORD=雿? SQL Server 撖Ⅳ
+WEB_SECRET_KEY=頞喳??瑞??冽?蝪賜??
 WEB_BEHIND_HTTPS_PROXY=0
 ```
 
-`.env` 已被 Git 忽略。網站需要另外設定 `WEB_PASSWORD` 才能登入；對外開放前也應設定 `WEB_SECRET_KEY`。程式首次連線時會建立網站需要的資料表；也可以在 SSMS 執行 [建表腳本](sql/001_web_archive.sql)。現有 `Sessions` 病人會匯入 `Patients`，原本的收集資料表繼續使用。
+## ??
 
-## 啟動
-
-網站在根目錄啟動：
-
+蝬脩??冽?桅???嚗?
 ```powershell
 uv run app.py
 ```
 
-Qt 在獨立資料夾啟動：
-
+Qt ?函蝡??冗??嚗?
 ```powershell
 cd emg_rehab_qt
 uv sync
 uv run main.py
 ```
 
-網站預設位址為 `http://127.0.0.1:5000`。若要從手機連入，請先設定網站密碼及 HTTPS 反向代理，再將代理指向 `127.0.0.1:5000`；代理正確傳遞 `X-Forwarded-Proto` 與 `X-Forwarded-For` 時，設定 `WEB_BEHIND_HTTPS_PROXY=1`。
+蝬脩??身雿???`http://127.0.0.1:5000`?閬?????嚗??身摰雯蝡?蝣澆? HTTPS ??隞??嚗?撠誨????`127.0.0.1:5000`嚗誨?迤蝣箏??`X-Forwarded-Proto` ??`X-Forwarded-For` ??閮剖? `WEB_BEHIND_HTTPS_PROXY=1`??
+## 雿輻瘚?
 
-## 使用流程
-
-1. 在網站建立病人資料。
-2. 在 Qt 選擇病人、設定裝置並開始收集；每秒摘要及完整原始檔都寫入 SQL Server。
-3. 在網站選取測試、上傳 CSV、查看分析及比較結果。
-
-測試：
-
+1. ?函雯蝡遣蝡?鈭箄???2. ??Qt ?豢??犖?身摰?蝵桐蒂???園?嚗?蝘?閬?摰??瑼撖怠 SQL Server??3. ?函雯蝡?葫閰艾???CSV?????瘥?蝯???
+皜祈岫嚗?
 ```powershell
 uv run python -m unittest discover -s tests -v
 ```

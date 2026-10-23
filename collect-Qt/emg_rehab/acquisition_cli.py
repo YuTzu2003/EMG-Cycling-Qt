@@ -3,7 +3,7 @@ import argparse
 import csv
 import sys
 from pathlib import Path
-from modules.emg.sensor_mapping import csvColumnNames, loadProjectMappings
+from emg_rehab.emg.sensor_mapping import csvColumnNames, loadProjectMappings
 from emg_rehab.emg.device_stream import CHANNEL_COUNT, TrignoClient, TrignoError
 
 def configure_console_encoding() -> None:

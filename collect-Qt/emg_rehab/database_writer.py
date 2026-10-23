@@ -6,7 +6,7 @@ from typing import Any
 
 from PySide6.QtCore import QThread, Signal
 
-from modules.storage_db import DatabaseConfig, SqlServerStorage
+from emg_rehab.database.storage_db import DatabaseConfig, SqlServerStorage
 
 
 class DatabaseWriter(QThread):

@@ -1,1 +1,1 @@
-"""EMG rehabilitation core: analysis, archive, and web portal."""
+"""Web application modules."""

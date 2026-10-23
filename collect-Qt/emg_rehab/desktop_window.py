@@ -13,29 +13,29 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPalette
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget, QInputDialog,
       QTableWidget, QTableWidgetItem, QHeaderView, QDoubleSpinBox, QToolButton, QStyle, QGraphicsProxyWidget, QSizePolicy,)
-from modules.collection import CollectionInfoRecorder, SubjectInfo, analysisOutputPath, infoOutputPath
+from emg_rehab.emg.collection import CollectionInfoRecorder, SubjectInfo, analysisOutputPath, infoOutputPath
 from emg_rehab.emg.body_map import BodyMapPanel
-from modules.emg.sensor_mapping import (SensorMapping, duplicateMappingSlots, loadMappings, saveMappings, matchesCsvColumn, recordingChannelSides, projectMappingPath)
+from emg_rehab.emg.sensor_mapping import (SensorMapping, duplicateMappingSlots, loadMappings, saveMappings, matchesCsvColumn, recordingChannelSides, projectMappingPath)
 from emg_rehab.emg.device_stream import CHANNEL_COUNT, SAMPLE_RATE
-from modules.emg.baseline import BaselineManager, CalibrationSession, EMGPreprocessor, FilterSettings, RMSFeatureExtractor, load_raw_emg_csv
+from emg_rehab.emg.baseline import BaselineManager, CalibrationSession, EMGPreprocessor, FilterSettings, RMSFeatureExtractor, load_raw_emg_csv
 from emg_rehab.emg.stream_workers import ConnectionWorker, StreamWorker
 from emg_rehab.resistance.recording import TrainerCsvRecorder, trainerOutputPath
 from emg_rehab.resistance.trainer import BikeTelemetry, NumericRange, TrainerWorker
 from emg_rehab.pedal.recording import PedalCsvRecorder, pedalOutputPath
-from modules.pedal.analysis import analyze_pedal_records, pedal_analysis_lines, pedal_summary_lines, summarize_pedal_records
+from emg_rehab.pedal.analysis import analyze_pedal_records, pedal_analysis_lines, pedal_summary_lines, summarize_pedal_records
 from emg_rehab.pedal.worker import PedalWorker
 from emg_rehab.pedal.fit_export import exportPedalFit
-from modules.pedal.csv_import import is_calibrated_angle_csv, load_pedal_csv
-from modules.pedal.angle_emg import (AngleSettings, _angles, analysis_summary_text, analyze_angle_emg,export_angle_emg, phase_intensities)
+from emg_rehab.pedal.csv_import import is_calibrated_angle_csv, load_pedal_csv
+from emg_rehab.pedal.angle_emg import (AngleSettings, _angles, analysis_summary_text, analyze_angle_emg,export_angle_emg, phase_intensities)
 from emg_rehab.cycling_bluetooth import CyclingDeviceScanWorker
 from emg_rehab.gopro import GoProCommandWorker, GoProDownloadWorker, GoProMediaListWorker, GoProResult, GoProWifiConnectWorker
 from emg_rehab.fluent_theme import FluentThemeManager
-from modules.session_analysis import (add_point, analyze, compare_rms, load_session, new_session, peak_envelope, save_session)
-from modules.session_compare import compare_sessions
-from modules.storage_db import DatabaseConfig, SecondAggregator, SqlServerStorage, prefixed_id
+from emg_rehab.emg.session_analysis import (add_point, analyze, compare_rms, load_session, new_session, peak_envelope, save_session)
+from emg_rehab.emg.session_compare import compare_sessions
+from emg_rehab.database.storage_db import DatabaseConfig, SecondAggregator, SqlServerStorage, prefixed_id
 from emg_rehab.database_writer import DatabaseWriter
-from modules.reporting import export_report
-from modules.archive import Archive, default_config
+from emg_rehab.emg.reporting import export_report
+from emg_rehab.database.archive import Archive, default_config
 
 COLORS = (
     "#1684d7", "#e95f54", "#7e57c2", "#00897b",
