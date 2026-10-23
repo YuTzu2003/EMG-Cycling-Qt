@@ -1,6 +1,6 @@
 # 系統使用操作說明
 
-本文件對應 `uv run emg-cycling` 啟動的 PySide6 桌面介面。環境安裝見 [README](README.md)，資料計算定義見 [資料取得、同步與分析方法](DATA_PIPELINE.md)。
+本文件對應在 `emg_rehab_qt` 執行 `uv run main.py` 啟動的 PySide6 桌面介面。環境安裝見 [Qt README](../emg_rehab_qt/README.md)，資料計算定義見 [資料取得、同步與分析方法](DATA_PIPELINE.md)。
 
 ## 1. 建立本次測試
 

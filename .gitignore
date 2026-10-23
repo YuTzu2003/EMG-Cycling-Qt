@@ -12,6 +12,7 @@ DelsysAPI.lic
 
 # Captured biosignal data
 recordings/
+data/
 *.csv
 *.pptx
 *.txt
@@ -21,5 +22,9 @@ cohn_db.json
 
 # Virtual environments
 .venv
+.env
+.env.*
+!.env.example
+.uv-cache/
 .agents/
 pyside6-fluent-ui/

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#ffffff">
+  <title>{% block title %}EMG 復健平台{% endblock %}｜EMG Rehab</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-sRIl4kxILFvY47J16cr9ZwB07vP4J8+LH7qKQnuqkuIAvNWLzeN8tE5YBujZqJLB" crossorigin="anonymous">
+  <link href="{{ url_for('static', filename='css/app.css') }}" rel="stylesheet">
+</head>
+<body>
+  <nav class="navbar navbar-expand-lg site-nav sticky-top">
+    <div class="container-xxl">
+      <a class="navbar-brand brand" href="{{ url_for('portal.dashboard') }}"><span class="brand-mark">●</span> EMG Rehab <span class="brand-light">/ Cycling</span></a>
+      {% if session.get('logged_in') %}
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navlinks" aria-label="開啟導覽"><span class="navbar-toggler-icon"></span></button>
+      <div class="collapse navbar-collapse" id="navlinks">
+        <div class="navbar-nav ms-auto align-items-lg-center gap-lg-2">
+          <a class="nav-link" href="{{ url_for('portal.patients') }}">病人</a>
+          <a class="nav-link" href="{{ url_for('portal.sessions') }}">測試資料</a>
+          <a class="nav-link" href="{{ url_for('portal.compare') }}">比較分析</a>
+          <a class="btn btn-dark btn-sm nav-action" href="{{ url_for('portal.upload') }}">匯入 CSV</a>
+          <form method="post" action="{{ url_for('auth.logout') }}" class="ms-lg-2"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="btn btn-link nav-link" type="submit">登出</button></form>
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  </nav>
+  <main class="container-xxl page-shell">
+    {% for category, message in get_flashed_messages(with_categories=true) %}
+    <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">{{ message }}<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="關閉"></button></div>
+    {% endfor %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="container-xxl site-footer"><span>EMG Rehab Cycling</span><span>病人資料與量測紀錄管理系統</span></footer>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" integrity="sha384-FKyoEForCGlyvwx9Hj09JcYn3nv7wiPVlz7YYwJrWVcXK/BmnVDxM+D2scQbITxI" crossorigin="anonymous"></script>
+</body>
+</html>

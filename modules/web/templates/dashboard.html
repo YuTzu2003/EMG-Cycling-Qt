@@ -1,0 +1,19 @@
+{% extends 'base.html' %}
+{% block title %}工作台{% endblock %}
+{% block content %}
+<section class="hero hero-panel">
+  <div class="eyebrow">EMG REHABILITATION WORKSPACE</div>
+  <h1>把每一次踩踏，<br><span>變成可追蹤的復健資料。</span></h1>
+  <p>集中管理病人、原始量測與完整分析。Qt 收集程式儲存後，資料會立即出現在這個平台。</p>
+  <div class="hero-actions"><a href="{{ url_for('portal.sessions') }}" class="btn btn-dark btn-lg">查看測試資料</a><a href="{{ url_for('portal.upload') }}" class="btn btn-outline-dark btn-lg">匯入 CSV</a></div>
+</section>
+
+<section class="section-head"><div><div class="eyebrow">WORKSPACE</div><h2>資料概況</h2></div></section>
+<div class="row g-3 mb-5">
+  <div class="col-sm-6"><a class="surface metric-card" href="{{ url_for('portal.patients') }}"><span>病人資料</span><strong>{{ patients|length }}</strong><small>建立與維護病人基本資料</small></a></div>
+  <div class="col-sm-6"><a class="surface metric-card" href="{{ url_for('portal.sessions') }}"><span>最近測試</span><strong>{{ sessions|length }}</strong><small>查看分析、完整報告與原始檔案</small></a></div>
+</div>
+
+<section class="section-head"><div><div class="eyebrow">RECENT ACTIVITY</div><h2>最近測試</h2></div><a href="{{ url_for('portal.sessions') }}" class="text-link">查看全部</a></section>
+<div class="surface table-responsive"><table class="table align-middle mb-0"><thead><tr><th>病人</th><th>開始時間</th><th>來源</th><th>原始檔案</th><th></th></tr></thead><tbody>{% for row in sessions %}<tr><td><strong>{{ row.name }}</strong><small class="d-block text-secondary">{{ row.patient_id }}</small></td><td>{{ row.started_at[:19]|replace('T',' ') }}</td><td>{{ 'Qt 收集' if row.source == 'qt' else 'CSV 匯入' }}</td><td>{{ row.file_count }} 份</td><td><a href="{{ url_for('portal.session_detail', session_id=row.session_id) }}">查看分析</a></td></tr>{% else %}<tr><td colspan="5" class="empty">目前沒有測試資料。請由 Qt 收集程式儲存資料，或匯入 CSV。</td></tr>{% endfor %}</tbody></table></div>
+{% endblock %}
