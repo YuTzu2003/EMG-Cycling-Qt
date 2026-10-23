@@ -1,37 +1,28 @@
-﻿"""SQL Server connectivity shared by website Blueprints.
-
-This module owns connection configuration and transactions only.  Each
-Blueprint keeps the SQL for the data it owns.
-"""
+﻿"""SQL Server connectivity shared by website Blueprints."""
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Iterator
 
-from sqlalchemy import create_engine
+from dotenv import load_dotenv
 
-from modules.config import BaseConfig
-
-
-_engine = None
-
-def get_engine():
-    global _engine
-    if _engine is None:
-        db_uri = BaseConfig.SQLALCHEMY_DATABASE_URI
-        if not db_uri:
-            raise ValueError("環境變數 SQLALCHEMY_DATABASE_URI 未設定")
-        _engine = create_engine(db_uri, pool_pre_ping=True)
-    return _engine
-
-
-def get_conn():
-    return get_engine().raw_connection()
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def connect():
-    """Compatibility name used by the existing Blueprints."""
-    return get_conn()
+    load_dotenv(ROOT / ".env", override=False)
+    password = os.getenv("DB_PASSWORD", "")
+    if not password:
+        raise ValueError("請在 .env 設定 DB_PASSWORD。")
+    import pymssql
+    server = os.getenv("DB_SERVER", "127.0.0.1,1433")
+    host, separator, port_text = server.rpartition(",")
+    host, port = (host, int(port_text)) if separator and port_text.isdecimal() else (server, 1433)
+    return pymssql.connect(server=host, port=port, user=os.getenv("DB_USER", "Rehab-User"),
+                           password=password, database=os.getenv("DB_NAME", "RehabPatients-ylh"),
+                           login_timeout=5, timeout=30)
 
 
 @contextmanager

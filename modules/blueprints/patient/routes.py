@@ -5,6 +5,7 @@ from pathlib import Path
 
 from flask import Blueprint, flash, redirect, render_template, request, url_for
 
+from modules.blueprints.analysis.routes import _list_sessions as _list_analysis_sessions
 from modules.services.database import connect as _connection
 
 
@@ -19,16 +20,12 @@ def _list_patients():
     with _connection() as db:
         cursor=db.cursor(); cursor.execute("SELECT PatientID AS patient_id, Name AS name, Sex AS gender, Notes AS notes FROM dbo.Patients ORDER BY Name, PatientID"); return _rows(cursor, cursor.fetchall())
 
-def _list_sessions(patient_id=None):
-    with _connection() as db:
-        cursor=db.cursor(); query="SELECT TestID AS session_id, PatientID AS patient_id, StartedAt AS started_at, Source AS source, Status AS status FROM dbo.SessionArchives"; cursor.execute(query + (" WHERE PatientID=?" if patient_id else "") + " ORDER BY StartedAt DESC", (patient_id,) if patient_id else ()); return _rows(cursor, cursor.fetchall())
-
 def _save_patient(patient_id, name, gender="未指定", notes=""):
     patient_id, name=patient_id.strip(), name.strip()
     if not patient_id or not name: raise ValueError("病人 ID 與姓名不可空白。")
     with _connection() as db:
-        cursor=db.cursor(); cursor.execute("UPDATE dbo.Patients SET Name=?, Sex=?, Notes=? WHERE PatientID=?", (name, gender, notes.strip()[:1000], patient_id))
-        if cursor.rowcount == 0: cursor.execute("INSERT INTO dbo.Patients (PatientID, Name, Sex, Notes) VALUES (?,?,?,?)", (patient_id, name, gender, notes.strip()[:1000]))
+        cursor=db.cursor(); cursor.execute("UPDATE dbo.Patients SET Name=%s, Sex=%s, Notes=%s WHERE PatientID=%s", (name, gender, notes.strip()[:1000], patient_id))
+        if cursor.rowcount == 0: cursor.execute("INSERT INTO dbo.Patients (PatientID, Name, Sex, Notes) VALUES (%s,%s,%s,%s)", (patient_id, name, gender, notes.strip()[:1000]))
         db.commit()
 
 @patient_bp.route("/patients", methods=["GET", "POST"])
@@ -56,7 +53,7 @@ def sessions():
         "sessions.html",
         patients=_list_patients(),
         selected_patient=patient_id,
-        sessions=_list_sessions(patient_id or None),
+        sessions=_list_analysis_sessions(patient_id or None),
     )
 
 

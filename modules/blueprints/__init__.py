@@ -5,6 +5,7 @@ import os
 import secrets
 from pathlib import Path
 
+from dotenv import load_dotenv
 from flask import Blueprint, Flask, abort, render_template, request
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -28,6 +29,7 @@ def dashboard():
 
 
 def create_app(test_config: dict | None = None) -> Flask:
+    load_dotenv(ROOT / ".env", override=False)
     app = Flask(
         __name__,
         template_folder=str(Path(__file__).resolve().parent / "templates"),

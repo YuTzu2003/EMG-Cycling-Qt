@@ -1,0 +1,8 @@
+{% extends 'base.html' %}
+{% block title %}原始資料 | EMG Rehab{% endblock %}
+{% block content %}
+<header class="page-heading"><h1>原始資料</h1><p>查看這次測試儲存的資料筆數與可下載的 CSV。{{ record.patient_name or record.patient_id }} · {{ record.started_at[:19]|replace('T', ' ') }}</p></header>
+<section class="surface table-responsive mb-4"><table class="table data-table database-record-table mb-0"><thead><tr><th>資料來源</th><th>EMG 記錄</th><th>踏板記錄</th><th>訓練器記錄</th></tr></thead><tbody><tr><td>Qt 收集後儲存於資料庫</td><td>{{ emg_rows }} 筆</td><td>{{ pedal_rows }} 筆</td><td>{{ trainer_rows }} 筆</td></tr></tbody></table></section>
+{% if files %}<section class="surface file-list">{% for file in files %}<div><span><strong>{{ file.filename }}</strong><small>{{ file.kind|upper }} · {{ (file.size / 1024)|round(1) }} KB</small></span><a href="{{ url_for('analysis.download_file', session_id=record.session_id, kind=file.kind) }}">下載</a></div>{% endfor %}</section>{% else %}<section class="surface form-panel"><h2>已由資料庫載入</h2><p class="text-secondary mb-0">此筆測試沒有另外保存 CSV 檔案，網站已使用資料庫中的 EMG、踏板與訓練器資料進行分析。</p></section>{% endif %}
+<div class="mt-4"><a class="btn btn-outline-dark btn-sm" href="{{ url_for('analysis.session_detail', session_id=record.session_id) }}">返回測試分析</a></div>
+{% endblock %}

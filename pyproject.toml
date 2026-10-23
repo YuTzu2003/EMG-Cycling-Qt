@@ -1,4 +1,4 @@
-[project]
+﻿[project]
 name = "emg-rehab-core"
 version = "0.1.0"
 description = "EMG rehabilitation analysis, patient archive, and Flask portal"
@@ -9,8 +9,7 @@ dependencies = [
     "pandas>=2.2",
     "scipy>=1.14",
     "matplotlib>=3.9",
-    "SQLAlchemy>=2.0,<3",
-    "pyodbc>=5.2,<6",
+    "pymssql>=2.4.5,<3",
     "Flask>=3.1,<4",
     "python-dotenv>=1.0,<2",
 ]
@@ -20,4 +19,5 @@ package = false
 required-environments = [
     "sys_platform == 'win32' and platform_machine == 'AMD64'",
 ]
+
 

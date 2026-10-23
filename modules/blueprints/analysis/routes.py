@@ -18,9 +18,8 @@ from modules.services.file_storage import temporary_files
 from modules.blueprints.analysis.emg.sensor_mapping import loadMappings, recordingChannelSides
 from modules.blueprints.analysis.emg.importers import attach_pedal_csv, import_emg_csv
 from modules.blueprints.analysis.pedal.angle_emg import AngleSettings, analyze_angle_emg
-from modules.blueprints.analysis.pedal.analysis import analyze_pedal_records
-from modules.blueprints.analysis.emg.reporting import render_report_html
-from modules.blueprints.analysis.emg.session_analysis import add_point, analyze, new_session, summary_lines
+from modules.blueprints.analysis.pedal.analysis import analyze_pedal_records, summarize_pedal_records
+from modules.blueprints.analysis.emg.session_analysis import add_point, analyze, new_session, peak_envelope, summary_lines
 from modules.blueprints.analysis.emg.session_compare import compare_sessions, comparison_charts
 from modules.blueprints.analysis.emg.visuals import angle_profile_charts
 
@@ -33,6 +32,12 @@ analysis_bp = Blueprint("analysis", __name__, template_folder="templates")
 def _rows(cursor, values):
     return [dict(zip([column[0] for column in cursor.description], row)) for row in values]
 
+
+def _db_number(value):
+    """Convert SQL Server numeric and decimal values for archived recording points."""
+    return None if value is None else float(value)
+
+
 def _list_patients():
     with _connection() as db:
         cursor = db.cursor(); cursor.execute("SELECT PatientID AS patient_id, Name AS name, Sex AS gender, Notes AS notes FROM dbo.Patients ORDER BY Name, PatientID")
@@ -40,14 +45,32 @@ def _list_patients():
 
 def _get_patient(patient_id):
     with _connection() as db:
-        cursor = db.cursor(); cursor.execute("SELECT PatientID AS patient_id, Name AS name, Sex AS gender, Notes AS notes FROM dbo.Patients WHERE PatientID=?", (patient_id,))
+        cursor = db.cursor(); cursor.execute("SELECT PatientID AS patient_id, Name AS name, Sex AS gender, Notes AS notes FROM dbo.Patients WHERE PatientID=%s", (patient_id,))
         row = cursor.fetchone(); return _rows(cursor, [row])[0] if row else None
 
 def _list_sessions(patient_id=None):
     with _connection() as db:
-        cursor = db.cursor(); query = "SELECT a.TestID AS session_id, a.PatientID AS patient_id, p.Name AS name, a.StartedAt AS started_at, a.Source AS source, a.Status AS status, (SELECT COUNT(*) FROM dbo.RawFiles f WHERE f.TestID=a.TestID) AS file_count FROM dbo.SessionArchives a JOIN dbo.Patients p ON p.PatientID=a.PatientID"
-        cursor.execute(query + (" WHERE a.PatientID=?" if patient_id else "") + " ORDER BY a.StartedAt DESC", (patient_id,) if patient_id else ())
-        return _rows(cursor, cursor.fetchall())
+        cursor = db.cursor()
+        archived = """SELECT a.TestID AS session_id, a.PatientID AS patient_id, p.Name AS name,
+            a.StartedAt AS started_at, a.Source AS source, a.Status AS status,
+            (SELECT COUNT(*) FROM dbo.RawFiles f WHERE f.TestID=a.TestID) AS file_count,
+            0 AS emg_count, 0 AS pedal_count, 0 AS trainer_count
+            FROM dbo.SessionArchives a JOIN dbo.Patients p ON p.PatientID=a.PatientID"""
+        cursor.execute(archived + (" WHERE a.PatientID=%s" if patient_id else ""),
+                       (patient_id,) if patient_id else ())
+        records = _rows(cursor, cursor.fetchall())
+        legacy = """SELECT s.TestID AS session_id, s.PatientID AS patient_id,
+            COALESCE(s.Name, p.Name) AS name, CONVERT(nvarchar(64), s.CreatedAt, 126) AS started_at,
+            N'qt' AS source, COALESCE(s.Status, N'completed') AS status, 0 AS file_count,
+            (SELECT COUNT(*) FROM dbo.EMGData e WHERE e.TestID=s.TestID) AS emg_count,
+            (SELECT COUNT(*) FROM dbo.PedalData pd WHERE pd.TestID=s.TestID) AS pedal_count,
+            (SELECT COUNT(*) FROM dbo.TrainerData td WHERE td.TestID=s.TestID) AS trainer_count
+            FROM dbo.Sessions s LEFT JOIN dbo.Patients p ON p.PatientID=s.PatientID
+            WHERE NOT EXISTS (SELECT 1 FROM dbo.SessionArchives a WHERE a.TestID=s.TestID)"""
+        cursor.execute(legacy + (" AND s.PatientID=%s" if patient_id else ""),
+                       (patient_id,) if patient_id else ())
+        records.extend(_rows(cursor, cursor.fetchall()))
+        return sorted(records, key=lambda item: item["started_at"] or "", reverse=True)
 
 def _save_recording(session, files, *, source="upload"):
     import json
@@ -56,30 +79,73 @@ def _save_recording(session, files, *, source="upload"):
     identifier = f"TEST-{uuid4()}"
     if not patient_id: raise ValueError("測試紀錄缺少病人 ID。")
     with _connection() as db:
-        cursor = db.cursor(); cursor.execute("SELECT 1 FROM dbo.Patients WHERE PatientID=?", (patient_id,))
+        cursor = db.cursor(); cursor.execute("SELECT 1 FROM dbo.Patients WHERE PatientID=%s", (patient_id,))
         if not cursor.fetchone(): raise ValueError("找不到病人資料。")
-        cursor.execute("INSERT INTO dbo.SessionArchives (TestID, PatientID, StartedAt, Source, Status, SessionJSON) VALUES (?,?,?,?,?,?)", (identifier, patient_id, str(session.get("started_at") or datetime.now(timezone.utc).isoformat()), source, "完成", json.dumps(session, ensure_ascii=False, allow_nan=False)))
+        cursor.execute("INSERT INTO dbo.SessionArchives (TestID, PatientID, StartedAt, Source, Status, SessionJSON) VALUES (%s,%s,%s,%s,%s,%s)", (identifier, patient_id, str(session.get("started_at") or datetime.now(timezone.utc).isoformat()), source, "完成", json.dumps(session, ensure_ascii=False, allow_nan=False)))
         for kind, value in files.items():
             filename, content = value
-            cursor.execute("INSERT INTO dbo.RawFiles (TestID, Kind, FileName, Content) VALUES (?,?,?,?)", (identifier, kind, filename, bytearray(content)))
+            cursor.execute("INSERT INTO dbo.RawFiles (TestID, Kind, FileName, Content) VALUES (%s,%s,%s,%s)", (identifier, kind, filename, bytearray(content)))
         db.commit()
     return identifier
 
 def _get_session(session_id):
     with _connection() as db:
         import json
-        cursor = db.cursor(); cursor.execute("SELECT TestID AS session_id, PatientID AS patient_id, StartedAt AS started_at, Source AS source, Status AS status, SessionJSON AS session_json FROM dbo.SessionArchives WHERE TestID=?", (session_id,))
+        cursor = db.cursor(); cursor.execute("""SELECT a.TestID AS session_id, a.PatientID AS patient_id,
+            p.Name AS patient_name, a.StartedAt AS started_at, a.Source AS source, a.Status AS status,
+            a.SessionJSON AS session_json FROM dbo.SessionArchives a
+            LEFT JOIN dbo.Patients p ON p.PatientID=a.PatientID WHERE a.TestID=%s""", (session_id,))
         row = cursor.fetchone()
-        if not row: return None
-        record = _rows(cursor, [row])[0]; return record, json.loads(record.pop("session_json"))
+        if row:
+            record = _rows(cursor, [row])[0]
+            return record, json.loads(record.pop("session_json"))
+        cursor.execute("SELECT TestID, PatientID, Name, Sex, CreatedAt, Status FROM dbo.Sessions WHERE TestID=%s", (session_id,))
+        legacy = cursor.fetchone()
+        if not legacy:
+            return None
+        test_id, patient_id, name, gender, started_at, status = legacy
+        document = new_session({"patientId": patient_id, "name": name, "gender": gender}, {})
+        document["started_at"] = started_at.isoformat() if started_at else ""
+        cursor.execute("SELECT MuscleName, TimeOffsetSec, AvgRMSmV, MaxRMSmV, BaseRMSmV, QualityStatus FROM dbo.EMGData WHERE TestID=%s ORDER BY MuscleName, TimeOffsetSec", (session_id,))
+        emg_rows = cursor.fetchall()
+        slots = {str(label): index + 1 for index, label in enumerate(sorted({str(row[0]) for row in emg_rows}))}
+        document["channels"] = {str(slot): {"label": label, "mapping_name": label} for label, slot in slots.items()}
+        for muscle, time_s, rms, peak_rms, base_rms, quality in emg_rows:
+            add_point(document, "emg", {"time_s": float(time_s or 0), "slot": slots[str(muscle)],
+                "rms_mv": _db_number(rms), "rms_peak_mv": _db_number(peak_rms),
+                "base_rms_mv": _db_number(base_rms), "quality": str(quality or "UNKNOWN")})
+        # The Qt collector stores the pedal and trainer streams in their own
+        # tables.  Recreate the same in-memory recording that CSV imports use,
+        # so every existing Qt test can be analysed by the website.
+        cursor.execute("""SELECT TimeOffsetSec, TotalPowerW, LeftPowerW, RightPowerW,
+            LeftBalancePct, RightBalancePct, CadenceRPM, QualityStatus
+            FROM dbo.PedalData WHERE TestID=%s ORDER BY TimeOffsetSec""", (session_id,))
+        for time_s, total, left, right, left_balance, right_balance, cadence, quality in cursor.fetchall():
+            elapsed = float(time_s or 0)
+            add_point(document, "pedal", {"time_s": elapsed, "timestamp": elapsed,
+                "power_w": _db_number(total), "left_power_w": _db_number(left),
+                "right_power_w": _db_number(right),
+                "left_balance_percent": _db_number(left_balance),
+                "right_balance_percent": _db_number(right_balance),
+                "cadence_rpm": _db_number(cadence), "quality": str(quality or "UNKNOWN")})
+        cursor.execute("""SELECT TimeOffsetSec, DistanceKm, SpeedKmh, PowerW, CadenceRPM, QualityStatus
+            FROM dbo.TrainerData WHERE TestID=%s ORDER BY TimeOffsetSec""", (session_id,))
+        for time_s, distance, speed, power, cadence, quality in cursor.fetchall():
+            add_point(document, "trainer", {"time_s": float(time_s or 0),
+                "session_distance_meters": None if distance is None else _db_number(distance) * 1000,
+                "speed_kph": _db_number(speed), "power_watts": _db_number(power),
+                "cadence_rpm": _db_number(cadence),
+                "quality": str(quality or "UNKNOWN")})
+        return ({"session_id": test_id, "patient_id": patient_id, "patient_name": name, "started_at": document["started_at"],
+                 "source": "qt", "status": status or "completed"}, document)
 
 def _list_files(session_id):
     with _connection() as db:
-        cursor = db.cursor(); cursor.execute("SELECT Kind AS kind, FileName AS filename, DATALENGTH(Content) AS size FROM dbo.RawFiles WHERE TestID=? ORDER BY Kind", (session_id,)); return _rows(cursor, cursor.fetchall())
+        cursor = db.cursor(); cursor.execute("SELECT Kind AS kind, FileName AS filename, DATALENGTH(Content) AS size FROM dbo.RawFiles WHERE TestID=%s ORDER BY Kind", (session_id,)); return _rows(cursor, cursor.fetchall())
 
 def _get_file(session_id, kind):
     with _connection() as db:
-        cursor = db.cursor(); cursor.execute("SELECT FileName, Content FROM dbo.RawFiles WHERE TestID=? AND Kind=?", (session_id, kind)); row=cursor.fetchone(); return (str(row[0]), bytes(row[1])) if row else None
+        cursor = db.cursor(); cursor.execute("SELECT FileName, Content FROM dbo.RawFiles WHERE TestID=%s AND Kind=%s", (session_id, kind)); row=cursor.fetchone(); return (str(row[0]), bytes(row[1])) if row else None
 
 
 def _emg_chart_series(document: dict) -> list[dict]:
@@ -96,6 +162,52 @@ def _emg_chart_series(document: dict) -> list[dict]:
         grouped.setdefault(str(name), []).append([time_s, rms])
     return [{"name": name, "data": values[::max(1, len(values) // 1200)]}
             for name, values in sorted(grouped.items())]
+
+
+def _emg_ride_charts(document: dict, result: dict) -> tuple[list[dict], list[dict]]:
+    """Match the Qt ride view: RMS mean/peak bars and one-second peak envelopes."""
+    channels = document.get("channels", {})
+    bars: list[dict] = []
+    envelopes: list[dict] = []
+    for slot in sorted(result.get("emg", {}), key=lambda value: int(value) if str(value).isdigit() else str(value)):
+        stats = result["emg"][slot].get("rms_mv", {})
+        label = channels.get(str(slot), {}).get("label") or channels.get(str(slot), {}).get("mapping_name") or f"S{slot}"
+        display = f"S{int(slot):02d} {label}" if str(slot).isdigit() else str(label)
+        rows = [row for row in document.get("emg", []) if str(row.get("slot")) == str(slot)]
+        recorded_peaks = [_db_number(row.get("rms_peak_mv")) for row in rows if row.get("rms_peak_mv") is not None]
+        bars.append({"label": display, "mean": stats.get("mean"),
+                     "peak": max(recorded_peaks) if recorded_peaks else stats.get("max")})
+        points = peak_envelope([{**row, "rms_mv": row.get("rms_peak_mv") or row.get("rms_mv")} for row in rows])
+        stride = max(1, len(points) // 2000)
+        envelopes.append({"slot": str(slot), "label": display,
+                          "data": [[time_s, value] for time_s, value in points[::stride]]})
+    return bars, envelopes
+
+
+def _telemetry_chart_series(document: dict, stream: str, field: str, name: str) -> list[dict]:
+    """Return a down-sampled ECharts time series from a recorded stream."""
+    values: list[list[float]] = []
+    for point in document.get(stream, []):
+        try:
+            values.append([float(point["time_s"]), float(point[field])])
+        except (KeyError, TypeError, ValueError):
+            continue
+    stride = max(1, len(values) // 1200)
+    return [{"name": name, "data": values[::stride]}] if values else []
+
+
+def _pedal_chart_series(performance: dict | None) -> tuple[list[dict], list[dict], list[dict]]:
+    """Format the same pedal time series used by the Qt summary workspace."""
+    rows = (performance or {}).get("series", [])
+    def series(field: str, name: str) -> list[dict]:
+        points = [[row["elapsed_s"], row[field]] for row in rows if row.get(field) is not None]
+        return [{"name": name, "data": points}] if points else []
+    balance_left = [[row["elapsed_s"], row["left_balance_percent"]]
+                    for row in rows if row.get("left_balance_percent") is not None]
+    balance = ([{"name": "左側", "data": balance_left},
+                {"name": "右側", "data": [[time_s, 100 - value] for time_s, value in balance_left]}]
+               if balance_left else [])
+    return series("power_w", "功率"), series("cadence_rpm", "踏頻"), balance
 
 
 
@@ -219,42 +331,99 @@ def session_detail(session_id: str):
     if found is None:
         abort(404)
     record, document = found
+    selected_view = request.args.get("view", "pedal")
+    if selected_view not in {"pedal", "emg", "angle", "files"}:
+        abort(404)
+    angle_sections = (
+        ("overview", "分析重點"), ("fatigue", "疲勞摘要"),
+        ("fatigue_trend", "逐圈疲勞趨勢"), ("muscle", "肌肉曲線"),
+        ("phase", "指定角度"), ("heatmap", "全肌肉熱圖"),
+        ("profiles", "肌肉角度曲線"), ("polar", "圓形角度圖"),
+        ("cycle8", "逐圈 8 角度"), ("comparison", "前後段數值"),
+        ("values", "前後段表格"), ("interpretation", "數值與判讀"),
+    )
+    angle_section = request.args.get("angle_section", "overview")
+    if angle_section not in {key for key, _ in angle_sections}:
+        abort(404)
     result = analyze(document)
     pedal_performance = None
+    pedal_summary = None
     performance_lines: list[str] = []
     if document.get("pedal"):
         try:
             # FTP is only needed for training-zone calculations. It remains
             # explicit until a per-patient FTP field is available.
             pedal_performance = analyze_pedal_records(document["pedal"], ftp_w=200)
+            pedal_summary = summarize_pedal_records(document["pedal"])
             performance_lines = _pedal_performance_lines(pedal_performance)
         except (ValueError, KeyError, TypeError):
             # Old captures may not retain every timestamp field required by this optional analysis.
             performance_lines = ["此筆踏板原始資料缺少進階效能分析所需欄位。"]
-    try:
-        report = render_report_html(document)
-        report_body = report.split("<body>", 1)[1].rsplit("</body>", 1)[0]
-    except ValueError as exc:
-        flash(f"完整報告無法產生：{exc}", "warning")
-        report_body = ""
     files = _list_files(session_id)
     source_kinds = {item["kind"] for item in files}
+    emg_bars, emg_envelopes = _emg_ride_charts(document, result)
+    emg_peak_by_slot = {row["label"].split(" ", 1)[0]: row["peak"] for row in emg_bars}
+    pedal_power_series, pedal_cadence_series, pedal_balance_series = _pedal_chart_series(pedal_performance)
+    angle_result = None
+    angle_tables = None
+    angle_error = None
+    if {"emg", "pedal"} <= source_kinds or {"emg", "angle"} <= source_kinds:
+        try:
+            with temporary_files() as temp_path:
+                emg_path = temp_path("emg.csv")
+                pedal_path = temp_path("pedal.csv")
+                emg_path.write_bytes(_get_file(session_id, "emg")[1])
+                pedal_path.write_bytes(_get_file(session_id, "angle" if "angle" in source_kinds else "pedal")[1])
+                with emg_path.open(encoding="utf-8-sig", newline="") as stream:
+                    headers = next(csv.reader(stream), [])
+                sides, _ = recordingChannelSides(
+                    emg_path, headers, loadMappings(ROOT / "sensor_mapping.json"),
+                    document.get("channels", {}),
+                )
+                angle_result = analyze_angle_emg(emg_path, pedal_path, sides, AngleSettings())
+            angle_tables = {
+                key: Markup(angle_result[key].to_html(index=False, classes="table table-sm data-table", border=0))
+                for key in ("summary", "profiles", "cycles")
+            }
+            angle_result["profile_charts"] = angle_profile_charts(angle_result)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            angle_error = str(exc)
+    emg_channel_names = {
+        str(slot): str(channel.get("label") or channel.get("mapping_name") or f"S{slot}")
+        for slot, channel in document.get("channels", {}).items()
+    }
     return render_template("session_detail.html", record=record, files=files, analysis=result,
-                           lines=summary_lines(result), report_body=Markup(report_body),
+                           selected_view=selected_view, angle_sections=angle_sections, angle_section=angle_section,
+                           lines=summary_lines(result),
                            analysis_sections=_analysis_sections(document, result, pedal_performance, source_kinds),
                            pedal_performance=pedal_performance, performance_lines=performance_lines,
-                           emg_chart_series=_emg_chart_series(document))
+                           emg_chart_series=_emg_chart_series(document),
+                           pedal_summary=pedal_summary,
+                           pedal_power_series=pedal_power_series,
+                           pedal_cadence_series=pedal_cadence_series,
+                           pedal_balance_series=pedal_balance_series,
+                           trainer_power_series=_telemetry_chart_series(document, "trainer", "power_watts", "訓練器功率"),
+                           emg_bars=emg_bars, emg_envelopes=emg_envelopes,
+                           emg_peak_by_slot=emg_peak_by_slot,
+                           emg_sample_count=len(document.get("emg", [])),
+                           pedal_sample_count=len(document.get("pedal", [])),
+                           trainer_sample_count=len(document.get("trainer", [])),
+                           emg_channel_names=emg_channel_names, angle_result=angle_result,
+                           angle_tables=angle_tables, angle_error=angle_error)
 
 
-@analysis_bp.get("/sessions/<session_id>/report")
-def report(session_id: str):
+@analysis_bp.get("/sessions/<session_id>/source-data")
+def source_data(session_id: str):
     found = _get_session(session_id)
     if found is None:
         abort(404)
-    try:
-        return render_report_html(found[1]), 200, {"Content-Type": "text/html; charset=utf-8"}
-    except ValueError as exc:
-        return render_template("error.html", message=str(exc)), 422
+    record, document = found
+    result = analyze(document)
+    return render_template("source_data.html", record=record, analysis=result,
+                           files=_list_files(session_id),
+                           emg_rows=len(document.get("emg", [])),
+                           pedal_rows=len(document.get("pedal", [])),
+                           trainer_rows=len(document.get("trainer", [])))
 
 
 @analysis_bp.get("/sessions/<session_id>/files/<kind>")
@@ -308,28 +477,63 @@ def angle(session_id: str):
     available = _list_files(session_id)
     kinds = {file["kind"] for file in available}
     result = tables = None
-    if request.method == "POST":
-        if not ({"emg", "pedal"} <= kinds or {"emg", "angle"} <= kinds):
-            flash("角度分析需要 EMG 與踏板或角度 CSV。", "danger")
-        else:
-            try:
-                settings = AngleSettings(start=(float(request.form["start_a"]), float(request.form["start_b"])),
-                                         end=(float(request.form["end_a"]), float(request.form["end_b"])))
-                with temporary_files() as temp_path:
-                    emg, pedal = temp_path("emg.csv"), temp_path("pedal.csv")
-                    emg.write_bytes(_get_file(session_id, "emg")[1])
-                    pedal.write_bytes(_get_file(session_id, "angle" if "angle" in kinds else "pedal")[1])
-                    with emg.open(encoding="utf-8-sig", newline="") as stream:
-                        headers = next(csv.reader(stream), [])
-                    sides, _ = recordingChannelSides(emg, headers, loadMappings(ROOT / "sensor_mapping.json"), record[1].get("channels", {}))
-                    result = analyze_angle_emg(emg, pedal, sides, settings)
-                tables = {key: Markup(result[key].to_html(index=False, classes="table table-sm data-table", border=0,
-                                                          na_rep="—", escape=True)) for key in ("summary", "profiles", "cycles")}
-                result["settings_sync_json"] = json.dumps({"settings": result["settings"], "sync": result["sync"]}, ensure_ascii=False, indent=2, default=str)
-                result["profile_charts"] = angle_profile_charts(result)
-            except (ValueError, OSError, KeyError, TypeError) as exc:
-                flash(f"角度分析失敗：{exc}", "danger")
-    return render_template("angle.html", record=record[0], available=kinds, result=result, tables=tables)
+    source_ready = {"emg", "pedal"} <= kinds or {"emg", "angle"} <= kinds
+    values = {
+        "automatic_range": request.form.get("automatic_range") == "on" if request.method == "POST" else True,
+        "start_a": request.form.get("start_a", "5"), "start_b": request.form.get("start_b", "65"),
+        "end_a": request.form.get("end_a", "240"), "end_b": request.form.get("end_b", "300"),
+        "auto_scale": request.form.get("auto_scale") == "on" if request.method == "POST" else True,
+        "scale": request.form.get("scale", "1.0"),
+        "auto_offset": request.form.get("auto_offset") == "on" if request.method == "POST" else False,
+        "offset_s": request.form.get("offset_s", "0.0"),
+        "bins": request.form.get("bins", "24"), "percentile": request.form.get("percentile", "99"),
+    }
+    error = None
+    database_result = None
+    if source_ready:
+        try:
+            with temporary_files() as temp_path:
+                emg, pedal = temp_path("emg.csv"), temp_path("pedal.csv")
+                emg.write_bytes(_get_file(session_id, "emg")[1])
+                pedal.write_bytes(_get_file(session_id, "angle" if "angle" in kinds else "pedal")[1])
+                with emg.open(encoding="utf-8-sig", newline="") as stream:
+                    headers = next(csv.reader(stream), [])
+                    stream.seek(0)
+                    reader = csv.DictReader(stream)
+                    emg_duration = max((float(row.get("time_seconds", 0) or 0) for row in reader), default=0.0)
+                with pedal.open(encoding="utf-8-sig", newline="") as stream:
+                    reader = csv.DictReader(stream)
+                    time_column = "t_session_s" if "t_session_s" in (reader.fieldnames or ()) else "session_seconds"
+                    pedal_duration = max((float(row.get(time_column, 0) or 0) for row in reader), default=0.0)
+                duration = min(emg_duration, pedal_duration)
+                if duration < 35:
+                    raise ValueError("EMG 與踏板共同資料不足 35 秒，無法建立前後段角度分析。")
+                if values["automatic_range"]:
+                    window = min(60.0, max(10.0, (duration - 5.0) / 3.0))
+                    start, end = (5.0, round(5.0 + window, 2)), (round(duration - window, 2), round(duration, 2))
+                else:
+                    start = (float(values["start_a"]), float(values["start_b"]))
+                    end = (float(values["end_a"]), float(values["end_b"]))
+                settings = AngleSettings(start=start, end=end, bins=int(values["bins"]),
+                                         percentile=float(values["percentile"]),
+                                         scale=None if values["auto_scale"] else float(values["scale"]),
+                                         offset_s=None if values["auto_offset"] else float(values["offset_s"]))
+                settings.validate()
+                values.update({"start_a": start[0], "start_b": start[1], "end_a": end[0], "end_b": end[1]})
+                sides, _ = recordingChannelSides(emg, headers, loadMappings(ROOT / "sensor_mapping.json"), record[1].get("channels", {}))
+                result = analyze_angle_emg(emg, pedal, sides, settings)
+            tables = {key: Markup(result[key].to_html(index=False, classes="table table-sm data-table", border=0,
+                                                      na_rep="—", escape=True)) for key in ("summary", "profiles", "cycles")}
+            result["settings_sync_json"] = json.dumps({"settings": result["settings"], "sync": result["sync"]}, ensure_ascii=False, indent=2, default=str)
+            result["profile_charts"] = angle_profile_charts(result)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            error = str(exc)
+    else:
+        error = "這筆測試缺少原始 EMG 與踏板角度或曲柄事件 CSV，無法執行 Qt 原本的逐圈踩踏角度分析。"
+    return render_template("angle.html", record=record[0], available=kinds, result=result, tables=tables,
+                           settings_values=values, source_ready=source_ready, analysis_error=error,
+                           database_result=database_result,
+                           can_analyze=source_ready or database_result is not None)
 
 
 

@@ -1,4 +1,4 @@
-# EMG Rehabilitation Desktop
+# EMG Rehabilitation Qt Desktop
 
 本資料夾是可獨立安裝與啟動的 EMG 復健 Qt 專案，負責 EMG 裝置、踏板、阻力計及攝影機的裝置設定與原始資料收集。病人建檔、完整分析和歷次比較位於上層 Flask 網站。兩端透過上層的 `emg_rehab` 共用分析格式與 SQL Server 封存程式，避免複製兩份資料邏輯。
 

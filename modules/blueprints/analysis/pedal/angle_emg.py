@@ -182,7 +182,7 @@ def _circular_mean(degrees):
 def _side_name(name: str, side: str | None) -> str:
     if side not in {"L", "R"}:
         return name
-    if re.match(r"^(?:[LR]_)?S\d+(?:_[LR])?_", name, flags=re.IGNORECASE):
+    if re.match(r"^(%s:[LR]_)%sS\d+(%s:_[LR])%s_", name, flags=re.IGNORECASE):
         return name
     return re.sub(r"_[RL]$", "", name, flags=re.IGNORECASE) + f"_{side}"
 
@@ -341,7 +341,7 @@ def analyze_angle_emg(emg_path: Path, pedal_path: Path, sides: dict[str, str],
             segment = filtered[first:last + 1, index]
             frequency, power = welch(segment, fs, nperseg=min(1024, len(segment)))
             mdf = float(frequency[np.searchsorted(np.cumsum(power), power.sum() / 2)])
-            match = re.match(r"(?:[LR]_)?S(\d+)(?:_[LR])?", name, flags=re.IGNORECASE)
+            match = re.match(r"(%s:[LR]_)%sS(\d+)(%s:_[LR])%s", name, flags=re.IGNORECASE)
             short = f"S{int(match.group(1)):02d}" if match else name
             rows.append({"channel": name, "channel_label": _side_name(name, side),
                          "slot": short, "muscle": muscle, "location_zh": location_zh,
