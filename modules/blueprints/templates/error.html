@@ -1,1 +1,4 @@
-{% extends 'base.html' %}{% block title %}錯誤{% endblock %}{% block content %}<div class="page-heading"><h1>無法完成操作</h1><p>{{ message }}</p><a href="{{ url_for('general.dashboard') }}" class="btn btn-dark">返回總覽</a></div>{% endblock %}
+{% extends 'base.html' %}{% block title %}錯誤{% endblock %}{% block content %}<div class="page-heading">
+    <h1>無法完成操作</h1>
+    <p>{{ message }}</p><a href="{{ url_for('general.dashboard') }}" class="btn btn-dark">返回總覽</a>
+</div>{% endblock %}

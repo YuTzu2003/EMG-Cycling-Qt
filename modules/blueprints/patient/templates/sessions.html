@@ -1,36 +1,93 @@
 ﻿{% extends 'base.html' %}
-{% block title %}資料庫測試分析{% endblock %}
+{% block title %}後續分析{% endblock %}
 {% block content %}
-<header class="page-heading">
-  <div class="eyebrow">DATABASE ANALYSIS</div>
-  <h1>從資料庫查看測試</h1>
-  <p>瀏覽資料庫中的所有測試，也可以先選擇受測者縮小範圍，再查看分析或比較兩次結果。</p>
+<header class="page-heading session-page-heading">
+  <div>
+    <h1>後續分析</h1>
+  </div>
+  <button class="btn btn-outline-secondary workflow-help-button" type="button" aria-label="後續分析使用說明"
+    data-bs-toggle="popover" data-bs-trigger="focus" data-bs-placement="bottom"
+    data-bs-custom-class="workflow-help-popover" data-bs-title="如何使用後續分析"
+    data-bs-content="1. 篩選受測者：預設顯示全部測試，也可依姓名、編號與來源篩選。&#10;2. 選擇測試：點選查看分析，檢視肌電、踏板、阻力計與角度資料。&#10;3. 比較測試：選擇同一位受測者的兩筆測試，進行 RMS 比較。"><span
+      class="workflow-help-mark" aria-hidden="true">?</span><span>使用說明</span></button>
 </header>
 
-<div class="row g-3 mb-4 workflow-steps">
-  <div class="col-md-4"><div class="surface form-panel"><span class="analysis-key">01</span><h2>篩選受測者</h2><p class="mb-0">預設顯示全部測試，也可依受測者篩選。</p></div></div>
-  <div class="col-md-4"><div class="surface form-panel"><span class="analysis-key">02</span><h2>選擇測試</h2><p class="mb-0">查看肌電、踏板、阻力計與角度分析。</p></div></div>
-  <div class="col-md-4"><div class="surface form-panel"><span class="analysis-key">03</span><h2>比較測試</h2><p class="mb-0">選擇同一受測者的兩筆測試進行 RMS 比較。</p></div></div>
-</div>
+<div class="session-workspace">
+  <aside class="surface session-sidebar" aria-labelledby="session-filter-title">
+    <div class="session-sidebar-heading">
+      <h2 id="session-filter-title">篩選紀錄</h2>
+      <p>依受測者與資料來源，快速找到測試。</p>
+    </div>
+    <form method="get" class="session-filter-form" id="patient-filter" role="search">
+      <div class="session-filter-field"><label class="form-label" for="session-search">搜尋測試</label><input
+          class="form-control" type="search" id="session-search" name="q" value="{{ search_query }}" maxlength="100"
+          placeholder="姓名、編號或測試時間"></div>
+      <div class="session-filter-field"><label class="form-label" for="patient_id">受測者</label><select name="patient_id"
+          id="patient_id" class="form-select">
+          <option value="">所有受測者</option>
+          {% for person in patients %}<option value="{{ person.patient_id }}" {% if selected_patient==person.patient_id
+            %}selected{% endif %}>{{ person.name }} · {{ person.patient_id }}</option>{% endfor %}
+        </select></div>
+      <div class="session-filter-field"><label class="form-label" for="session-source">資料來源</label><select
+          class="form-select" id="session-source" name="source">
+          <option value="">全部來源</option>
+          <option value="qt" {% if source_filter=='qt' %}selected{% endif %}>Qt 收集</option>
+          <option value="csv" {% if source_filter=='csv' %}selected{% endif %}>CSV 匯入</option>
+        </select></div>
+      <div class="session-filter-actions"><button class="btn btn-dark" type="submit">套用篩選</button><a
+          class="btn btn-outline-dark" href="{{ url_for('patients.sessions') }}">清除條件</a></div>
+    </form>
+  </aside>
 
-<form method="get" class="surface form-panel mb-4 session-filter-form" id="patient-filter" role="search">
-  <div class="row g-3 align-items-end">
-    <div class="col-md-5"><label class="form-label" for="session-search">搜尋測試</label><input class="form-control" type="search" id="session-search" name="q" value="{{ search_query }}" maxlength="100" placeholder="受測者姓名、編號或測試時間"></div>
-    <div class="col-md-4"><label class="form-label" for="patient_id">受測者</label><select name="patient_id" id="patient_id" class="form-select">
-      <option value="">所有受測者</option>
-      {% for person in patients %}<option value="{{ person.patient_id }}" {% if selected_patient == person.patient_id %}selected{% endif %}>{{ person.name }} · {{ person.patient_id }}</option>{% endfor %}
-    </select></div>
-    <div class="col-md-3"><label class="form-label" for="session-source">資料來源</label><select class="form-select" id="session-source" name="source"><option value="">全部來源</option><option value="qt" {% if source_filter == 'qt' %}selected{% endif %}>Qt 收集</option><option value="csv" {% if source_filter == 'csv' %}selected{% endif %}>CSV 匯入</option></select></div>
-    <div class="col-12 d-flex flex-wrap gap-2"><button class="btn btn-dark" type="submit">搜尋與篩選</button><a class="btn btn-outline-dark" href="{{ url_for('patients.sessions') }}">清除條件</a></div>
-  </div>
-</form>
-
-<section class="section-head"><div><div class="eyebrow">STEP 02</div><h2>{{ '選擇一筆測試' if selected_patient else '全部測試' }}</h2><p class="section-note">{{ '找到' if search_query or source_filter or selected_patient else '共' }} {{ sessions|length }} 筆資料庫測試紀錄。</p></div>{% if selected_patient and patient_record_count >= 2 %}<a class="btn btn-dark" href="{{ url_for('analysis.compare', patient_id=selected_patient) }}">比較此受測者的測試</a>{% endif %}</section>
-<div class="row g-3">
-{% for row in sessions %}
-  <div class="col-12"><article class="surface form-panel test-choice"><div><span class="status-pill">{{ row.status }}</span><h2 class="mt-3">{{ row.name or row.patient_id }} · {{ row.started_at[:19]|replace('T', ' ') }}</h2><p class="text-secondary mb-1">病歷編號：{{ row.patient_id }}　來源：{{ 'Qt 收集' if row.source == 'qt' else 'CSV 匯入' }}</p><p class="text-secondary mb-0">EMG：{{ row.emg_count }} 筆　踏板：{{ row.pedal_count }} 筆　訓練器：{{ row.trainer_count }} 筆</p>{% if row.emg_count == 0 %}<p class="small text-warning-emphasis mb-0 mt-2">此筆沒有 EMG 資料，無法顯示肌電分析。</p>{% endif %}</div><div class="d-flex flex-wrap gap-2 mt-4"><a class="btn btn-dark" href="{{ url_for('analysis.session_detail', session_id=row.session_id) }}">查看分析</a>{% if selected_patient %}<a class="btn btn-outline-dark" href="{{ url_for('analysis.compare', patient_id=selected_patient) }}">加入比較</a>{% endif %}</div></article></div>
-{% else %}
-  <div class="col-12"><div class="surface empty">{{ '沒有符合搜尋或篩選條件的測試紀錄。' if selected_patient or search_query or source_filter else '目前沒有資料庫測試紀錄。' }}</div></div>
-{% endfor %}
+  <section class="surface session-results-panel" aria-labelledby="session-results-title">
+    <header class="session-results-heading">
+      <div>
+        <h2 id="session-results-title">{{ '受測者的測試' if selected_patient else '全部測試' }}</h2>
+      </div>
+      {% if selected_patient and patient_record_count >= 2 %}<a class="btn btn-outline-dark"
+        href="{{ url_for('analysis.compare', patient_id=selected_patient) }}">比較此受測者</a>{% endif %}
+    </header>
+    <div class="session-record-list">
+      {% set grouping = namespace(day='') %}
+      {% for row in sessions %}
+      {% set day = row.started_at[:10] %}
+      {% if day != grouping.day %}
+      <h3 class="session-day-heading"><time datetime="{{ day }}">{{ day|replace('-', '/') }}</time><span>測試紀錄</span>
+      </h3>
+      {% set grouping.day = day %}
+      {% endif %}
+      <article
+        class="session-record-row {{ 'session-record-row--qt' if row.source == 'qt' else 'session-record-row--csv' }}">
+        <time class="session-record-clock" datetime="{{ row.started_at[:19]|replace(' ', 'T') }}">{{
+          row.started_at[11:19] }}</time>
+        <div
+          class="session-record-main {{ 'session-record-main--with-note' if row.source == 'qt' and row.emg_count == 0 else '' }}">
+          <div class="session-record-subject"><span class="session-record-id">病歷編號 {{ row.patient_id }}</span>
+            <h4>{{ row.name or row.patient_id }}</h4>
+          </div>
+          {% if row.source == 'qt' and row.emg_count == 0 %}<small class="session-record-note">此筆沒有 EMG
+            資料，無法顯示肌電分析。</small>{% endif %}
+          <div class="session-record-duration"><span>收集時間</span><strong>{{ row.duration_label }}</strong></div>
+        </div>
+        <div class="session-record-badges"><span
+            class="source-tag {{ 'source-tag-qt' if row.source == 'qt' else 'source-tag-csv' }}">{{ 'Qt 收集' if
+            row.source == 'qt' else 'CSV 匯入' }}</span><span class="status-pill">{{ row.status }}</span></div>
+        <a class="btn btn-outline-dark session-record-open"
+          href="{{ url_for('analysis.session_detail', session_id=row.session_id) }}">查看分析 <span
+            aria-hidden="true">↗</span></a>
+      </article>
+      {% else %}
+      <div class="empty session-record-empty">{{ '沒有符合搜尋或篩選條件的測試紀錄。' if selected_patient or search_query or
+        source_filter else '目前沒有資料庫測試紀錄。' }}</div>
+      {% endfor %}
+    </div>
+  </section>
 </div>
+{% endblock %}
+{% block scripts %}
+<script>
+  document.querySelectorAll('[data-bs-toggle="popover"]').forEach((button) => {
+    new bootstrap.Popover(button, { container: 'body' });
+  });
+</script>
 {% endblock %}

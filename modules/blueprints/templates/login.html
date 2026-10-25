@@ -1,2 +1,10 @@
 {% extends 'base.html' %}{% block title %}登入{% endblock %}
-{% block content %}<div class="login-wrap"><div class="eyebrow">PRIVATE WORKSPACE</div><h1>歡迎回來。</h1><p class="lead text-secondary">登入後檢視病人、量測與完整分析。</p><form method="post" class="surface login-card"><input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="next" value="{{ next }}"><label class="form-label" for="password">網站密碼</label><input class="form-control form-control-lg" id="password" name="password" type="password" autocomplete="current-password" required><button class="btn btn-dark btn-lg w-100 mt-4">登入</button></form></div>{% endblock %}
+{% block content %}<div class="login-wrap">
+    <div class="eyebrow">PRIVATE WORKSPACE</div>
+    <h1>歡迎回來。</h1>
+    <p class="lead text-secondary">登入後檢視病人、量測與完整分析。</p>
+    <form method="post" class="surface login-card"><input type="hidden" name="csrf" value="{{ csrf_token }}"><input
+            type="hidden" name="next" value="{{ next }}"><label class="form-label" for="password">網站密碼</label><input
+            class="form-control form-control-lg" id="password" name="password" type="password"
+            autocomplete="current-password" required><button class="btn btn-dark btn-lg w-100 mt-4">登入</button></form>
+</div>{% endblock %}

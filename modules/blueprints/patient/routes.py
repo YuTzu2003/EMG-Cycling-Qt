@@ -1,6 +1,7 @@
 """Patient registration and testing-record routes."""
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 from flask import Blueprint, flash, redirect, render_template, request, url_for
@@ -15,6 +16,22 @@ patient_bp = Blueprint("patients", __name__, template_folder="templates")
 
 
 def _rows(cursor, values): return [dict(zip([column[0] for column in cursor.description], row)) for row in values]
+
+
+def _duration_label(value):
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return "未記錄"
+    if not math.isfinite(seconds) or seconds < 0:
+        return "未記錄"
+    minutes, remaining = divmod(round(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours} 小時 {minutes:02d} 分 {remaining:02d} 秒"
+    if minutes:
+        return f"{minutes} 分 {remaining:02d} 秒"
+    return f"{remaining} 秒"
 
 def _list_patients():
     with _connection() as db:
@@ -61,6 +78,8 @@ def sessions():
         needle = search_query.casefold()
         records = [row for row in records if any(needle in str(row.get(field) or "").casefold()
                                                  for field in ("name", "patient_id", "session_id", "started_at"))]
+    for row in records:
+        row["duration_label"] = _duration_label(row.get("duration_seconds"))
     return render_template(
         "sessions.html",
         patients=_list_patients(),

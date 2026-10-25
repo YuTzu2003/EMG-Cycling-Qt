@@ -1,11 +1,111 @@
 {% extends 'base.html' %}
 {% block title %}踩踏角度分析{% endblock %}
 {% block content %}
-<header class="page-heading angle-heading"><h1>踩踏角度分析</h1><p>檢視踩踏週期與肌肉訊號的對應結果，並調整前後段分析範圍。{{ record.patient_id }} · {{ record.started_at[:19]|replace('T',' ') }}</p></header>
-{% if database_result %}<div class="alert alert-info">此測試未保存原始角度 CSV，目前以資料庫踏頻重建相對踩踏相位，產生前後段 EMG RMS 角度估算圖。</div>{% elif not source_ready %}<div class="alert alert-warning">此測試未保存 EMG 與踏板角度原始 CSV，且資料庫資料不足以重建相對踩踏相位。</div>{% endif %}
+<div class="analysis-page-actions"><a class="btn btn-outline-secondary" data-history-back
+        href="{{ url_for('analysis.session_detail', session_id=record.session_id, view='angle') }}">← 返回上一頁</a><a
+        class="btn btn-export" data-angle-pdf
+        href="{{ url_for('analysis.download_pdf_report', session_id=record.session_id) }}">匯出 PDF</a></div>
+<header class="page-heading angle-heading">
+    <h1>踩踏角度分析</h1>
+    <p>檢視踩踏週期與肌肉訊號的對應結果，並調整前後段分析範圍。{{ record.patient_id }} · {{ record.started_at[:19]|replace('T',' ') }}</p>
+</header>
+{% if database_result %}
+<div class="alert alert-info">此測試未保存原始角度 CSV，目前以資料庫踏頻重建相對踩踏相位，產生前後段 EMG RMS 角度估算圖。</div>
+{% elif not source_ready %}
+<div class="alert alert-warning">此測試未保存 EMG 與踏板角度原始 CSV，且資料庫資料不足以重建相對踩踏相位。</div>
+{% endif %}
 {% if analysis_error %}<div class="alert alert-warning">無法自動完成角度分析：{{ analysis_error }}</div>{% endif %}
-<form method="post" class="surface form-panel mb-4 angle-settings-form"><input type="hidden" name="csrf" value="{{ csrf_token }}"><div class="d-flex justify-content-between align-items-start gap-3 flex-wrap"><div><h2>分析範圍</h2><p class="text-secondary mb-0">預設會依共同資料長度，自動選取前段與後段各一個比較區間，開啟頁面後立即產生圖表。</p></div><button class="btn btn-dark" {% if not can_analyze %}disabled{% endif %}>重新分析</button></div><div class="form-check form-switch mt-4"><input class="form-check-input" type="checkbox" role="switch" id="automatic-range" name="automatic_range" {% if settings_values.automatic_range %}checked{% endif %}><label class="form-check-label" for="automatic-range">自動選取前後段比較時間</label></div><div class="row g-3 mt-1 manual-range"><div class="col-6 col-md-3"><label class="form-label">前段開始 / 秒</label><input class="form-control" type="number" name="start_a" value="{{ settings_values.start_a }}" step="0.1" required></div><div class="col-6 col-md-3"><label class="form-label">前段結束 / 秒</label><input class="form-control" type="number" name="start_b" value="{{ settings_values.start_b }}" step="0.1" required></div><div class="col-6 col-md-3"><label class="form-label">後段開始 / 秒</label><input class="form-control" type="number" name="end_a" value="{{ settings_values.end_a }}" step="0.1" required></div><div class="col-6 col-md-3"><label class="form-label">後段結束 / 秒</label><input class="form-control" type="number" name="end_b" value="{{ settings_values.end_b }}" step="0.1" required></div></div><details class="mt-4 angle-advanced"><summary>進階同步與角度設定</summary><div class="row g-3 mt-1"><div class="col-md-3"><label class="form-label">角度區間數</label><input class="form-control" type="number" name="bins" min="8" max="72" value="{{ settings_values.bins }}"></div><div class="col-md-3"><label class="form-label">正規化百分位</label><input class="form-control" type="number" name="percentile" min="50" max="99.9" step="0.1" value="{{ settings_values.percentile }}"></div><div class="col-md-3"><label class="form-label">手動 EMG 時鐘比例</label><input class="form-control" type="number" name="scale" min="0.8" max="1.2" step="0.00001" value="{{ settings_values.scale }}"></div><div class="col-md-3"><label class="form-label">手動起點偏移 / 秒</label><input class="form-control" type="number" name="offset_s" min="-30" max="30" step="0.001" value="{{ settings_values.offset_s }}"></div><div class="col-md-6"><div class="form-check form-switch mt-2"><input class="form-check-input" type="checkbox" role="switch" id="auto-scale" name="auto_scale" {% if settings_values.auto_scale %}checked{% endif %}><label class="form-check-label" for="auto-scale">自動校正 EMG 時鐘比例</label></div></div><div class="col-md-6"><div class="form-check form-switch mt-2"><input class="form-check-input" type="checkbox" role="switch" id="auto-offset" name="auto_offset" {% if settings_values.auto_offset %}checked{% endif %}><label class="form-check-label" for="auto-offset">依角度資料自動估計起點偏移</label></div></div></div></details></form>
-{% if database_result %}<section class="surface form-panel mb-4"><div class="d-flex justify-content-between align-items-center gap-3 flex-wrap"><div><h2>資料庫相位估算</h2><p class="text-secondary mb-0">前段 {{ database_result.start[0] }}–{{ database_result.start[1] }} 秒；後段 {{ database_result.end[0] }}–{{ database_result.end[1] }} 秒；{{ database_result.bins }} 個角度區間。</p></div><select id="database-angle-muscle" class="form-select angle-muscle-select">{% for item in database_result.profiles %}<option value="{{ item.slot }}">{{ item.name }}</option>{% endfor %}</select></div><div id="database-angle-chart" class="qt-chart angle-database-chart"></div></section><div class="surface table-responsive mb-4"><table class="table data-table"><thead><tr><th>通道 / 肌肉</th><th>前段平均 RMS</th><th>後段平均 RMS</th><th>變化</th></tr></thead><tbody>{% for item in database_result.summary %}<tr><td><strong>S{{ '%02d'|format(item.slot|int) }}</strong><small class="d-block text-secondary">{{ item.name }}</small></td><td>{{ '%.3f mV'|format(item.early) if item.early is not none else '—' }}</td><td>{{ '%.3f mV'|format(item.late) if item.late is not none else '—' }}</td><td>{{ '%+.3f mV'|format(item.delta) if item.delta is not none else '—' }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
-{% if result %}<div class="surface form-panel mb-4"><h2>分析摘要</h2><p class="preserve-lines mb-0">{{ result.overview }}</p></div><section class="section-head"><div><h2>前後段角度曲線</h2></div></section><div class="profile-grid">{{ result.profile_charts }}</div>{% for key, title in [('summary','前後段完整統計'),('profiles','逐角度肌肉訊號'),('cycles','逐圈量測資料')] %}<section class="section-head"><div><h2>{{ title }}</h2></div></section><div class="surface table-responsive angle-table">{{ tables[key] }}</div>{% endfor %}<section class="section-head"><div><h2>設定與同步結果</h2></div></section><div class="surface form-panel"><pre class="json-block mb-0">{{ result.settings_sync_json }}</pre></div>{% endif %}
+<form method="post" class="surface form-panel mb-4 angle-settings-form"><input type="hidden" name="csrf"
+        value="{{ csrf_token }}">
+    <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
+        <div>
+            <h2>分析範圍</h2>
+            <p class="text-secondary mb-0">預設會依共同資料長度，自動選取前段與後段各一個比較區間，開啟頁面後立即產生圖表。</p>
+        </div><button class="btn btn-dark" {% if not can_analyze %}disabled{% endif %}>重新分析</button>
+    </div>
+    <div class="form-check form-switch mt-4"><input class="form-check-input" type="checkbox" role="switch"
+            id="automatic-range" name="automatic_range" {% if settings_values.automatic_range %}checked{% endif %}><label class="form-check-label" for="automatic-range">自動選取前後段比較時間</label></div>
+    <div class="row g-3 mt-1 manual-range">
+        <div class="col-6 col-md-3"><label class="form-label">前段開始 / 秒</label><input class="form-control" type="number"
+                name="start_a" value="{{ settings_values.start_a }}" step="0.1" required></div>
+        <div class="col-6 col-md-3"><label class="form-label">前段結束 / 秒</label><input class="form-control" type="number"
+                name="start_b" value="{{ settings_values.start_b }}" step="0.1" required></div>
+        <div class="col-6 col-md-3"><label class="form-label">後段開始 / 秒</label><input class="form-control" type="number"
+                name="end_a" value="{{ settings_values.end_a }}" step="0.1" required></div>
+        <div class="col-6 col-md-3"><label class="form-label">後段結束 / 秒</label><input class="form-control" type="number"
+                name="end_b" value="{{ settings_values.end_b }}" step="0.1" required></div>
+    </div>
+    <details class="mt-4 angle-advanced">
+        <summary>進階同步與角度設定</summary>
+        <div class="row g-3 mt-1">
+            <div class="col-md-3"><label class="form-label">角度區間數</label><input class="form-control" type="number"
+                    name="bins" min="8" max="72" value="{{ settings_values.bins }}"></div>
+            <div class="col-md-3"><label class="form-label">正規化百分位</label><input class="form-control" type="number"
+                    name="percentile" min="50" max="99.9" step="0.1" value="{{ settings_values.percentile }}"></div>
+            <div class="col-md-3"><label class="form-label">手動 EMG 時鐘比例</label><input class="form-control" type="number"
+                    name="scale" min="0.8" max="1.2" step="0.00001" value="{{ settings_values.scale }}"></div>
+            <div class="col-md-3"><label class="form-label">手動起點偏移 / 秒</label><input class="form-control" type="number"
+                    name="offset_s" min="-30" max="30" step="0.001" value="{{ settings_values.offset_s }}"></div>
+            <div class="col-md-6">
+                <div class="form-check form-switch mt-2"><input class="form-check-input" type="checkbox" role="switch"
+                        id="auto-scale" name="auto_scale" {% if settings_values.auto_scale %}checked{% endif %}><label
+                        class="form-check-label" for="auto-scale">自動校正 EMG 時鐘比例</label></div>
+            </div>
+            <div class="col-md-6">
+                <div class="form-check form-switch mt-2"><input class="form-check-input" type="checkbox" role="switch"
+                        id="auto-offset" name="auto_offset" {% if settings_values.auto_offset %}checked{% endif %}><label class="form-check-label" for="auto-offset">依角度資料自動估計起點偏移</label></div>
+            </div>
+        </div>
+    </details>
+</form>
+{% if database_result %}<section class="surface form-panel mb-4">
+    <div class="d-flex justify-content-between align-items-center gap-3 flex-wrap">
+        <div>
+            <h2>資料庫相位估算</h2>
+            <p class="text-secondary mb-0">前段 {{ database_result.start[0] }}–{{ database_result.start[1] }} 秒；後段 {{ database_result.end[0] }}–{{ database_result.end[1] }} 秒；{{ database_result.bins }} 個角度區間。</p>
+        </div><select id="database-angle-muscle" class="form-select angle-muscle-select">{% for item in database_result.profiles %}<option value="{{ item.slot }}">{{ item.name }}</option>{% endfor %}</select>
+    </div>
+    <div id="database-angle-chart" class="qt-chart angle-database-chart"></div>
+    <script id="database-angle-profiles" type="application/json">{{ database_result.profiles|tojson }}</script>
+</section>
+<div class="surface table-responsive mb-4">
+    <table class="table data-table">
+        <thead>
+            <tr>
+                <th>通道 / 肌肉</th>
+                <th>前段平均 RMS</th>
+                <th>後段平均 RMS</th>
+                <th>變化</th>
+            </tr>
+        </thead>
+        <tbody>{% for item in database_result.summary %}<tr>
+                <td><strong>S{{ '%02d'|format(item.slot|int) }}</strong><small class="d-block text-secondary">{{ item.name }}</small></td>
+                <td>{{ '%.3f mV'|format(item.early) if item.early is not none else '—' }}</td>
+                <td>{{ '%.3f mV'|format(item.late) if item.late is not none else '—' }}</td>
+                <td>{{ '%+.3f mV'|format(item.delta) if item.delta is not none else '—' }}</td>
+            </tr>{% endfor %}</tbody>
+    </table>
+</div>{% endif %}
+{% if result %}<div class="surface form-panel mb-4">
+    <h2>分析摘要</h2>
+    <p class="preserve-lines mb-0">{{ result.overview }}</p>
+</div>
+<section class="section-head">
+    <div>
+        <h2>前後段角度曲線</h2>
+    </div>
+</section>
+<div class="profile-grid">{{ result.profile_charts }}</div>{% for key, title in [('summary','前後段完整統計'),('profiles','逐角度肌肉訊號'),('cycles','逐圈量測資料')] %}<section class="section-head">
+    <div>
+        <h2>{{ title }}</h2>
+    </div>
+</section>
+<div class="surface table-responsive angle-table">{{ tables[key] }}</div>{% endfor %}<section class="section-head">
+    <div>
+        <h2>設定與同步結果</h2>
+    </div>
+</section>
+<div class="surface form-panel">
+    <pre class="json-block mb-0">{{ result.settings_sync_json }}</pre>
+</div>{% endif %}
 {% endblock %}
-{% block scripts %}<script>document.addEventListener('DOMContentLoaded',()=>{const auto=document.getElementById('automatic-range');const fields=document.querySelectorAll('.manual-range input');const autoScale=document.getElementById('auto-scale');const scale=document.querySelector('[name="scale"]');const autoOffset=document.getElementById('auto-offset');const offset=document.querySelector('[name="offset_s"]');const sync=()=>{fields.forEach(field=>field.disabled=auto.checked);if(scale)scale.disabled=autoScale.checked;if(offset)offset.disabled=autoOffset.checked};auto?.addEventListener('change',sync);autoScale?.addEventListener('change',sync);autoOffset?.addEventListener('change',sync);sync();const drawDatabaseAngle=()=>window.EmgCharts.angleProfiles('database-angle-chart','database-angle-muscle',{{ database_result.profiles|tojson if database_result else '[]' }});drawDatabaseAngle();window.setTimeout(()=>window.dispatchEvent(new Event('resize')),0);});</script>{% endblock %}

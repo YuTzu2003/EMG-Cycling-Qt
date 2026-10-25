@@ -1,9 +1,10 @@
 {% extends 'base.html' %}
-{% block title %}測試分析{% endblock %}
+{% block title %}後續分析{% endblock %}
 {% macro metric(label, stats, unit='') -%}
 <div class="qt-metric"><span>{{ label }}</span><strong>{{ '%.2f'|format(stats.mean) if stats and stats.mean is not none else '—' }}{{ unit }}</strong><small>最高 {{ '%.2f'|format(stats.max) if stats and stats.max is not none else '—' }}{{ unit }}</small></div>
 {%- endmacro %}
 {% block content %}
+<div class="analysis-page-actions"><a class="btn btn-outline-secondary" data-history-back href="{{ url_for('patients.sessions', patient_id=record.patient_id) }}">← 返回上一頁</a><a class="btn btn-export" href="{{ url_for('analysis.download_pdf_report', session_id=record.session_id) }}">匯出 PDF</a></div>
 <section class="test-overview surface mb-4">
   <div class="table-responsive"><table class="table test-overview-table mb-0"><thead><tr><th>測試者</th><th>病歷編號</th><th>測試時間</th><th>狀態</th><th>資料概況</th></tr></thead><tbody><tr><td><strong>{{ record.patient_name or record.patient_id }}</strong></td><td>{{ record.patient_id }}</td><td><strong>{{ record.started_at[:19]|replace('T', ' ') }}</strong></td><td><span class="status-pill">{{ record.status }}</span></td><td><strong>EMG {{ analysis.emg|length }} 個通道</strong><small class="d-block text-secondary">踏板 {{ pedal_sample_count }} 筆 · 訓練器 {{ trainer_sample_count }} 筆</small></td></tr></tbody></table></div>
 </section>
@@ -65,4 +66,6 @@
 {% endif %}
 </div>
 {% endblock %}
-{% block scripts %}<script>document.addEventListener('DOMContentLoaded',()=>{window.EmgCharts.bars('emg-average-chart', {{ emg_bars|tojson }}, '各肌肉 RMS 平均值', 'mean');window.EmgCharts.bars('emg-peak-chart', {{ emg_bars|tojson }}, '各肌肉 RMS Peak 值', 'peak');window.EmgCharts.selectableEnvelope('emg-envelope-chart', 'envelope-muscle', {{ emg_envelopes|tojson }});window.EmgCharts.pedalSeries('pedal-power-chart', {{ pedal_power_series|tojson }}, 'W', {{ pedal_summary.average_power_w|tojson if pedal_summary else 'null' }}, {{ pedal_summary.maximum_power_w|tojson if pedal_summary else 'null' }}, '#ee6666');window.EmgCharts.pedalSeries('pedal-cadence-chart', {{ pedal_cadence_series|tojson }}, 'rpm', {{ pedal_summary.average_cadence_rpm|tojson if pedal_summary else 'null' }}, {{ pedal_summary.maximum_cadence_rpm|tojson if pedal_summary else 'null' }}, '#fac858');window.EmgCharts.pedalSeries('pedal-balance-chart', {{ pedal_balance_series|tojson }}, '%', null, null, '#43a047', true);});</script>{% endblock %}
+{% block scripts %}
+<script id="session-chart-data" type="application/json">{{ chart_payload|tojson }}</script>
+{% endblock %}

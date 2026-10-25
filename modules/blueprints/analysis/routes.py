@@ -7,14 +7,11 @@ import json
 import os
 from pathlib import Path
 from uuid import uuid4
-
 from flask import Blueprint, abort, flash, redirect, render_template, request, send_file, url_for
 from markupsafe import Markup
 from werkzeug.utils import secure_filename
-
 from modules.services.database import connect as _connection
 from modules.services.file_storage import temporary_files
-
 from modules.blueprints.analysis.emg.sensor_mapping import loadMappings, recordingChannelSides
 from modules.blueprints.analysis.emg.importers import attach_pedal_csv, import_emg_csv
 from modules.blueprints.analysis.pedal.angle_emg import AngleSettings, analyze_angle_emg
@@ -22,19 +19,15 @@ from modules.blueprints.analysis.pedal.analysis import analyze_pedal_records, su
 from modules.blueprints.analysis.emg.session_analysis import add_point, analyze, new_session, peak_envelope, summary_lines
 from modules.blueprints.analysis.emg.session_compare import compare_sessions, comparison_charts
 from modules.blueprints.analysis.emg.visuals import angle_profile_charts
-
+from modules.blueprints.analysis.pdf_report import build_session_pdf
 
 ROOT = Path(__file__).resolve().parents[3]
 analysis_bp = Blueprint("analysis", __name__, template_folder="templates")
 
-# SQL operations belong to this analysis Blueprint.  Deployment schema is managed separately.
-
 def _rows(cursor, values):
     return [dict(zip([column[0] for column in cursor.description], row)) for row in values]
 
-
 def _db_number(value):
-    """Convert SQL Server numeric and decimal values for archived recording points."""
     return None if value is None else float(value)
 
 
@@ -54,8 +47,18 @@ def _list_sessions(patient_id=None):
         archived = """SELECT a.TestID AS session_id, a.PatientID AS patient_id, p.Name AS name,
             a.StartedAt AS started_at, a.Source AS source, a.Status AS status,
             (SELECT COUNT(*) FROM dbo.RawFiles f WHERE f.TestID=a.TestID) AS file_count,
-            0 AS emg_count, 0 AS pedal_count, 0 AS trainer_count
-            FROM dbo.SessionArchives a JOIN dbo.Patients p ON p.PatientID=a.PatientID"""
+            0 AS emg_count, 0 AS pedal_count, 0 AS trainer_count,
+            COALESCE(TRY_CONVERT(float, JSON_VALUE(a.SessionJSON, '$.duration_s')),
+                     duration.duration_s) AS duration_seconds
+            FROM dbo.SessionArchives a JOIN dbo.Patients p ON p.PatientID=a.PatientID
+            OUTER APPLY (
+                SELECT MAX(TRY_CONVERT(float, JSON_VALUE(sample.[value], '$.time_s'))) AS duration_s
+                FROM (
+                    SELECT [value] FROM OPENJSON(a.SessionJSON, '$.emg')
+                    UNION ALL SELECT [value] FROM OPENJSON(a.SessionJSON, '$.pedal')
+                    UNION ALL SELECT [value] FROM OPENJSON(a.SessionJSON, '$.trainer')
+                ) sample
+            ) duration"""
         cursor.execute(archived + (" WHERE a.PatientID=%s" if patient_id else ""),
                        (patient_id,) if patient_id else ())
         records = _rows(cursor, cursor.fetchall())
@@ -64,7 +67,8 @@ def _list_sessions(patient_id=None):
             N'qt' AS source, COALESCE(s.Status, N'completed') AS status, 0 AS file_count,
             (SELECT COUNT(*) FROM dbo.EMGData e WHERE e.TestID=s.TestID) AS emg_count,
             (SELECT COUNT(*) FROM dbo.PedalData pd WHERE pd.TestID=s.TestID) AS pedal_count,
-            (SELECT COUNT(*) FROM dbo.TrainerData td WHERE td.TestID=s.TestID) AS trainer_count
+            (SELECT COUNT(*) FROM dbo.TrainerData td WHERE td.TestID=s.TestID) AS trainer_count,
+            s.TestTime AS duration_seconds
             FROM dbo.Sessions s LEFT JOIN dbo.Patients p ON p.PatientID=s.PatientID
             WHERE NOT EXISTS (SELECT 1 FROM dbo.SessionArchives a WHERE a.TestID=s.TestID)"""
         cursor.execute(legacy + (" AND s.PatientID=%s" if patient_id else ""),
@@ -392,6 +396,17 @@ def session_detail(session_id: str):
         str(slot): str(channel.get("label") or channel.get("mapping_name") or f"S{slot}")
         for slot, channel in document.get("channels", {}).items()
     }
+    chart_payload = {
+        "emg_bars": emg_bars,
+        "emg_envelopes": emg_envelopes,
+        "pedal_power_series": pedal_power_series,
+        "pedal_cadence_series": pedal_cadence_series,
+        "pedal_balance_series": pedal_balance_series,
+        "average_power_w": pedal_summary.get("average_power_w") if pedal_summary else None,
+        "maximum_power_w": pedal_summary.get("maximum_power_w") if pedal_summary else None,
+        "average_cadence_rpm": pedal_summary.get("average_cadence_rpm") if pedal_summary else None,
+        "maximum_cadence_rpm": pedal_summary.get("maximum_cadence_rpm") if pedal_summary else None,
+    }
     return render_template("session_detail.html", record=record, files=files, analysis=result,
                            selected_view=selected_view, angle_sections=angle_sections, angle_section=angle_section,
                            lines=summary_lines(result),
@@ -403,13 +418,86 @@ def session_detail(session_id: str):
                            pedal_cadence_series=pedal_cadence_series,
                            pedal_balance_series=pedal_balance_series,
                            trainer_power_series=_telemetry_chart_series(document, "trainer", "power_watts", "訓練器功率"),
-                           emg_bars=emg_bars, emg_envelopes=emg_envelopes,
+                           emg_bars=emg_bars, emg_envelopes=emg_envelopes, chart_payload=chart_payload,
                            emg_peak_by_slot=emg_peak_by_slot,
                            emg_sample_count=len(document.get("emg", [])),
                            pedal_sample_count=len(document.get("pedal", [])),
                            trainer_sample_count=len(document.get("trainer", [])),
                            emg_channel_names=emg_channel_names, angle_result=angle_result,
                            angle_tables=angle_tables, angle_error=angle_error)
+
+
+@analysis_bp.get("/sessions/<session_id>/report.pdf")
+def download_pdf_report(session_id: str):
+    found = _get_session(session_id)
+    if found is None:
+        abort(404)
+    record, document = found
+    result = analyze(document)
+    files = _list_files(session_id)
+    pedal_summary = pedal_performance = None
+    if document.get("pedal"):
+        try:
+            pedal_summary = summarize_pedal_records(document["pedal"])
+            pedal_performance = analyze_pedal_records(document["pedal"], ftp_w=200)
+        except (ValueError, KeyError, TypeError):
+            pass
+    angle_result = None
+    angle_error = None
+    kinds = {item["kind"] for item in files}
+    if {"emg", "pedal"} <= kinds or {"emg", "angle"} <= kinds:
+        try:
+            with temporary_files() as temp_path:
+                emg_path, pedal_path = temp_path("emg.csv"), temp_path("pedal.csv")
+                emg_path.write_bytes(_get_file(session_id, "emg")[1])
+                pedal_path.write_bytes(_get_file(session_id, "angle" if "angle" in kinds else "pedal")[1])
+                with emg_path.open(encoding="utf-8-sig", newline="") as stream:
+                    headers = next(csv.reader(stream), [])
+                settings = AngleSettings()
+                if request.args.get("angle_export") == "1":
+                    with emg_path.open(encoding="utf-8-sig", newline="") as stream:
+                        emg_duration = max((float(row.get("time_seconds", 0) or 0)
+                                            for row in csv.DictReader(stream)), default=0.0)
+                    with pedal_path.open(encoding="utf-8-sig", newline="") as stream:
+                        reader = csv.DictReader(stream)
+                        time_column = "t_session_s" if "t_session_s" in (reader.fieldnames or ()) else "session_seconds"
+                        pedal_duration = max((float(row.get(time_column, 0) or 0)
+                                              for row in reader), default=0.0)
+                    duration = min(emg_duration, pedal_duration)
+                    if duration < 35:
+                        raise ValueError("EMG 與踏板共同資料不足 35 秒，無法建立前後段角度分析。")
+                    if request.args.get("automatic_range") == "on":
+                        window = min(60.0, max(10.0, (duration - 5.0) / 3.0))
+                        start = (5.0, round(5.0 + window, 2))
+                        end = (round(duration - window, 2), round(duration, 2))
+                    else:
+                        start = (float(request.args.get("start_a", 5)), float(request.args.get("start_b", 65)))
+                        end = (float(request.args.get("end_a", 240)), float(request.args.get("end_b", 300)))
+                    settings = AngleSettings(
+                        start=start, end=end, bins=int(request.args.get("bins", 24)),
+                        percentile=float(request.args.get("percentile", 99)),
+                        scale=None if request.args.get("auto_scale") == "on" else float(request.args.get("scale", 1)),
+                        offset_s=None if request.args.get("auto_offset") == "on" else float(request.args.get("offset_s", 0)),
+                    )
+                    settings.validate()
+                sides, _ = recordingChannelSides(
+                    emg_path, headers, loadMappings(ROOT / "sensor_mapping.json"),
+                    document.get("channels", {}),
+                )
+                angle_result = analyze_angle_emg(emg_path, pedal_path, sides, settings)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            angle_error = str(exc)
+    try:
+        pdf = build_session_pdf(record, document, result, pedal_summary=pedal_summary,
+                                pedal_performance=pedal_performance, files=files,
+                                angle_result=angle_result, angle_error=angle_error)
+    except RuntimeError as exc:
+        abort(503, str(exc))
+    filename = secure_filename(f"rehab-analysis-{record['patient_id']}-{session_id}.pdf") or "rehab-analysis.pdf"
+    response = send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=True,
+                         download_name=filename)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @analysis_bp.get("/sessions/<session_id>/source-data")

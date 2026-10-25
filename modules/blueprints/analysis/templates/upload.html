@@ -1,1 +1,21 @@
-{% extends 'base.html' %}{% block title %}匯入資料{% endblock %}{% block content %}<div class="page-heading"><div class="eyebrow">IMPORT MEASUREMENT</div><h1>匯入原始資料</h1><p>選擇病人並上傳收集產生的 CSV。EMG、踏板、訓練器可單獨或一起匯入。</p></div><div class="surface form-panel upload-panel"><form method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{ csrf_token }}"><div class="mb-4"><label class="form-label" for="patient_id">病人</label><select class="form-select form-select-lg" name="patient_id" id="patient_id" required><option value="">選擇病人</option>{% for person in patients %}<option value="{{ person.patient_id }}">{{ person.name }} · {{ person.patient_id }}</option>{% endfor %}</select><div class="form-text">沒有病人？<a href="{{ url_for('patients.patients') }}">先建立病人</a></div></div><div class="row g-3">{% for kind, label, help in [('emg','EMG 原始 CSV','重新濾波並計算 RMS'),('pedal','踏板 CSV','功率、踏頻與角度資料'),('trainer','訓練器 CSV','阻力、速度與心率'),('angle','校正角度 CSV','可選；優先用於相位分析')] %}<div class="col-md-6"><div class="file-field"><label class="form-label" for="{{ kind }}">{{ label }}</label><input class="form-control" type="file" id="{{ kind }}" name="{{ kind }}" accept=".csv,text/csv"><small>{{ help }}</small></div></div>{% endfor %}</div><button class="btn btn-dark btn-lg mt-4">匯入並分析</button></form></div>{% endblock %}
+{% extends 'base.html' %}{% block title %}匯入資料{% endblock %}{% block content %}<div class="page-heading">
+    <div class="eyebrow">IMPORT MEASUREMENT</div>
+    <h1>匯入原始資料</h1>
+    <p>選擇病人並上傳收集產生的 CSV。EMG、踏板、訓練器可單獨或一起匯入。</p>
+</div>
+<div class="surface form-panel upload-panel">
+    <form method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <div class="mb-4"><label class="form-label" for="patient_id">病人</label><select
+                class="form-select form-select-lg" name="patient_id" id="patient_id" required>
+                <option value="">選擇病人</option>{% for person in patients %}<option value="{{ person.patient_id }}">{{ person.name }} · {{ person.patient_id }}</option>{% endfor %}
+            </select>
+            <div class="form-text">沒有病人？<a href="{{ url_for('patients.patients') }}">先建立病人</a></div>
+        </div>
+        <div class="row g-3">{% for kind, label, help in [('emg','EMG 原始 CSV','重新濾波並計算 RMS'),('pedal','踏板 CSV','功率、踏頻與角度資料'),('trainer','訓練器 CSV','阻力、速度與心率'),('angle','校正角度 CSV','可選；優先用於相位分析')] %}<div
+                class="col-md-6">
+                <div class="file-field"><label class="form-label" for="{{ kind }}">{{ label }}</label><input
+                        class="form-control" type="file" id="{{ kind }}" name="{{ kind }}"
+                        accept=".csv,text/csv"><small>{{ help }}</small></div>
+            </div>{% endfor %}</div><button class="btn btn-success btn-lg mt-4">匯入並分析</button>
+    </form>
+</div>{% endblock %}

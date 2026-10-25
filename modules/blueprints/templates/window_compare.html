@@ -1,7 +1,72 @@
 {% if result %}
-<section class="section-head"><div><div class="eyebrow">TIME WINDOWS</div><h2>前後段 RMS 比較</h2></div></section>
-<p class="text-secondary">每次量測分別取前 {{ early_s }} 秒與最後 {{ late_s }} 秒，依同名肌肉比對實際收到的 RMS。</p>
-<div class="surface table-responsive"><table class="table data-table"><thead><tr><th>肌肉</th><th>A 前段</th><th>A 後段</th><th>B 前段</th><th>B 後段</th></tr></thead><tbody>{% for row in window_rows %}<tr><td>{{ row.label }}</td><td>{{ '%.3f'|format(row.a_early) if row.a_early is not none else '—' }}</td><td>{{ '%.3f'|format(row.a_late) if row.a_late is not none else '—' }}</td><td>{{ '%.3f'|format(row.b_early) if row.b_early is not none else '—' }}</td><td>{{ '%.3f'|format(row.b_late) if row.b_late is not none else '—' }}</td></tr>{% else %}<tr><td colspan="5">沒有 RMS 資料。</td></tr>{% endfor %}</tbody></table></div>
-{% if charts %}<section class="section-head"><div><div class="eyebrow">TIME SERIES</div><h2>肌肉 RMS 趨勢疊圖</h2></div></section><div class="surface form-panel comparison-charts">{{ charts }}</div>{% endif %}
-<details class="surface form-panel mt-4"><summary>查看完整比較數值</summary><div class="table-responsive mt-3"><table class="table data-table"><thead><tr><th>肌肉</th><th>A 樣本數</th><th>B 樣本數</th><th>A 缺漏 %</th><th>B 缺漏 %</th><th>A 基準差 mV</th><th>B 基準差 mV</th></tr></thead><tbody>{% for row in result.channels %}<tr><td>{{ row.label }}</td><td>{{ row.first.count }}</td><td>{{ row.second.count }}</td><td>{{ '%.1f'|format(row.first.missing_percent) if row.first.missing_percent is not none else '—' }}</td><td>{{ '%.1f'|format(row.second.missing_percent) if row.second.missing_percent is not none else '—' }}</td><td>{{ '%.3f'|format(row.first.baseline_adjusted_mv) if row.first.baseline_adjusted_mv is not none else '—' }}</td><td>{{ '%.3f'|format(row.second.baseline_adjusted_mv) if row.second.baseline_adjusted_mv is not none else '—' }}</td></tr>{% endfor %}</tbody></table></div></details>
+<section class="surface compare-window-panel" aria-labelledby="compare-window-heading">
+  <div class="compare-section-heading">
+    <div>
+      <h3 id="compare-window-heading">前後段 RMS 比較</h3>
+      <p>每次量測分別取前 {{ early_s }} 秒與最後 {{ late_s }} 秒，依同名肌肉比較實際收到的 RMS。</p>
+    </div>
+  </div>
+  <div class="table-responsive">
+    <table class="table data-table compare-table compare-window-table">
+      <thead>
+        <tr>
+          <th scope="col">肌肉</th>
+          <th scope="col">A 前段</th>
+          <th scope="col">A 後段</th>
+          <th scope="col">B 前段</th>
+          <th scope="col">B 後段</th>
+        </tr>
+      </thead>
+      <tbody>{% for row in window_rows %}<tr>
+          <th scope="row">{{ row.label }}</th>
+          <td>{{ '%.3f'|format(row.a_early) if row.a_early is not none else '—' }}</td>
+          <td>{{ '%.3f'|format(row.a_late) if row.a_late is not none else '—' }}</td>
+          <td>{{ '%.3f'|format(row.b_early) if row.b_early is not none else '—' }}</td>
+          <td>{{ '%.3f'|format(row.b_late) if row.b_late is not none else '—' }}</td>
+        </tr>{% else %}<tr>
+          <td colspan="5">沒有 RMS 資料。</td>
+        </tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</section>
+
+{% if charts %}<section class="surface compare-trend-panel" aria-labelledby="compare-trend-heading">
+  <div class="compare-section-heading">
+    <div>
+      <h3 id="compare-trend-heading">肌肉 RMS 趨勢疊圖</h3>
+      <p>每個肌肉通道呈現兩次測試的時間曲線。</p>
+    </div>
+  </div>
+  <div class="comparison-charts compare-trend-content">{{ charts }}</div>
+</section>{% endif %}
+
+<details class="surface compare-detail-panel">
+  <summary>查看完整比較數值</summary>
+  <div class="table-responsive">
+    <table class="table data-table compare-table">
+      <thead>
+        <tr>
+          <th scope="col">肌肉</th>
+          <th scope="col">A 樣本數</th>
+          <th scope="col">B 樣本數</th>
+          <th scope="col">A 缺漏 %</th>
+          <th scope="col">B 缺漏 %</th>
+          <th scope="col">A 基準差 mV</th>
+          <th scope="col">B 基準差 mV</th>
+        </tr>
+      </thead>
+      <tbody>{% for row in result.channels %}<tr>
+          <th scope="row">{{ row.label }}</th>
+          <td>{{ row.first.count }}</td>
+          <td>{{ row.second.count }}</td>
+          <td>{{ '%.1f'|format(row.first.missing_percent) if row.first.missing_percent is not none else '—' }}</td>
+          <td>{{ '%.1f'|format(row.second.missing_percent) if row.second.missing_percent is not none else '—' }}</td>
+          <td>{{ '%.3f'|format(row.first.baseline_adjusted_mv) if row.first.baseline_adjusted_mv is not none else '—' }}
+          </td>
+          <td>{{ '%.3f'|format(row.second.baseline_adjusted_mv) if row.second.baseline_adjusted_mv is not none else '—'
+            }}</td>
+        </tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</details>
 {% endif %}

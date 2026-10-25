@@ -1,17 +1,160 @@
-﻿{% extends 'base.html' %}{% block title %}測試比較{% endblock %}
-{% block content %}<div class="page-heading"><div class="eyebrow">LONGITUDINAL VIEW</div><h1>測試比較</h1><p>選取同一病人的兩次量測，查看每個肌肉通道的 RMS 變化與可比性。</p></div><form method="get" class="filter-bar"><select class="form-select" name="patient_id" aria-label="病人"><option value="">選擇病人</option>{% for person in patients %}<option value="{{ person.patient_id }}" {% if person.patient_id == patient_id %}selected{% endif %}>{{ person.name }} · {{ person.patient_id }}</option>{% endfor %}</select><button class="btn btn-outline-dark">載入量測</button></form>{% if patient_id %}<form method="post" class="surface form-panel mb-4"><input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="patient_id" value="{{ patient_id }}"><div class="row g-3"><div class="col-md-5"><label class="form-label" for="first">量測 A</label><select class="form-select" name="first" id="first" required>{% for item in choices %}<option value="{{ item.session_id }}">{{ item.started_at[:19]|replace('T',' ') }} · {{ item.status }}</option>{% endfor %}</select></div><div class="col-md-5"><label class="form-label" for="second">量測 B</label><select class="form-select" name="second" id="second" required>{% for item in choices %}<option value="{{ item.session_id }}" {% if loop.index == 2 %}selected{% endif %}>{{ item.started_at[:19]|replace('T',' ') }} · {{ item.status }}</option>{% endfor %}</select></div><div class="col-md-2 d-flex align-items-end"><button class="btn btn-dark w-100">開始比較</button></div><div class="col-md-3"><label class="form-label">前段秒數</label><input class="form-control" type="number" name="early_s" min="1" max="600" value="{{ early_s or 30 }}"></div><div class="col-md-3"><label class="form-label">後段秒數</label><input class="form-control" type="number" name="late_s" min="1" max="600" value="{{ late_s or 30 }}"></div></div></form>{% endif %}{% if result %}<div class="section-head"><div><div class="eyebrow">CHANNEL METRICS</div><h2>肌肉通道比較</h2></div></div><div class="surface table-responsive"><table class="table data-table"><thead><tr><th>通道 / 肌肉</th><th>A 中位 RMS</th><th>B 中位 RMS</th><th>差異</th><th>變化</th><th>A / B P90</th><th>A / B 波動</th><th>A / B 基準比</th><th>品質</th></tr></thead><tbody>{% for row in result.channels %}<tr><td><strong>S{{ row.slot }}</strong><small class="d-block">{{ row.label }}</small></td><td>{{ '%.3f'|format(row.first.median_mv) if row.first.median_mv is not none else '—' }}</td><td>{{ '%.3f'|format(row.second.median_mv) if row.second.median_mv is not none else '—' }}</td><td>{{ '%+.3f'|format(row.median_difference_mv) if row.median_difference_mv is not none else '—' }}</td><td>{{ '%+.1f%%'|format(row.median_change_percent) if row.median_change_percent is not none else '—' }}</td><td>{{ '%.3f'|format(row.first.p90_mv) if row.first.p90_mv is not none else '—' }} / {{ '%.3f'|format(row.second.p90_mv) if row.second.p90_mv is not none else '—' }}</td><td>{{ '%.2f'|format(row.first.variation) if row.first.variation is not none else '—' }} / {{ '%.2f'|format(row.second.variation) if row.second.variation is not none else '—' }}</td><td>{{ '%.2f'|format(row.first.normalized) if row.first.normalized is not none else '—' }} / {{ '%.2f'|format(row.second.normalized) if row.second.normalized is not none else '—' }}</td><td>{{ row.quality }}</td></tr>{% endfor %}</tbody></table></div>{% include "window_compare.html" %}<div class="row g-4 mt-2"><div class="col-lg-6"><div class="surface form-panel"><h2>左右肌群</h2>{% for row in result.bilateral %}<p>{{ row.muscle }}：{{ '%+.1f%%'|format(row.first_right_minus_left_percent) if row.first_right_minus_left_percent is not none else '—' }} → {{ '%+.1f%%'|format(row.second_right_minus_left_percent) if row.second_right_minus_left_percent is not none else '—' }}</p>{% else %}<p>無可比較的左右肌群。</p>{% endfor %}</div></div><div class="col-lg-6"><div class="surface form-panel"><h2>判讀提醒</h2>{% for note in result.notes %}<p>{{ note }}</p>{% endfor %}</div></div></div>{% endif %}{% endblock %}
+{% extends 'base.html' %}
+{% block title %}測試比較{% endblock %}
+{% block content %}
+<header class="compare-page-heading">
+  <div>
+    <h1>測試比較</h1>
+    <p>選擇同一位受測者的兩次測試，並排查看肌電 RMS 與前後段變化。</p>
+  </div>
+  <a class="btn btn-outline-dark"
+    href="{{ url_for('patients.sessions', patient_id=patient_id) if patient_id else url_for('patients.sessions') }}">返回測試紀錄</a>
+</header>
 
+<section class="surface compare-workspace" aria-labelledby="compare-select-heading">
+  <form method="get" class="compare-patient-form">
+    <div><label class="form-label" for="compare-patient">受測者</label><select class="form-select" name="patient_id"
+        id="compare-patient" required>
+        <option value="">選擇受測者</option>{% for person in patients %}<option value="{{ person.patient_id }}" {% if person.patient_id==patient_id %}selected{% endif %}>{{ person.name }} · {{ person.patient_id }}</option>{% endfor %}
+      </select></div>
+    <button class="btn btn-outline-dark" type="submit">載入測試</button>
+  </form>
+
+  {% if patient_id %}
+  {% if choices|length >= 2 %}
+  {% set selected_first = request.form.get('first') or choices[0].session_id %}
+  {% set selected_second = request.form.get('second') or choices[1].session_id %}
+  <form method="post" class="compare-form">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="patient_id" value="{{ patient_id }}">
+    <div class="compare-test-grid">
+      <div class="compare-test-card compare-test-card--first">
+        <div class="compare-test-card-head"><span class="compare-test-letter">A</span>
+          <div>
+            <h3>第一次測試</h3>
+            <p>作為比較基準</p>
+          </div>
+        </div>
+        <label class="form-label" for="first">選擇量測 A</label>
+        <select class="form-select" name="first" id="first" required>{% for item in choices %}<option
+            value="{{ item.session_id }}" {% if item.session_id==selected_first %}selected{% endif %}>{{ item.started_at[:19]|replace('T',' ') }} · {{ item.status }}</option>{% endfor %}</select>
+      </div>
+      <div class="compare-test-card compare-test-card--second">
+        <div class="compare-test-card-head"><span class="compare-test-letter">B</span>
+          <div>
+            <h3>第二次測試</h3>
+            <p>與 A 比較變化</p>
+          </div>
+        </div>
+        <label class="form-label" for="second">選擇量測 B</label>
+        <select class="form-select" name="second" id="second" required>{% for item in choices %}<option
+            value="{{ item.session_id }}" {% if item.session_id==selected_second %}selected{% endif %}>{{ item.started_at[:19]|replace('T',' ') }} · {{ item.status }}</option>{% endfor %}</select>
+      </div>
+    </div>
+    <div class="compare-form-footer">
+      <fieldset class="compare-window-fields">
+        <legend>前後段分析範圍</legend>
+        <div><label class="form-label" for="early_s">前段秒數</label>
+          <div class="input-group"><input class="form-control" type="number" name="early_s" id="early_s" min="1"
+              max="600" value="{{ early_s }}" required><span class="input-group-text">秒</span></div>
+        </div>
+        <div><label class="form-label" for="late_s">後段秒數</label>
+          <div class="input-group"><input class="form-control" type="number" name="late_s" id="late_s" min="1" max="600"
+              value="{{ late_s }}" required><span class="input-group-text">秒</span></div>
+        </div>
+      </fieldset>
+      <button class="btn btn-dark compare-submit" type="submit">開始比較 <span aria-hidden="true">→</span></button>
+    </div>
+  </form>
+  {% else %}
+  <div class="compare-selection-empty"><strong>目前無法建立兩次測試比較</strong>
+    <p>這位受測者需要至少兩筆測試紀錄。</p><a class="btn btn-outline-dark"
+      href="{{ url_for('patients.sessions', patient_id=patient_id) }}">查看測試紀錄</a>
+  </div>
+  {% endif %}
+  {% else %}
+  <div class="compare-selection-empty"><strong>從受測者開始</strong>
+    <p>選擇受測者後，這裡會列出可比較的測試紀錄。</p>
+  </div>
+  {% endif %}
+</section>
+
+{% if result %}
+<div class="compare-results">
+  <header class="compare-results-head">
+    <div><span class="compare-step">02 / 查看結果</span>
+      <h2>兩次測試結果</h2>
+      <p>差異與變化以 B 減 A 計算；請同時查看可比性與資料品質。</p>
+    </div>
+    <div class="compare-results-count"><strong>{{ result.channels|selectattr('quality', 'equalto', '可比較')|list|length }}</strong><span>個可比較通道</span></div>
+  </header>
+
+  {% if comparison_chart_rows %}<section class="surface compare-chart-card" aria-labelledby="compare-chart-heading">
+    <div class="compare-section-heading">
+      <div>
+        <h3 id="compare-chart-heading">各肌肉 RMS 中位數</h3>
+        <p>量測 A 與 B 並排呈現，單位 mV。</p>
+      </div>
+    </div>
+    <div id="comparison-rms-chart" class="compare-rms-chart" role="img" aria-label="兩次測試各肌肉 RMS 中位數比較圖"></div>
+  </section>{% endif %}
+
+  <section class="surface compare-metrics" aria-labelledby="compare-metrics-heading">
+    <div class="compare-section-heading">
+      <div>
+        <h3 id="compare-metrics-heading">肌肉通道比較</h3>
+        <p>橫向捲動可查看所有指標；數值缺漏以「—」表示。</p>
+      </div><span class="compare-unit">RMS 單位：mV</span>
+    </div>
+    <div class="table-responsive">
+      <table class="table data-table compare-table">
+        <thead>
+          <tr>
+            <th scope="col">通道 / 肌肉</th>
+            <th scope="col">A 中位 RMS</th>
+            <th scope="col">B 中位 RMS</th>
+            <th scope="col">差異</th>
+            <th scope="col">變化</th>
+            <th scope="col">A / B P90</th>
+            <th scope="col">A / B 波動</th>
+            <th scope="col">A / B 基準比</th>
+            <th scope="col">可比性</th>
+          </tr>
+        </thead>
+        <tbody>{% for row in result.channels %}<tr>
+            <th scope="row"><strong>S{{ row.slot }}</strong><small>{{ row.label }}</small></th>
+            <td>{{ '%.3f'|format(row.first.median_mv) if row.first.median_mv is not none else '—' }}</td>
+            <td>{{ '%.3f'|format(row.second.median_mv) if row.second.median_mv is not none else '—' }}</td>
+            <td>{{ '%+.3f'|format(row.median_difference_mv) if row.median_difference_mv is not none else '—' }}</td>
+            <td>{{ '%+.1f%%'|format(row.median_change_percent) if row.median_change_percent is not none else '—' }}</td>
+            <td>{{ '%.3f'|format(row.first.p90_mv) if row.first.p90_mv is not none else '—' }} / {{ '%.3f'|format(row.second.p90_mv) if row.second.p90_mv is not none else '—' }}</td>
+            <td>{{ '%.2f'|format(row.first.variation) if row.first.variation is not none else '—' }} / {{ '%.2f'|format(row.second.variation) if row.second.variation is not none else '—' }}</td>
+            <td>{{ '%.2f'|format(row.first.normalized) if row.first.normalized is not none else '—' }} / {{ '%.2f'|format(row.second.normalized) if row.second.normalized is not none else '—' }}</td>
+            <td><span
+                class="compare-quality {{ 'compare-quality--ok' if row.quality == '可比較' else 'compare-quality--review' }}">{{ row.quality }}</span></td>
+          </tr>{% endfor %}</tbody>
+      </table>
+    </div>
+  </section>
+
+  {% include "window_compare.html" %}
+
+  <div class="compare-insight-grid">
+    <section class="surface compare-insight" aria-labelledby="compare-bilateral-heading">
+      <h3 id="compare-bilateral-heading">左右肌群</h3>
+      <p>同名肌肉右側相對左側的中位 RMS 差異。</p>
+      <div class="compare-bilateral-list">{% for row in result.bilateral %}<div><strong>{{ row.muscle }}</strong><span>{{ '%+.1f%%'|format(row.first_right_minus_left_percent) if row.first_right_minus_left_percent is not none else '—' }} <span aria-hidden="true">→</span> {{ '%+.1f%%'|format(row.second_right_minus_left_percent) if row.second_right_minus_left_percent is not none else '—' }}</span></div>{% else %}<p class="compare-muted">無可比較的左右肌群。</p>{% endfor %}</div>
+    </section>
+    <section class="surface compare-insight" aria-labelledby="compare-notes-heading">
+      <h3 id="compare-notes-heading">判讀提醒</h3>
+      <ul class="compare-notes">{% for note in result.notes %}<li>{{ note }}</li>{% endfor %}</ul>
+    </section>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
 
 {% block scripts %}
-<script>
-  document.addEventListener('DOMContentLoaded', () => {
-    const rows = {{ comparison_chart_rows|tojson }};
-    if (!rows.length) return;
-    const container = document.createElement('section');
-    container.className = 'surface form-panel mb-4';
-    container.innerHTML = '<div class="eyebrow">INTERACTIVE COMPARISON</div><div id="comparison-rms-chart" style="height:420px"></div>';
-    document.querySelector('.page-heading').after(container);
-    window.EmgCharts.comparison('comparison-rms-chart', rows);
-  });
-</script>
+{% if comparison_chart_rows %}
+<script id="comparison-chart-data" type="application/json">{{ comparison_chart_rows|tojson }}</script>
+{% endif %}
 {% endblock %}

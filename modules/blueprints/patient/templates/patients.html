@@ -2,41 +2,64 @@
 {% block title %}受測者資料{% endblock %}
 {% block content %}
 <header class="page-heading">
-  <div class="eyebrow">受測者管理</div>
-  <h1>受測者資料</h1>
   <p>在這裡建立受測者資料，Qt 收集程式即可選擇對應的人員；下方卡片可查看各自的測試紀錄。</p>
 </header>
 
 <section class="surface form-panel subject-workspace" aria-labelledby="subject-form-title">
   <div class="subject-workspace-heading">
-    <div><h2 id="subject-form-title">新增受測者</h2><p>輸入既有編號並儲存時，會更新該筆資料。</p></div>
+    <div>
+      <h2 id="subject-form-title">新增受測者</h2>
+      <p>輸入既有編號並儲存時，會更新該筆資料。</p>
+    </div>
   </div>
   <form method="post">
     <input type="hidden" name="csrf" value="{{ csrf_token }}">
     <div class="row g-3">
-      <div class="col-md-4"><label class="form-label" for="patient_id">受測者編號</label><input class="form-control" id="patient_id" name="patient_id" maxlength="50" required></div>
-      <div class="col-md-4"><label class="form-label" for="name">姓名</label><input class="form-control" id="name" name="name" maxlength="100" required></div>
-      <div class="col-md-4"><label class="form-label" for="gender">性別</label><select class="form-select" id="gender" name="gender"><option>未指定</option><option>男性</option><option>女性</option><option>其他</option></select></div>
-      <div class="col-12"><label class="form-label" for="notes">備註</label><textarea class="form-control" id="notes" name="notes" rows="2" maxlength="1000" placeholder="可填寫測試備註或辨識資訊"></textarea></div>
+      <div class="col-md-4"><label class="form-label" for="patient_id">受測者編號</label><input class="form-control"
+          id="patient_id" name="patient_id" maxlength="50" required></div>
+      <div class="col-md-4"><label class="form-label" for="name">姓名</label><input class="form-control" id="name"
+          name="name" maxlength="100" required></div>
+      <div class="col-md-4"><label class="form-label" for="gender">性別</label><select class="form-select" id="gender"
+          name="gender">
+          <option>未指定</option>
+          <option>男性</option>
+          <option>女性</option>
+          <option>其他</option>
+        </select></div>
+      <div class="col-12"><label class="form-label" for="notes">備註</label><textarea class="form-control" id="notes"
+          name="notes" rows="2" maxlength="1000" placeholder="可填寫測試備註或辨識資訊"></textarea></div>
       <div class="col-12 subject-form-actions"><button class="btn btn-dark" type="submit">儲存受測者</button></div>
     </div>
   </form>
 </section>
 
-<section class="section-head subject-section-head"><div><h2>受測者清單</h2><p class="section-note">共 {{ patients|length }} 位受測者；點選卡片可查看測試紀錄。</p></div></section>
+<section class="section-head subject-section-head">
+  <div>
+    <h2>受測者清單</h2>
+    <p class="section-note">共 {{ patients|length }} 位受測者；點選卡片可查看測試紀錄。</p>
+  </div>
+</section>
 <div class="row g-3 subject-grid">
   {% for person in patients %}
   <div class="col-sm-6 col-xl-4">
-    <article class="surface subject-card">
-      <div class="subject-card-top"><span class="subject-card-label">受測者</span><span class="subject-card-gender">{{ person.gender or '未指定' }}</span></div>
-      <h3>{{ person.name }}</h3>
-      <p class="subject-card-id">編號 {{ person.patient_id }}</p>
-      {% if person.notes %}<p class="subject-card-notes">{{ person.notes }}</p>{% else %}<p class="subject-card-notes is-empty">尚無備註</p>{% endif %}
-      <a class="subject-card-link" href="{{ url_for('patients.sessions', patient_id=person.patient_id) }}">查看測試紀錄 <span aria-hidden="true">↗</span></a>
+    <article
+      class="surface subject-card{% if person.gender == '男性' %} subject-card--male{% elif person.gender == '女性' %} subject-card--female{% endif %}">
+      <div class="subject-card-top">
+        <div class="subject-card-identity">
+          <h3>{{ person.name }}</h3>
+          <p class="subject-card-id">編號 {{ person.patient_id }}</p>
+        </div>
+        <span class="subject-card-gender">{{ person.gender or '未指定' }}</span>
+      </div>
+      {% if person.notes %}<p class="subject-card-notes">{{ person.notes }}</p>{% endif %}
+      <a class="subject-card-link" href="{{ url_for('patients.sessions', patient_id=person.patient_id) }}">查看測試紀錄 <span
+          aria-hidden="true">↗</span></a>
     </article>
   </div>
   {% else %}
-  <div class="col-12"><div class="surface empty">尚未建立受測者。請先使用上方表單新增資料。</div></div>
+  <div class="col-12">
+    <div class="surface empty">尚未建立受測者。請先使用上方表單新增資料。</div>
+  </div>
   {% endfor %}
 </div>
 {% endblock %}
