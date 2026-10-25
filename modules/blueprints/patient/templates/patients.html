@@ -1,4 +1,42 @@
-{% extends 'base.html' %}{% block title %}病人資料{% endblock %}{% block content %}
-<div class="page-heading"><div class="eyebrow">病人管理</div><h1>病人資料</h1><p>建立或更新病人資料，並查看對應的測試紀錄。Qt 收集程式可直接選擇已建立的病人。</p></div>
-<div class="row g-4"><div class="col-lg-5"><div class="surface form-panel"><h2>新增或更新病人</h2><form method="post"><input type="hidden" name="csrf" value="{{ csrf_token }}"><div class="mb-3"><label class="form-label" for="patient_id">病人 ID</label><input class="form-control" id="patient_id" name="patient_id" maxlength="50" required></div><div class="mb-3"><label class="form-label" for="name">姓名</label><input class="form-control" id="name" name="name" maxlength="100" required></div><div class="mb-3"><label class="form-label" for="gender">性別</label><select class="form-select" id="gender" name="gender"><option>未指定</option><option>男性</option><option>女性</option><option>其他</option></select></div><div class="mb-4"><label class="form-label" for="notes">備註</label><textarea class="form-control" id="notes" name="notes" rows="3" maxlength="1000"></textarea></div><button class="btn btn-dark w-100">儲存病人</button></form></div></div><div class="col-lg-7"><div class="surface table-responsive"><table class="table align-middle mb-0"><thead><tr><th>ID</th><th>姓名</th><th>性別</th><th></th></tr></thead><tbody>{% for person in patients %}<tr><td>{{ person.patient_id }}</td><td><strong>{{ person.name }}</strong></td><td>{{ person.gender }}</td><td><a href="{{ url_for('patients.sessions', patient_id=person.patient_id) }}">查看測試</a></td></tr>{% else %}<tr><td colspan="4" class="empty">尚未建立病人。</td></tr>{% endfor %}</tbody></table></div></div></div>
+{% extends 'base.html' %}
+{% block title %}受測者資料{% endblock %}
+{% block content %}
+<header class="page-heading">
+  <div class="eyebrow">受測者管理</div>
+  <h1>受測者資料</h1>
+  <p>在這裡建立受測者資料，Qt 收集程式即可選擇對應的人員；下方卡片可查看各自的測試紀錄。</p>
+</header>
+
+<section class="surface form-panel subject-workspace" aria-labelledby="subject-form-title">
+  <div class="subject-workspace-heading">
+    <div><h2 id="subject-form-title">新增受測者</h2><p>輸入既有編號並儲存時，會更新該筆資料。</p></div>
+  </div>
+  <form method="post">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="row g-3">
+      <div class="col-md-4"><label class="form-label" for="patient_id">受測者編號</label><input class="form-control" id="patient_id" name="patient_id" maxlength="50" required></div>
+      <div class="col-md-4"><label class="form-label" for="name">姓名</label><input class="form-control" id="name" name="name" maxlength="100" required></div>
+      <div class="col-md-4"><label class="form-label" for="gender">性別</label><select class="form-select" id="gender" name="gender"><option>未指定</option><option>男性</option><option>女性</option><option>其他</option></select></div>
+      <div class="col-12"><label class="form-label" for="notes">備註</label><textarea class="form-control" id="notes" name="notes" rows="2" maxlength="1000" placeholder="可填寫測試備註或辨識資訊"></textarea></div>
+      <div class="col-12 subject-form-actions"><button class="btn btn-dark" type="submit">儲存受測者</button></div>
+    </div>
+  </form>
+</section>
+
+<section class="section-head subject-section-head"><div><h2>受測者清單</h2><p class="section-note">共 {{ patients|length }} 位受測者；點選卡片可查看測試紀錄。</p></div></section>
+<div class="row g-3 subject-grid">
+  {% for person in patients %}
+  <div class="col-sm-6 col-xl-4">
+    <article class="surface subject-card">
+      <div class="subject-card-top"><span class="subject-card-label">受測者</span><span class="subject-card-gender">{{ person.gender or '未指定' }}</span></div>
+      <h3>{{ person.name }}</h3>
+      <p class="subject-card-id">編號 {{ person.patient_id }}</p>
+      {% if person.notes %}<p class="subject-card-notes">{{ person.notes }}</p>{% else %}<p class="subject-card-notes is-empty">尚無備註</p>{% endif %}
+      <a class="subject-card-link" href="{{ url_for('patients.sessions', patient_id=person.patient_id) }}">查看測試紀錄 <span aria-hidden="true">↗</span></a>
+    </article>
+  </div>
+  {% else %}
+  <div class="col-12"><div class="surface empty">尚未建立受測者。請先使用上方表單新增資料。</div></div>
+  {% endfor %}
+</div>
 {% endblock %}

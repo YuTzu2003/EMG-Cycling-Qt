@@ -21,10 +21,12 @@ general_bp = Blueprint("general", __name__)
 @general_bp.get("/")
 def dashboard():
     """Render the common home page with current patients and recordings."""
+    sessions = _list_sessions()
     return render_template(
         "dashboard.html",
         patients=_list_patients(),
-        sessions=_list_sessions()[:8],
+        sessions=sessions[:5],
+        session_count=len(sessions),
     )
 
 

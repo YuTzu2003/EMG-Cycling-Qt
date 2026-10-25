@@ -5,13 +5,18 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}EMG Rehab{% endblock %}</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link href="{{ url_for('static', filename='css/app.css') }}" rel="stylesheet">
+  <link href="{{ url_for('static', filename='css/app.css', v='20261025-7') }}" rel="stylesheet">
 </head>
 <body>
-  <nav class="navbar navbar-expand-lg site-nav sticky-top"><div class="app-container">
-    <a class="navbar-brand brand" href="{{ url_for('general.dashboard') }}">EMG Rehab</a>
+  <nav class="navbar navbar-expand-lg site-nav"><div class="app-container">
+    <a class="navbar-brand brand" href="{{ url_for('general.dashboard') }}" {% if request.endpoint == 'general.dashboard' %}aria-current="page"{% endif %}>EMG Rehab</a>
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navlinks"><span class="navbar-toggler-icon"></span></button>
-    <div class="collapse navbar-collapse" id="navlinks"><div class="navbar-nav ms-auto gap-lg-2"><a class="nav-link" href="{{ url_for('patients.patients') }}">病人資料</a><a class="nav-link" href="{{ url_for('patients.sessions') }}">測試分析</a><a class="nav-link" href="{{ url_for('analysis.compare') }}">測試比較</a><a class="btn btn-dark btn-sm nav-action" href="{{ url_for('analysis.upload') }}">匯入 CSV</a></div></div>
+    <div class="collapse navbar-collapse" id="navlinks"><div class="navbar-nav ms-auto gap-lg-2">
+      <a class="nav-link {{ 'active' if request.endpoint == 'patients.patients' else '' }}" href="{{ url_for('patients.patients') }}" {% if request.endpoint == 'patients.patients' %}aria-current="page"{% endif %}>受測者資料</a>
+      <a class="nav-link {{ 'active' if request.endpoint in ('patients.sessions', 'analysis.session_detail', 'analysis.source_data', 'analysis.angle') else '' }}" href="{{ url_for('patients.sessions') }}" {% if request.endpoint in ('patients.sessions', 'analysis.session_detail', 'analysis.source_data', 'analysis.angle') %}aria-current="page"{% endif %}>測試分析</a>
+      <a class="nav-link {{ 'active' if request.endpoint == 'analysis.compare' else '' }}" href="{{ url_for('analysis.compare') }}" {% if request.endpoint == 'analysis.compare' %}aria-current="page"{% endif %}>測試比較</a>
+      <a class="btn btn-dark btn-sm nav-action {{ 'active' if request.endpoint == 'analysis.upload' else '' }}" href="{{ url_for('analysis.upload') }}" {% if request.endpoint == 'analysis.upload' %}aria-current="page"{% endif %}>匯入 CSV</a>
+    </div></div>
   </div></nav>
   <main class="app-container page-shell">{% for category, message in get_flashed_messages(with_categories=true) %}<div class="alert alert-{{ category }} alert-dismissible fade show">{{ message }}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>{% endfor %}{% block content %}{% endblock %}</main>
   <footer class="container-xxl site-footer">EMG Rehab Cycling</footer>

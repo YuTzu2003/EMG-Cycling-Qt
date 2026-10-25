@@ -22,7 +22,7 @@ def _list_patients():
 
 def _save_patient(patient_id, name, gender="未指定", notes=""):
     patient_id, name=patient_id.strip(), name.strip()
-    if not patient_id or not name: raise ValueError("病人 ID 與姓名不可空白。")
+    if not patient_id or not name: raise ValueError("受測者編號與姓名不可空白。")
     with _connection() as db:
         cursor=db.cursor(); cursor.execute("UPDATE dbo.Patients SET Name=%s, Sex=%s, Notes=%s WHERE PatientID=%s", (name, gender, notes.strip()[:1000], patient_id))
         if cursor.rowcount == 0: cursor.execute("INSERT INTO dbo.Patients (PatientID, Name, Sex, Notes) VALUES (%s,%s,%s,%s)", (patient_id, name, gender, notes.strip()[:1000]))
@@ -41,19 +41,34 @@ def patients():
         except ValueError as exc:
             flash(str(exc), "danger")
         else:
-            flash("病人資料已儲存。", "success")
+            flash("受測者資料已儲存。", "success")
             return redirect(url_for("patients.patients"))
     return render_template("patients.html", patients=_list_patients())
 
 
 @patient_bp.get("/sessions")
 def sessions():
-    patient_id = request.args.get("patient_id", "")
+    patient_id = request.args.get("patient_id", "").strip()
+    search_query = request.args.get("q", "").strip()[:100]
+    source_filter = request.args.get("source", "")
+    if source_filter not in {"", "qt", "csv"}:
+        source_filter = ""
+    records = _list_analysis_sessions(patient_id or None)
+    patient_record_count = len(records)
+    if source_filter:
+        records = [row for row in records if ("qt" if row["source"] == "qt" else "csv") == source_filter]
+    if search_query:
+        needle = search_query.casefold()
+        records = [row for row in records if any(needle in str(row.get(field) or "").casefold()
+                                                 for field in ("name", "patient_id", "session_id", "started_at"))]
     return render_template(
         "sessions.html",
         patients=_list_patients(),
         selected_patient=patient_id,
-        sessions=_list_analysis_sessions(patient_id or None),
+        search_query=search_query,
+        source_filter=source_filter,
+        patient_record_count=patient_record_count,
+        sessions=records,
     )
 
 

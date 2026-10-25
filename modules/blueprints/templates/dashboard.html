@@ -1,21 +1,48 @@
 {% extends 'base.html' %}
 {% block title %}工作台{% endblock %}
 {% block content %}
-<section class="dashboard-intro surface">
-  <div>
-    <div class="eyebrow">系統總覽</div>
-    <h1>復健測試工作台</h1>
-    <p>集中查看病人與測試紀錄，進入肌電、踏板及踩踏角度分析。Qt 收集並儲存的資料會出現在測試清單中。</p>
+<section class="dashboard-hero" aria-labelledby="dashboard-title">
+  <div class="dashboard-hero-main">
+    <div class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>系統總覽</div>
+    <h1 id="dashboard-title">復健測試總覽</h1>
+    <p>受測者資料、測試紀錄與分析結果集中在這裡。選擇受測者後，即可查看肌電、踏板與踩踏角度資料。</p>
+    <div class="dashboard-actions"><a href="{{ url_for('patients.sessions') }}" class="btn btn-dark">查看測試紀錄</a><a href="{{ url_for('analysis.upload') }}" class="btn btn-outline-dark">匯入 CSV</a></div>
   </div>
-  <div class="dashboard-actions"><a href="{{ url_for('patients.sessions') }}" class="btn btn-dark">查看測試</a><a href="{{ url_for('analysis.upload') }}" class="btn btn-outline-dark">匯入 CSV</a></div>
+  <aside class="dashboard-guide" aria-label="常用操作">
+    <div class="dashboard-guide-heading"><span>常用操作</span><small>從這裡開始</small></div>
+    <a href="{{ url_for('patients.patients') }}" class="dashboard-guide-link"><span class="dashboard-guide-number">01</span><span><strong>建立受測者資料</strong><small>讓 Qt 收集時可以選擇受測者</small></span><span class="dashboard-guide-arrow" aria-hidden="true">↗</span></a>
+    <a href="{{ url_for('patients.sessions') }}" class="dashboard-guide-link"><span class="dashboard-guide-number">02</span><span><strong>查看測試分析</strong><small>依受測者選擇測試與分析項目</small></span><span class="dashboard-guide-arrow" aria-hidden="true">↗</span></a>
+    <a href="{{ url_for('analysis.compare') }}" class="dashboard-guide-link"><span class="dashboard-guide-number">03</span><span><strong>比較兩次測試</strong><small>查看肌肉 RMS 的變化</small></span><span class="dashboard-guide-arrow" aria-hidden="true">↗</span></a>
+  </aside>
 </section>
 
-<section class="section-head dashboard-section-head"><div><h2>資料概況</h2><p class="section-note">從這裡前往病人資料與測試紀錄。</p></div></section>
+<section class="section-head dashboard-section-head"><div><h2>資料概況</h2><p class="section-note">從這裡前往受測者資料與測試紀錄。</p></div></section>
 <div class="row g-3 dashboard-stats">
-  <div class="col-sm-6"><a class="surface metric-card" href="{{ url_for('patients.patients') }}"><span>病人資料</span><strong>{{ patients|length }}</strong><small>建立與維護病人基本資料</small></a></div>
-  <div class="col-sm-6"><a class="surface metric-card" href="{{ url_for('patients.sessions') }}"><span>最近測試</span><strong>{{ sessions|length }}</strong><small>查看分析與原始資料</small></a></div>
+  <div class="col-sm-6"><a class="surface metric-card dashboard-stat-patients" href="{{ url_for('patients.patients') }}"><span>已建立受測者</span><strong>{{ patients|length }}</strong><small>查看與維護受測者基本資料</small></a></div>
+  <div class="col-sm-6"><a class="surface metric-card dashboard-stat-sessions" href="{{ url_for('patients.sessions') }}"><span>測試紀錄</span><strong>{{ session_count }}</strong><small>首頁顯示最新 5 筆</small></a></div>
 </div>
 
-<section class="section-head dashboard-section-head"><div><h2>最近測試</h2><p class="section-note">查看近期量測的時間、來源及分析入口。</p></div><a href="{{ url_for('patients.sessions') }}" class="text-link">查看全部</a></section>
-<div class="surface table-responsive"><table class="table align-middle mb-0"><thead><tr><th>病人</th><th>開始時間</th><th>來源</th><th>原始檔案</th><th></th></tr></thead><tbody>{% for row in sessions %}<tr><td><strong>{{ row.name }}</strong><small class="d-block text-secondary">{{ row.patient_id }}</small></td><td>{{ row.started_at[:19]|replace('T',' ') }}</td><td>{{ 'Qt 收集' if row.source == 'qt' else 'CSV 匯入' }}</td><td>{{ row.file_count }} 份</td><td><a href="{{ url_for('analysis.session_detail', session_id=row.session_id) }}">查看分析</a></td></tr>{% else %}<tr><td colspan="5" class="empty">目前沒有測試資料。請由 Qt 收集程式儲存資料，或匯入 CSV。</td></tr>{% endfor %}</tbody></table></div>
+<section class="section-head dashboard-section-head"><div><h2>最近測試</h2><p class="section-note">依測試時間顯示最新 5 筆；可點選卡片查看分析。</p></div><a href="{{ url_for('patients.sessions') }}" class="text-link">查看全部</a></section>
+{% if sessions %}
+<div class="dashboard-record-filters" role="search" aria-label="篩選最近測試">
+  <div><label class="form-label" for="recent-search">搜尋最近測試</label><input class="form-control" id="recent-search" type="search" placeholder="受測者姓名、編號或測試時間" autocomplete="off"></div>
+  <div><label class="form-label" for="recent-source">資料來源</label><select class="form-select" id="recent-source"><option value="">全部來源</option><option value="qt">Qt 收集</option><option value="csv">CSV 匯入</option></select></div>
+  <span class="dashboard-filter-count" id="recent-count" aria-live="polite">顯示 {{ sessions|length }} 筆</span>
+</div>
+{% endif %}
+<div class="dashboard-record-list" id="recent-record-list">
+  {% for row in sessions %}
+  <article class="surface dashboard-record-card" data-source="{{ 'qt' if row.source == 'qt' else 'csv' }}" data-search="{{ (row.name or row.patient_id) ~ ' ' ~ row.patient_id ~ ' ' ~ (row.started_at or '') }}">
+    <div class="dashboard-record-field dashboard-record-person"><span>受測者</span><strong>{{ row.name or row.patient_id }}</strong><small>{{ row.patient_id }}</small></div>
+    <div class="dashboard-record-field"><span>測試時間</span><time datetime="{{ row.started_at }}">{{ row.started_at[:19]|replace('T',' ') }}</time></div>
+    <div class="dashboard-record-field"><span>來源</span><span class="source-tag {{ 'source-tag-qt' if row.source == 'qt' else 'source-tag-csv' }}">{{ 'Qt 收集' if row.source == 'qt' else 'CSV 匯入' }}</span></div>
+    <div class="dashboard-record-field"><span>原始檔案</span><strong>{{ row.file_count }} 份</strong></div>
+    <a class="dashboard-record-link" href="{{ url_for('analysis.session_detail', session_id=row.session_id) }}">查看分析 <span aria-hidden="true">↗</span></a>
+  </article>
+  {% else %}
+  <div class="surface empty dashboard-record-empty">目前沒有測試資料。請由 Qt 收集程式儲存資料，或匯入 CSV。</div>
+  {% endfor %}
+</div>
+<p class="surface dashboard-filter-empty" id="recent-filter-empty" hidden>最近 5 筆測試沒有符合條件的紀錄。<a href="{{ url_for('patients.sessions') }}">搜尋全部測試</a></p>
 {% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='js/dashboard.js', v='20261025-1') }}" defer></script>{% endblock %}
