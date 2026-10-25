@@ -43,4 +43,4 @@ uv sync
 uv run main.py
 ```
 
-Qt 使用根目錄的 `.env` 連線資料庫。先在網站建立病人，再於 Qt 選擇病人並收集資料。Qt 的詳細操作請參閱 [collect-Qt/README.md](collect-Qt/README.md)。
+Qt 使用根目錄的 `.env` 連線資料庫。先在網站建立病人，再於 Qt 選擇病人並收集資料。測試完成後可選擇是否將整筆紀錄及 EMG、踏板、阻力計原始 CSV 存入 SQL Server；選擇不上傳時，本機檔案仍會保留。Qt 的詳細操作請參閱 [collect-Qt/README.md](collect-Qt/README.md)。
