@@ -1,7 +1,7 @@
 """Desktop application entry point, run with ``uv run main.py``."""
 from __future__ import annotations
 
-from emg_rehab.desktop_window import EmgRehabilitationWindow, main
+from emg_rehab.gui import EmgRehabilitationWindow, main
 
 __all__ = ["EmgRehabilitationWindow", "main"]
 

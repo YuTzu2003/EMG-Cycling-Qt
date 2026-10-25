@@ -90,7 +90,10 @@ class DatabaseConfig:
 
 
 class SqlServerStorage:
-    required_tables = {"Sessions", "TestBaselines", "EMGData", "PedalData", "TrainerData"}
+    required_tables = {
+        "Sessions", "TestBaselines", "EMGData", "PedalData", "TrainerData",
+        "Patients", "SessionArchives", "RawFiles",
+    }
     def __init__(self, config: DatabaseConfig) -> None:
         self.config = config
         self.connection: Any | None = None
