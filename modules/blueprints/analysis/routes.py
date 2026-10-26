@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import csv
 import io
-import json
-import os
+import math
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 from flask import Blueprint, abort, flash, redirect, render_template, request, send_file, url_for
@@ -12,6 +12,15 @@ from markupsafe import Markup
 from werkzeug.utils import secure_filename
 from modules.services.database import connect as _connection
 from modules.services.file_storage import temporary_files
+from modules.services.normalized_sessions import (
+    delete as _normalized_delete,
+    get_file as _normalized_get_file,
+    list_files as _normalized_list_files,
+    list_sessions as _normalized_list_sessions,
+    load_session as _normalized_load_session,
+    replace as _normalized_replace,
+    save as _normalized_save,
+)
 from modules.blueprints.analysis.emg.sensor_mapping import loadMappings, recordingChannelSides
 from modules.blueprints.analysis.emg.importers import attach_pedal_csv, import_emg_csv
 from modules.blueprints.analysis.pedal.angle_emg import AngleSettings, analyze_angle_emg
@@ -28,7 +37,11 @@ def _rows(cursor, values):
     return [dict(zip([column[0] for column in cursor.description], row)) for row in values]
 
 def _db_number(value):
-    return None if value is None else float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _list_patients():
@@ -42,6 +55,7 @@ def _get_patient(patient_id):
         row = cursor.fetchone(); return _rows(cursor, [row])[0] if row else None
 
 def _list_sessions(patient_id=None):
+    return _normalized_list_sessions(patient_id)
     with _connection() as db:
         cursor = db.cursor()
         archived = """SELECT a.TestID AS session_id, a.PatientID AS patient_id, p.Name AS name,
@@ -77,6 +91,7 @@ def _list_sessions(patient_id=None):
         return sorted(records, key=lambda item: item["started_at"] or "", reverse=True)
 
 def _save_recording(session, files, *, source="upload"):
+    return _normalized_save(session, files, source=source)
     import json
     from datetime import datetime, timezone
     patient_id = str((session.get("subject") or {}).get("patientId") or "").strip()
@@ -93,6 +108,7 @@ def _save_recording(session, files, *, source="upload"):
     return identifier
 
 def _get_session(session_id):
+    return _normalized_load_session(session_id)
     with _connection() as db:
         import json
         cursor = db.cursor(); cursor.execute("""SELECT a.TestID AS session_id, a.PatientID AS patient_id,
@@ -144,10 +160,12 @@ def _get_session(session_id):
                  "source": "qt", "status": status or "completed"}, document)
 
 def _list_files(session_id):
+    return _normalized_list_files(session_id)
     with _connection() as db:
         cursor = db.cursor(); cursor.execute("SELECT Kind AS kind, FileName AS filename, DATALENGTH(Content) AS size FROM dbo.RawFiles WHERE TestID=%s ORDER BY Kind", (session_id,)); return _rows(cursor, cursor.fetchall())
 
 def _get_file(session_id, kind):
+    return _normalized_get_file(session_id, kind)
     with _connection() as db:
         cursor = db.cursor(); cursor.execute("SELECT FileName, Content FROM dbo.RawFiles WHERE TestID=%s AND Kind=%s", (session_id, kind)); row=cursor.fetchone(); return (str(row[0]), bytes(row[1])) if row else None
 
@@ -215,6 +233,31 @@ def _pedal_chart_series(performance: dict | None) -> tuple[list[dict], list[dict
 
 
 
+
+
+def _detail_angle_settings(emg_path: Path, pedal_path: Path) -> AngleSettings:
+    """Read the Qt-equivalent angle options submitted by the detail-page modal."""
+    values = request.args
+    custom = values.get("angle_settings") == "1"
+    automatic_range = not custom or values.get("angle_automatic_range") == "on"
+    if automatic_range:
+        with emg_path.open(encoding="utf-8-sig", newline="") as stream:
+            emg_duration = max((float(row.get("time_seconds", 0) or 0) for row in csv.DictReader(stream)), default=0)
+        with pedal_path.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream)
+            time_column = "t_session_s" if "t_session_s" in (reader.fieldnames or ()) else "session_seconds"
+            pedal_duration = max((float(row.get(time_column, 0) or 0) for row in reader), default=0)
+        duration = min(emg_duration, pedal_duration)
+        if duration < 35:
+            raise ValueError("角度分析至少需要 35 秒的共同 EMG 與踏板資料。")
+        window = min(60.0, max(10.0, (duration - 5.0) / 3.0))
+        start, end = (5.0, round(5.0 + window, 2)), (round(duration - window, 2), round(duration, 2))
+    else:
+        start = (float(values.get("angle_start_a", 5)), float(values.get("angle_start_b", 65)))
+        end = (float(values.get("angle_end_a", 240)), float(values.get("angle_end_b", 300)))
+    return AngleSettings(start=start, end=end,
+                         scale=None if (not custom or values.get("angle_auto_scale") == "on") else float(values.get("angle_scale", 1)),
+                         offset_s=None if custom and values.get("angle_auto_offset") == "on" else float(values.get("angle_offset_s", 0)))
 
 
 def window_comparison(first: dict, second: dict, early_s: int, late_s: int) -> list[dict]:
@@ -289,7 +332,12 @@ def _pedal_performance_lines(performance: dict) -> list[str]:
 @analysis_bp.route("/upload", methods=["GET", "POST"])
 def upload():
     if request.method == "POST":
-        patient = _get_patient(request.form.get("patient_id", ""))
+        target_test_id = request.form.get("test_id", "").strip()
+        target = _get_session(target_test_id) if target_test_id else None
+        if target_test_id and target is None:
+            flash("找不到指定的測試紀錄。", "danger")
+            return redirect(url_for("analysis.upload"))
+        patient = _get_patient(target[0]["patient_id"]) if target else _get_patient(request.form.get("patient_id", ""))
         if patient is None:
             flash("請先選擇已建立的病人。", "danger")
             return redirect(url_for("analysis.upload"))
@@ -321,12 +369,15 @@ def upload():
                             add_point(recording, "trainer", {"time_s": point.pop("time_seconds"), **point})
                 recording["raw_files"] = {kind: uploads[kind].filename for kind in uploads}
                 files = {kind: (uploads[kind].filename, path.read_bytes()) for kind, path in paths.items()}
-                identifier = _save_recording(recording, files, source="upload")
+                identifier = (_normalized_replace(target_test_id, recording, files)
+                              if target else _save_recording(recording, files, source="upload"))
             flash("CSV 已匯入並建立分析測試。", "success")
             return redirect(url_for("analysis.session_detail", session_id=identifier))
         except (ValueError, OSError, TypeError, OverflowError) as exc:
             flash(f"匯入失敗：{exc}", "danger")
-    return render_template("upload.html", patients=_list_patients())
+    selected_test_id = request.args.get("test_id", "").strip()
+    return render_template("upload.html", patients=_list_patients(), tests=_list_sessions(),
+                           selected_test_id=selected_test_id)
 
 
 @analysis_bp.get("/sessions/<session_id>")
@@ -384,7 +435,8 @@ def session_detail(session_id: str):
                     emg_path, headers, loadMappings(ROOT / "sensor_mapping.json"),
                     document.get("channels", {}),
                 )
-                angle_result = analyze_angle_emg(emg_path, pedal_path, sides, AngleSettings())
+                angle_result = analyze_angle_emg(emg_path, pedal_path, sides,
+                                                 _detail_angle_settings(emg_path, pedal_path))
             angle_tables = {
                 key: Markup(angle_result[key].to_html(index=False, classes="table table-sm data-table", border=0))
                 for key in ("summary", "profiles", "cycles")
@@ -425,6 +477,22 @@ def session_detail(session_id: str):
                            trainer_sample_count=len(document.get("trainer", [])),
                            emg_channel_names=emg_channel_names, angle_result=angle_result,
                            angle_tables=angle_tables, angle_error=angle_error)
+
+
+@analysis_bp.post("/sessions/<session_id>/delete")
+def delete_session(session_id: str):
+    """Permanently delete one patient's stored test and source files."""
+    found = _get_session(session_id)
+    if found is None:
+        abort(404)
+    patient_id = found[0]["patient_id"]
+    try:
+        _normalized_delete(session_id)
+    except OSError:
+        flash("測試資料已刪除，但部分來源檔案無法移除。", "warning")
+    else:
+        flash("測試分析與來源資料已刪除。", "success")
+    return redirect(url_for("patients.sessions", patient_id=patient_id))
 
 
 @analysis_bp.get("/sessions/<session_id>/report.pdf")
@@ -521,6 +589,53 @@ def download_file(session_id: str, kind: str):
         abort(404)
     return send_file(io.BytesIO(found[1]), mimetype="text/csv" if kind != "info" else "text/plain",
                      as_attachment=True, download_name=secure_filename(found[0]) or f"{kind}.csv")
+
+
+@analysis_bp.get("/sessions/<session_id>/processed-data/<kind>.csv")
+def download_processed_data(session_id: str, kind: str):
+    """Export the exact per-test rows used by the website analysis."""
+    queries = {
+        "emg": """SELECT e.EMGDataID, e.TestID, s.TestTime AS TestDurationSec, e.TimeOffsetSec,
+            e.MuscleName, e.AvgRMSmV, e.MaxRMSmV, e.BaseRMSmV, e.DeviationPct, e.AlertStatus,
+            e.QualityStatus, e.RecordedAt,
+            CASE WHEN b.BaseID IS NULL THEN N'No' ELSE N'Yes' END AS HasBaselineReference,
+            b.BaseRMSmV AS ReferenceBaselineRMSmV, b.BaseTime AS BaselineMeasurementSec,
+            b.ActionType AS BaselineActionType, b.YellowDeviationPct, b.RedDeviationPct,
+            b.QualityStatus AS BaselineQualityStatus
+            FROM dbo.EMGData e INNER JOIN dbo.Sessions s ON s.TestID=e.TestID
+            OUTER APPLY (SELECT TOP 1 * FROM dbo.TestBaselines candidate
+                         WHERE candidate.TestID=e.TestID AND candidate.MuscleName=e.MuscleName ORDER BY candidate.CreatedAt DESC) b
+            WHERE e.TestID=%s ORDER BY e.MuscleName, e.TimeOffsetSec""",
+        "pedal": """SELECT p.PedalDataID, p.TestID, s.TestTime AS TestDurationSec,
+            CASE WHEN s.HasBaseline=1 THEN N'Yes' ELSE N'No' END AS HasBaselineReference,
+            p.TimeOffsetSec, p.TotalPowerW, p.LeftPowerW, p.RightPowerW, p.LeftBalancePct,
+            p.RightBalancePct, p.CadenceRPM, p.QualityStatus, p.RecordedAt
+            FROM dbo.PedalData p INNER JOIN dbo.Sessions s ON s.TestID=p.TestID
+            WHERE p.TestID=%s ORDER BY p.TimeOffsetSec""",
+        "trainer": """SELECT t.TrainerDataID, t.TestID, s.TestTime AS TestDurationSec,
+            CASE WHEN s.HasBaseline=1 THEN N'Yes' ELSE N'No' END AS HasBaselineReference,
+            t.TimeOffsetSec, t.DistanceKm, t.SpeedKmh, t.PowerW, t.CadenceRPM, t.QualityStatus, t.RecordedAt
+            FROM dbo.TrainerData t INNER JOIN dbo.Sessions s ON s.TestID=t.TestID
+            WHERE t.TestID=%s ORDER BY t.TimeOffsetSec""",
+        "baseline": """SELECT b.BaseID, b.TestID, s.TestTime AS TestDurationSec,
+            N'Baseline reference' AS RecordType, b.MuscleName, b.BaseRMSmV, b.BaseTime AS BaselineMeasurementSec,
+            b.ActionType AS BaselineActionType, b.YellowDeviationPct, b.RedDeviationPct,
+            b.QualityStatus AS BaselineQualityStatus, b.CreatedAt
+            FROM dbo.TestBaselines b INNER JOIN dbo.Sessions s ON s.TestID=b.TestID
+            WHERE b.TestID=%s ORDER BY b.MuscleName, b.CreatedAt""",
+    }
+    statement = queries.get(kind)
+    if statement is None or _get_session(session_id) is None:
+        abort(404)
+    with _connection() as db:
+        cursor = db.cursor(); cursor.execute(statement, (session_id,))
+        output = io.StringIO(newline="")
+        writer = csv.writer(output)
+        writer.writerow([column[0] for column in cursor.description])
+        writer.writerows(cursor.fetchall())
+    payload = output.getvalue().encode("utf-8-sig")
+    return send_file(io.BytesIO(payload), mimetype="text/csv; charset=utf-8", as_attachment=True,
+                     download_name=f"{kind}-processed-{secure_filename(session_id) or 'session'}.csv")
 
 
 @analysis_bp.route("/compare", methods=["GET", "POST"])

@@ -127,15 +127,14 @@ def _events(angle):
     valid = np.isfinite(rev) & (angle.pedaling.to_numpy(float) > 0)
     t, rev = t[valid], rev[valid]
     events = []
-    # Work is bounded by the number of supplied rows. Missing revolutions do
-    # not provide enough phase information to interpolate an event.
-    for index in range(1, len(rev)):
-        gap = rev[index] - rev[index - 1]
-        if not 0 < gap <= 2:
-            continue
-        for target in range(int(np.ceil(rev[index - 1])), int(np.floor(rev[index])) + 1):
-            if target > rev[index - 1]:
-                events.append(np.interp(target, rev[index - 1:index + 1], t[index - 1:index + 1]))
+    # Match the Qt implementation: reconstruct every whole revolution that
+    # falls between two valid BLE observations, including counter skips.
+    # Packet loss is common in a pedal stream and must not remove otherwise
+    # usable timing references for EMG clock synchronisation.
+    for target in range(int(np.ceil(rev.min())), int(np.floor(rev.max())) + 1):
+        at = np.searchsorted(rev, target)
+        if 0 < at < len(rev) and rev[at] > rev[at - 1]:
+            events.append(np.interp(target, rev[at - 1:at + 1], t[at - 1:at + 1]))
     return np.asarray(events)
 
 

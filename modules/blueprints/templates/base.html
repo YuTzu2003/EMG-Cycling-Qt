@@ -17,7 +17,6 @@
       <a class="nav-link {{ 'active' if request.endpoint == 'patients.patients' else '' }}" href="{{ url_for('patients.patients') }}" {% if request.endpoint == 'patients.patients' %}aria-current="page"{% endif %}>受測者資料</a>
       <a class="nav-link {{ 'active' if request.endpoint in ('patients.sessions', 'analysis.session_detail', 'analysis.source_data', 'analysis.angle') else '' }}" href="{{ url_for('patients.sessions') }}" {% if request.endpoint in ('patients.sessions', 'analysis.session_detail', 'analysis.source_data', 'analysis.angle') %}aria-current="page"{% endif %}>後續分析</a>
       <a class="nav-link {{ 'active' if request.endpoint == 'analysis.compare' else '' }}" href="{{ url_for('analysis.compare') }}" {% if request.endpoint == 'analysis.compare' %}aria-current="page"{% endif %}>測試比較</a>
-      <a class="btn btn-success nav-action{% if request.endpoint == 'analysis.upload' %} active{% endif %}" href="{{ url_for('analysis.upload') }}" {% if request.endpoint == 'analysis.upload' %}aria-current="page"{% endif %}>匯入 CSV</a>
     </div></div>
   </div></nav>
   <main class="app-container page-shell" id="main-content" tabindex="-1">{% for category, message in get_flashed_messages(with_categories=true) %}<div class="alert alert-{{ category }} alert-dismissible fade show">{{ message }}<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="關閉通知"></button></div>{% endfor %}{% block content %}{% endblock %}</main>

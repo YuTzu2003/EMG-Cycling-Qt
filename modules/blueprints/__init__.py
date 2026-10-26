@@ -6,7 +6,7 @@ import secrets
 from pathlib import Path
 
 from dotenv import load_dotenv
-from flask import Blueprint, Flask, abort, render_template, request
+from flask import Blueprint, Flask, abort, render_template, request, session
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.middleware.proxy_fix import ProxyFix
 
@@ -50,10 +50,23 @@ def create_app(test_config: dict | None = None) -> Flask:
     if app.config["REQUIRE_HTTPS"]:
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
 
+    @app.context_processor
+    def csrf_context():
+        token = session.get("csrf_token")
+        if not token:
+            token = secrets.token_urlsafe(32)
+            session["csrf_token"] = token
+        return {"csrf_token": token}
+
     @app.before_request
-    def require_https():
+    def protect_requests():
         if app.config["REQUIRE_HTTPS"] and not request.is_secure:
             abort(403, "HTTPS proxy is required for this site.")
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            expected = session.get("csrf_token", "")
+            supplied = request.form.get("csrf", "")
+            if not expected or not secrets.compare_digest(expected, supplied):
+                abort(400, "Invalid CSRF token.")
 
     @app.errorhandler(RequestEntityTooLarge)
     def too_large(_error):

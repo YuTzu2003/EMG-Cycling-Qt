@@ -530,6 +530,11 @@
     margin: 0 0 18px
 }
 
+.analysis-page-actions-right {
+    justify-content: flex-end;
+    gap: 8px;
+}
+
 .analysis-page-actions .btn {
     min-height: 42px
 }

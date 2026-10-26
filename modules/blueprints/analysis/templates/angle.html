@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block title %}踩踏角度分析{% endblock %}
 {% block content %}
-<div class="analysis-page-actions"><a class="btn btn-outline-secondary" data-history-back
+<div class="analysis-page-actions analysis-page-actions-right"><button class="btn btn-outline-dark" type="button" data-bs-toggle="modal" data-bs-target="#angle-advanced-modal">進階設定</button><a class="btn btn-outline-secondary" data-history-back
         href="{{ url_for('analysis.session_detail', session_id=record.session_id, view='angle') }}">← 返回上一頁</a><a
         class="btn btn-export" data-angle-pdf
         href="{{ url_for('analysis.download_pdf_report', session_id=record.session_id) }}">匯出 PDF</a></div>
@@ -15,7 +15,7 @@
 <div class="alert alert-warning">此測試未保存 EMG 與踏板角度原始 CSV，且資料庫資料不足以重建相對踩踏相位。</div>
 {% endif %}
 {% if analysis_error %}<div class="alert alert-warning">無法自動完成角度分析：{{ analysis_error }}</div>{% endif %}
-<form method="post" class="surface form-panel mb-4 angle-settings-form"><input type="hidden" name="csrf"
+<form method="post" id="angle-settings-form" class="surface form-panel mb-4 angle-settings-form"><input type="hidden" name="csrf"
         value="{{ csrf_token }}">
     <div class="d-flex justify-content-between align-items-start gap-3 flex-wrap">
         <div>
@@ -58,6 +58,7 @@
         </div>
     </details>
 </form>
+<div class="modal fade" id="angle-advanced-modal" tabindex="-1" aria-labelledby="angle-advanced-title" aria-hidden="true"><div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><div><h2 class="modal-title fs-5" id="angle-advanced-title">角度分析進階設定</h2><p class="text-secondary small mb-0">設定會在按下「重新分析」後套用。</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="關閉"></button></div><div class="modal-body"><div id="angle-advanced-modal-fields"></div></div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">完成設定</button></div></div></div></div>
 {% if database_result %}<section class="surface form-panel mb-4">
     <div class="d-flex justify-content-between align-items-center gap-3 flex-wrap">
         <div>
@@ -109,3 +110,16 @@
     <pre class="json-block mb-0">{{ result.settings_sync_json }}</pre>
 </div>{% endif %}
 {% endblock %}
+{% block scripts %}<script>
+  const advancedSettings = document.querySelector('.angle-advanced');
+  const advancedModalFields = document.getElementById('angle-advanced-modal-fields');
+  if (advancedSettings && advancedModalFields) {
+    advancedSettings.querySelectorAll('input, select, textarea').forEach((field) => {
+      field.setAttribute('form', 'angle-settings-form');
+    });
+    Array.from(advancedSettings.children).forEach((element) => {
+      if (element.tagName !== 'SUMMARY') advancedModalFields.appendChild(element);
+    });
+    advancedSettings.remove();
+  }
+</script>{% endblock %}

@@ -5,8 +5,9 @@
 </div>
 <div class="surface form-panel upload-panel">
     <form method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <div class="mb-4"><label class="form-label" for="test_id">套用到既有測試（選填）</label><select class="form-select form-select-lg" name="test_id" id="test_id"><option value="">建立新的測試紀錄</option><optgroup label="既有測試">{% for test in tests %}<option value="{{ test.session_id }}" {% if selected_test_id == test.session_id %}selected{% endif %}>{{ test.started_at[:16]|replace('T', ' ')|replace('-', '/') }}　｜　{{ test.name or test.patient_id }}　｜　EMG {{ test.emg_count }}　踏板 {{ test.pedal_count }}　阻力 {{ test.trainer_count }}</option>{% endfor %}</optgroup></select><div class="form-text">選擇既有測試時，將以本次原始 CSV 重新分析並覆蓋該測試的 EMG、踏板、阻力與來源檔資料。</div></div>
         <div class="mb-4"><label class="form-label" for="patient_id">病人</label><select
-                class="form-select form-select-lg" name="patient_id" id="patient_id" required>
+                class="form-select form-select-lg" name="patient_id" id="patient_id">
                 <option value="">選擇病人</option>{% for person in patients %}<option value="{{ person.patient_id }}">{{ person.name }} · {{ person.patient_id }}</option>{% endfor %}
             </select>
             <div class="form-text">沒有病人？<a href="{{ url_for('patients.patients') }}">先建立病人</a></div>

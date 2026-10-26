@@ -43,6 +43,7 @@
     <header class="session-results-heading">
       <div>
         <h2 id="session-results-title">{{ '受測者的測試' if selected_patient else '全部測試' }}</h2>
+        <a class="btn btn-success mt-2" href="{{ url_for('analysis.upload') }}">匯入原始資料</a>
       </div>
       {% if selected_patient and patient_record_count >= 2 %}<a class="btn btn-outline-dark"
         href="{{ url_for('analysis.compare', patient_id=selected_patient) }}">比較此受測者</a>{% endif %}
