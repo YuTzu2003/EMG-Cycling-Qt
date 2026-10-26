@@ -3225,15 +3225,20 @@ class TrignoWindow(QMainWindow):
         return max(0.0, time.monotonic() - self.rideStartedAt)
 
     def beginRideAnalysis(self) -> None:
+        """Reset every live-analysis view before a new collection begins."""
         self.saveDatabaseButton.setText("儲存進資料庫")
         self.discardButton.setText("捨棄本次測試")
         self.summaryRecords = []
         self.latestPedalRecords = []
+        self.summarySourceLabel.setText("分析資料：等待本次測試")
         self.refreshSummaryAnalysis()
         for history in self.histories:
             history.clear()
         self.rebuildPlots()
         self.sampleLabel.setText("0 samples")
+        self.rideMuscleTable.setRowCount(0)
+        self.rideStateLabel.setText("準備收集")
+        FluentThemeManager.set_property(self.rideStateLabel, "fluentSeverity", "info")
         self.pendingAutoAngleAnalysis = False
         self.angleEmgPath = None
         self.anglePedalPath = None
@@ -3254,6 +3259,7 @@ class TrignoWindow(QMainWindow):
         self.countdownDeadline = None
         self.saveDatabaseButton.setEnabled(False)
         self.angleExportButton.setEnabled(False)
+        self.exportReportButton.setEnabled(False)
         baselines = {str(slot): asdict(record) for slot, record in self.baselineManager.records.items()}
         self.rideSession = new_session(asdict(self.collectionSubject), baselines)
         self.rideSession["filter"] = asdict(self.filterSettings)
@@ -3269,6 +3275,9 @@ class TrignoWindow(QMainWindow):
         self.currentSessionSummaryButton.setEnabled(True)
         self.refreshRideAnalysis()
         self.refreshComparison()
+        # refreshRideAnalysis renders the empty live session too; reporting
+        # remains unavailable until finishRideAnalysis has real test data.
+        self.exportReportButton.setEnabled(False)
 
     def startAutomaticAngleAnalysis(self) -> None:
         if not self.pendingAutoAngleAnalysis:
@@ -4908,6 +4917,14 @@ class TrignoWindow(QMainWindow):
         if self.remainingSeconds > 0:
             self.collectionStoppedEarly = True
         self.stopGoProRecording()
+        # Freeze the independent cycling-device recordings at the user's stop
+        # request.  Waiting for StreamWorker.finished() is unsafe: its queued
+        # EMG frame signals can keep the GUI event loop busy while BLE telemetry
+        # continues to arrive, causing Pedal/Trainer CSVs to outlive the EMG CSV.
+        # The close methods are idempotent, so streamFinished() may still call
+        # them as a normal cleanup fallback.
+        self.closeTrainerRecording()
+        self.closePedalRecording()
         if self.bikeOnlySession:
             self.finishBikeOnlySession()
             return
