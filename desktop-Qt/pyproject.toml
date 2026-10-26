@@ -1,0 +1,34 @@
+[project]
+name = "emg-cycling"
+version = "0.1.0"
+description = "Delsys Trigno EMG acquisition and smart-trainer control application"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "bleak>=0.22",
+    "fit-tool>=0.9.16",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scipy>=1.14",
+    "matplotlib>=3.9",
+    "PySide6>=6.8",
+    "pyqtgraph>=0.13",
+    "mssql-python>=1.0"
+]
+
+[tool.uv]
+required-environments = [
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
+
+[tool.uv.build-backend]
+module-name = "delsys"
+
+[project.scripts]
+emg-cycling = "delsys.gui:main"
+emg-record = "delsys.emg_cli:main"
+delsys = "delsys.emg_cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.9,<0.13.0"]
+build-backend = "uv_build"

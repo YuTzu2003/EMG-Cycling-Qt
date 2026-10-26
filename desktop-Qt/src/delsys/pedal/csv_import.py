@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import math
 from pathlib import Path
-from emg_rehab.pedal.analysis import MAX_SESSION_SECONDS
 
 
 def _number(value: str | None) -> float | None:
@@ -36,16 +35,11 @@ def load_pedal_csv(path: Path) -> list[dict]:
         if missing:
             raise ValueError("踏板 CSV 缺少欄位：" + "、".join(sorted(missing)))
         rows = []
-        minimum = maximum = None
         for line, source in enumerate(reader, start=2):
             timestamp = _number(source.get("timestamp"))
             session_seconds = _number(source.get("session_seconds"))
             if timestamp is None or session_seconds is None:
                 raise ValueError(f"踏板 CSV 第 {line} 行的時間無效。")
-            minimum = timestamp if minimum is None else min(minimum, timestamp)
-            maximum = timestamp if maximum is None else max(maximum, timestamp)
-            if not math.isfinite(maximum - minimum) or maximum - minimum > MAX_SESSION_SECONDS:
-                raise ValueError("踏板資料時間範圍不可超過 24 小時。")
             row = {key: _number(source.get(key)) for key in columns}
             row.update(timestamp=timestamp, session_seconds=session_seconds)
             if row["left_balance_percent"] is None and row["right_balance_percent"] is not None:

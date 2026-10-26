@@ -1,0 +1,98 @@
+[
+  {
+    "slot": 1,
+    "chinese_name": "右股內側肌",
+    "english_name": "Vastus medialis",
+    "abbreviation": "VM-R"
+  },
+  {
+    "slot": 2,
+    "chinese_name": "右股直肌",
+    "english_name": "Rectus femoris",
+    "abbreviation": "RF-R"
+  },
+  {
+    "slot": 3,
+    "chinese_name": "右股外側肌",
+    "english_name": "Vastus lateralis",
+    "abbreviation": "VL-R"
+  },
+  {
+    "slot": 4,
+    "chinese_name": "左股內側肌",
+    "english_name": "Vastus medialis",
+    "abbreviation": "VM-L"
+  },
+  {
+    "slot": 5,
+    "chinese_name": "左股直肌",
+    "english_name": "Rectus femoris",
+    "abbreviation": "RF-L"
+  },
+  {
+    "slot": 6,
+    "chinese_name": "左股外側肌",
+    "english_name": "Vastus lateralis",
+    "abbreviation": "VL-L"
+  },
+  {
+    "slot": 7,
+    "chinese_name": "右脛前肌",
+    "english_name": "Tibialis anterior",
+    "abbreviation": "TA-R"
+  },
+  {
+    "slot": 8,
+    "chinese_name": "左脛前肌",
+    "english_name": "Tibialis anterior",
+    "abbreviation": "TA-L"
+  },
+  {
+    "slot": 9,
+    "chinese_name": "",
+    "english_name": "",
+    "abbreviation": ""
+  },
+  {
+    "slot": 10,
+    "chinese_name": "右股二頭肌",
+    "english_name": "Biceps femoris",
+    "abbreviation": "BF-R"
+  },
+  {
+    "slot": 11,
+    "chinese_name": "左股二頭肌",
+    "english_name": "Biceps femoris",
+    "abbreviation": "BF-L"
+  },
+  {
+    "slot": 12,
+    "chinese_name": "右比目魚肌",
+    "english_name": "Soleus",
+    "abbreviation": "SOL-R"
+  },
+  {
+    "slot": 13,
+    "chinese_name": "右腓腸肌",
+    "english_name": "Gastrocnemius",
+    "abbreviation": "GAS-R"
+  },
+  {
+    "slot": 14,
+    "chinese_name": "左比目魚肌",
+    "english_name": "Soleus",
+    "abbreviation": "SOL-L"
+  },
+  {
+    "slot": 15,
+    "chinese_name": "",
+    "english_name": "",
+    "abbreviation": ""
+  },
+  {
+    "slot": 16,
+    "chinese_name": "左腓腸肌",
+    "english_name": "Gastrocnemius",
+    "abbreviation": "GAS-L"
+  }
+]

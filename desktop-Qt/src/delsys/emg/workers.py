@@ -5,8 +5,8 @@ import time
 from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QThread, Signal
-from emg_rehab.emg.sensor_mapping import SensorMapping, csvColumnNames
-from .device_stream import CHANNEL_COUNT, TrignoClient, TrignoError
+from .sensor_mapping import SensorMapping, csvColumnNames
+from .trigno import CHANNEL_COUNT, TrignoClient, TrignoError
 
 class ConnectionWorker(QThread):
     connected = Signal(str)

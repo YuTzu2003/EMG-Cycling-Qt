@@ -2,8 +2,6 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping
 
-MAX_SESSION_SECONDS = 24 * 60 * 60
-
 def _number(record: Mapping, key: str) -> float | None:
     value = record.get(key)
     try:
@@ -72,9 +70,6 @@ def analyze_pedal_records(records: Iterable[Mapping], ftp_w: int) -> dict:
                 "intensity_factor": None, "tss": None, "energy_kj": None,
                 "observed_seconds": 0, "missing_seconds": 0, "coverage_percent": None,
                 "coasting_seconds": 0, "peak_5s_w": None, "peak_60s_w": None}
-    span = _number(timed[-1], "timestamp") - _number(timed[0], "timestamp")
-    if not math.isfinite(span) or span > MAX_SESSION_SECONDS:
-        raise ValueError("踏板資料時間範圍不可超過 24 小時。")
     start = _number(timed[0], "timestamp") or 0.0
     series: list[dict[str, float | None]] = []
     last_cadence: float | None = None

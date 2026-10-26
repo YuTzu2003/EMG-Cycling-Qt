@@ -35,11 +35,10 @@ GOPRO_WIFI_PASSWORD_UUID = "b5f90003-aa8d-11e3-9046-0002a5d5c51b"
 DEVICE_MODEL_UUID = "00002a24-0000-1000-8000-00805f9b34fb"
 FIRMWARE_REVISION_UUID = "00002a26-0000-1000-8000-00805f9b34fb"
 SET_THIRD_PARTY_CLIENT_INFO = bytes((0x50,))
-# Match the reference application's "影片模式" command.  The shutter command
-# otherwise takes a photo or starts a time-lapse when the camera was left in a
-# different capture mode.
 START_RECORDING = bytes((0x01, 0x01, 0x01))
 STOP_RECORDING = bytes((0x01, 0x01, 0x00))
+# Select video before opening the shutter; otherwise it can take a photo.
+VIDEO_MODE = bytes((0x02, 0x01, 0x00))
 # Setting 91 (LED) with the special value 0x42 is the Open GoPro BLE
 # keep-alive message.  It is intentionally sent on the Setting characteristic,
 # not on the Command characteristic.
@@ -131,6 +130,8 @@ async def send_recording_command(
                 details.append("Windows Bluetooth pairing: skipped or already paired")
             await write_command(client, "Set third-party client info", SET_THIRD_PARTY_CLIENT_INFO)
             if action == "start":
+                await write_command(client, "Select video mode", VIDEO_MODE)
+                await asyncio.sleep(0.2)
                 await write_command(client, "Start-recording shutter", START_RECORDING)
                 # Keep the BLE session alive long enough for the camera to
                 # process the capture transition before this one-shot worker
@@ -229,7 +230,8 @@ async def keep_ready_session(
                     continue
 
                 start_requested.clear()
-                stop_recording_requested.clear()
+                await write_command(client, "Select video mode", VIDEO_MODE)
+                await asyncio.sleep(0.2)
                 await write_command(client, "Start-recording shutter", START_RECORDING)
                 completed.emit(result("start", tuple(details)))
 
@@ -286,6 +288,7 @@ class GoProCommandWorker(QThread):
 
     def request_start(self) -> None:
         """Send start through the already-open BLE session."""
+        self._stop_recording_requested.clear()
         self._start_requested.set()
 
     def request_stop(self) -> None:

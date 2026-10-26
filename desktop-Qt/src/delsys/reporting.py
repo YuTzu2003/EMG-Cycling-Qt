@@ -1,9 +1,9 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 import html
 from pathlib import Path
 from collections.abc import Mapping, Iterable
-from emg_rehab.emg.session_analysis import analyze, finite
-from emg_rehab.pedal.analysis import analyze_pedal_records
+from delsys.session_analysis import analyze, finite
+from delsys.pedal.analysis import analyze_pedal_records
 
 def fmt(value, unit='', digits=1):
     value=finite(value)

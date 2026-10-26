@@ -3,8 +3,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-
-CHANNEL_COUNT = 16
+from .trigno import CHANNEL_COUNT
 
 @dataclass(frozen=True)
 class SensorMapping:
@@ -75,7 +74,7 @@ def saveMappings(path: Path, mappings: list[SensorMapping]) -> None:
 
 
 def projectMappingPath() -> Path:
-    return Path(__file__).resolve().parents[2] / "sensor_mapping.json"
+    return Path(__file__).resolve().parents[3] / "sensor_mapping.json"
 
 def loadProjectMappings() -> list[SensorMapping]:
     return loadMappings(projectMappingPath())
@@ -121,19 +120,17 @@ def matchesCsvColumn(mapping: SensorMapping, column: str) -> bool:
     return column.strip().casefold() in {candidate.casefold() for candidate in candidates if candidate}
 
 
-def recordingChannelSides(emg_path: Path, columns: list[str], mappings: list[SensorMapping],
-                          saved_channels: dict | None = None) -> tuple[dict[str, str], str]:
-    saved: dict = saved_channels if saved_channels is not None else {}
-    if saved_channels is None:
-        from emg_rehab.emg.collection import analysisOutputPath
-        for companion in (analysisOutputPath(emg_path), emg_path.with_suffix(".analysis.json")):
-            try:
-                document = json.loads(companion.read_text(encoding="utf-8"))
-                if document.get("raw_files", {}).get("emg") == emg_path.name:
-                    saved = document.get("channels", {})
-                    break
-            except (OSError, ValueError, TypeError):
-                continue
+def recordingChannelSides(emg_path: Path, columns: list[str],mappings: list[SensorMapping]) -> tuple[dict[str, str], str]:
+    saved: dict = {}
+    from delsys.collection import analysisOutputPath
+    for companion in (analysisOutputPath(emg_path), emg_path.with_suffix(".analysis.json")):
+        try:
+            document = json.loads(companion.read_text(encoding="utf-8"))
+            if document.get("raw_files", {}).get("emg") == emg_path.name:
+                saved = document.get("channels", {})
+                break
+        except (OSError, ValueError, TypeError):
+            continue
     sides: dict[str, str] = {}
     sources = set()
     for column in columns:

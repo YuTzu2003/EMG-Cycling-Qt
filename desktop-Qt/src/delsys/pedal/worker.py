@@ -60,18 +60,34 @@ class PedalWorker(QThread):
         if BleakClient is None:
             raise RuntimeError("bleak is not installed")
         await self._disconnect()
-        self.client = BleakClient(address, disconnected_callback=self._handleDisconnected)
-        await self.client.connect()
-        # Reading the feature characteristic verifies this is a Cycling Power device.
-        await self.client.read_gatt_char(CYCLING_POWER_FEATURE)
-        self.lastCrank = None
+        client = BleakClient(address, disconnected_callback=self._handleDisconnected)
+        self.client = client
         def notification(_sender: int, payload: bytearray) -> None:
+            if self.client is not client:
+                return
             try:
                 data, self.lastCrank = decodeCyclingPower(payload, self.lastCrank)
                 self.dataReceived.emit(data)
             except Exception as exc:
                 self.failed.emit(f"P715 packet decode failed: {exc}")
-        await self.client.start_notify(CYCLING_POWER_MEASUREMENT, notification)
+        try:
+            await client.connect()
+            # Reading the feature characteristic verifies this is a Cycling Power device.
+            await client.read_gatt_char(CYCLING_POWER_FEATURE)
+            self.lastCrank = None
+            await client.start_notify(CYCLING_POWER_MEASUREMENT, notification)
+            if self.client is not client or not client.is_connected:
+                raise RuntimeError("踏板在完成連線前已中斷，請喚醒踏板後重試。")
+        except Exception:
+            if self.client is client:
+                self.client = None
+            self.lastCrank = None
+            if client.is_connected:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+            raise
         return address
 
     def connectDevice(self, address: str) -> None:
@@ -79,18 +95,22 @@ class PedalWorker(QThread):
 
     def _handleDisconnected(self, _client) -> None:
         """Bleak calls this immediately when the pedal drops its BLE link."""
+        if _client is not self.client:
+            return
         self.client = None
+        self.lastCrank = None
         self.disconnected.emit()
 
     async def _disconnect(self) -> None:
-        if self.client is not None:
-            if self.client.is_connected:
-                try:
-                    await self.client.stop_notify(CYCLING_POWER_MEASUREMENT)
-                except Exception:
-                    pass
-                await self.client.disconnect()
-            self.client = None
+        client = self.client
+        self.client = None
+        self.lastCrank = None
+        if client is not None and client.is_connected:
+            try:
+                await client.stop_notify(CYCLING_POWER_MEASUREMENT)
+            except Exception:
+                pass
+            await client.disconnect()
 
     def disconnectDevice(self) -> None:
         self.submit(self._disconnect(), lambda _value: self.disconnected.emit())

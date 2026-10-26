@@ -1,5 +1,6 @@
 from __future__ import annotations
 import csv
+import math
 import sys
 import time
 from dataclasses import asdict
@@ -13,28 +14,27 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPalette
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QScrollArea, QSpinBox,QPlainTextEdit, QTabWidget, QVBoxLayout, QWidget, QInputDialog,
       QTableWidget, QTableWidgetItem, QHeaderView, QDoubleSpinBox, QToolButton, QStyle, QGraphicsProxyWidget, QSizePolicy,)
-from emg_rehab.emg.collection import CollectionInfoRecorder, SubjectInfo, analysisOutputPath, infoOutputPath
-from emg_rehab.emg.body_map import BodyMapPanel
-from emg_rehab.emg.sensor_mapping import (SensorMapping, duplicateMappingSlots, loadMappings, saveMappings, matchesCsvColumn, recordingChannelSides, projectMappingPath)
-from emg_rehab.emg.device_stream import CHANNEL_COUNT, SAMPLE_RATE
-from emg_rehab.emg.baseline import BaselineManager, CalibrationSession, EMGPreprocessor, FilterSettings, RMSFeatureExtractor, load_raw_emg_csv
-from emg_rehab.emg.stream_workers import ConnectionWorker, StreamWorker
-from emg_rehab.resistance.recording import TrainerCsvRecorder, trainerOutputPath
-from emg_rehab.resistance.trainer import BikeTelemetry, NumericRange, TrainerWorker
-from emg_rehab.pedal.recording import PedalCsvRecorder, pedalOutputPath
-from emg_rehab.pedal.analysis import analyze_pedal_records, pedal_analysis_lines, pedal_summary_lines, summarize_pedal_records
-from emg_rehab.pedal.worker import PedalWorker
-from emg_rehab.pedal.fit_export import exportPedalFit
-from emg_rehab.pedal.csv_import import is_calibrated_angle_csv, load_pedal_csv
-from emg_rehab.pedal.angle_emg import (AngleSettings, _angles, analysis_summary_text, analyze_angle_emg,export_angle_emg, phase_intensities)
-from emg_rehab.cycling_bluetooth import CyclingDeviceScanWorker
-from emg_rehab.gopro import GoProCommandWorker, GoProDownloadWorker, GoProMediaListWorker, GoProResult, GoProWifiConnectWorker
-from emg_rehab.fluent_theme import FluentThemeManager
-from emg_rehab.emg.session_analysis import (add_point, analyze, compare_rms, load_session, new_session, peak_envelope, save_session)
-from emg_rehab.emg.session_compare import compare_sessions
-from emg_rehab.database.storage_db import DatabaseConfig, SqlServerStorage, prefixed_id
-from emg_rehab.emg.reporting import export_report
-from emg_rehab.database.archive import Archive, default_config
+from delsys.collection import CollectionInfoRecorder, SubjectInfo, analysisOutputPath, infoOutputPath
+from delsys.emg.body_map import BodyMapPanel
+from delsys.emg.sensor_mapping import (SensorMapping, duplicateMappingSlots, loadMappings, saveMappings, matchesCsvColumn, recordingChannelSides)
+from delsys.emg.trigno import CHANNEL_COUNT, SAMPLE_RATE
+from delsys.emg.baseline import BaselineManager, BaselineRecord, CalibrationSession, EMGPreprocessor, FilterSettings, RMSFeatureExtractor, load_raw_emg_csv
+from delsys.emg.workers import ConnectionWorker, StreamWorker
+from delsys.resistance.recording import TrainerCsvRecorder, trainerOutputPath
+from delsys.resistance.trainer import BikeTelemetry, NumericRange, TrainerWorker
+from delsys.pedal.recording import PedalCsvRecorder, pedalOutputPath
+from delsys.pedal.analysis import analyze_pedal_records, pedal_analysis_lines, pedal_summary_lines, summarize_pedal_records
+from delsys.pedal.worker import PedalWorker
+from delsys.pedal.fit_export import exportPedalFit
+from delsys.pedal.csv_import import is_calibrated_angle_csv, load_pedal_csv
+from delsys.pedal.angle_emg import (AngleSettings, _angles, analysis_summary_text, analyze_angle_emg,export_angle_emg, phase_intensities)
+from delsys.cycling_bluetooth import CyclingDeviceScanWorker
+from delsys.gopro import GoProCommandWorker, GoProDownloadWorker, GoProMediaListWorker, GoProResult, GoProWifiConnectWorker
+from delsys.fluent_theme import FluentThemeManager
+from delsys.session_analysis import (add_point, analyze, compare_rms, load_session, new_session, peak_envelope, save_session)
+from delsys.session_compare import compare_sessions
+from delsys.storage_db import DatabaseConfig, DatabaseWriter, SecondAggregator, SqlServerStorage, prefixed_id
+from delsys.reporting import export_report
 
 COLORS = (
     "#1684d7", "#e95f54", "#7e57c2", "#00897b",
@@ -42,28 +42,7 @@ COLORS = (
     "#00a6a6", "#d1495b", "#725ac1", "#6b8e23",
     "#d97706", "#0077b6", "#9d4edd", "#e76f51",
 )
-MAPPING_PATH = projectMappingPath()
-
-
-class ArchiveWorker(QThread):
-    archived = Signal(str)
-    failed = Signal(str)
-
-    def __init__(self, config: DatabaseConfig, session: dict, files: dict[str, Path],
-                 test_id: str | None, status: str = "完成"):
-        super().__init__()
-        self.config, self.session, self.files, self.test_id = config, session, files, test_id
-        self.status = status
-        self.identifier: str | None = None
-
-    def run(self) -> None:
-        try:
-            identifier = Archive(self.config).save_recording(
-                self.session, self.files, session_id=self.test_id, status=self.status)
-            self.identifier = identifier
-            self.archived.emit(identifier)
-        except Exception as exc:
-            self.failed.emit(str(exc))
+MAPPING_PATH = Path(__file__).resolve().parents[2] / "sensor_mapping.json"
 
 class AngleAnalysisWorker(QThread):
     completed = Signal(object)
@@ -549,7 +528,7 @@ class PedalSummaryDialog(QDialog):
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
 
-class EmgRehabilitationWindow(QMainWindow):
+class TrignoWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("EMG Cycling Monitor")
@@ -566,7 +545,7 @@ class EmgRehabilitationWindow(QMainWindow):
         self.pedalBluetoothReady = False
         self.initialBluetoothScanStarted = False
         self.selectedScannedDevice: tuple[str, str] | None = None
-        self.settings = QSettings("EMG Rehab System", "EMG Rehabilitation Desktop")
+        self.settings = QSettings("Delsys", "EMG Cycling Monitor")
         self.goproWorker: GoProCommandWorker | None = None
         self.goproDownloadWorker: GoProDownloadWorker | None = None
         self.goproMediaListWorker: GoProMediaListWorker | None = None
@@ -596,6 +575,7 @@ class EmgRehabilitationWindow(QMainWindow):
         self.sensorIcons: list[QLabel] = []
         self.sensorRows: list[QFrame] = []
         self.sensorActive = [False] * CHANNEL_COUNT
+        self.sensorStatesKnown = False
         self.sensorSerials: dict[int, str] = {}
         self.curves: dict[int, tuple[pg.PlotItem, pg.PlotDataItem, pg.TextItem]] = {}
         self.collectionSummary: tuple[int, float, float] | None = None
@@ -618,10 +598,25 @@ class EmgRehabilitationWindow(QMainWindow):
         self.referenceRideSession: dict | None = None
         self.rideStartedAt = 0.0
         self.lastEmgAnalysisAt = 0.0
-        self.archiveWorkers: set[ArchiveWorker] = set()
-        self.archiveLastTestId: str | None = None
-        self.archiveUploadedTestId: str | None = None
-        self.archiveUploading = False
+        self.databaseWriter: DatabaseWriter | None = None
+        self.databaseWriters: set[DatabaseWriter] = set()
+        self.databaseAggregator: SecondAggregator | None = None
+        self.databaseStartPayload: dict | None = None
+        self.databaseBufferedRows: dict[str, list[dict]] = {"emg": [], "pedal": [], "trainer": []}
+        self.databasePendingSave: tuple[dict, dict[str, list[dict]], dict] | None = None
+        self.pendingBaselineRecords: dict[int, BaselineRecord] | None = None
+        self.previousBaselineRecords: dict[int, BaselineRecord] | None = None
+        self.currentTestDecision: str | None = None
+        self.decisionBeforeCalibration: str | None = None
+        self.countdownStartedAt: float | None = None
+        self.countdownStoppedAt: float | None = None
+        self.countdownDeadline: float | None = None
+        self.databaseTestId: str | None = None
+        self.databaseLastTestId: str | None = None
+        self.databaseComparePendingPatient: str | None = None
+        self.databaseComparePendingTestId: str | None = None
+        self.databaseDiscardAfterWriter: dict[DatabaseWriter, str] = {}
+        self.databaseStartedAt: datetime | None = None
         self.activeDatabaseConfig: DatabaseConfig | None = None
         self.discardCurrentCollection = False
         self.bikeOnlySession = False
@@ -658,7 +653,6 @@ class EmgRehabilitationWindow(QMainWindow):
         self.lastDistanceRejectAt = 0.0
         self.distanceSessionActive = False
         self.buildUi()
-        self.loadArchivePatients()
         if hasattr(QApplication.instance().styleHints(), "colorSchemeChanged"):
             QApplication.instance().styleHints().colorSchemeChanged.connect(self.onSystemThemeChanged)
         self.applySummaryPlotTheme()
@@ -712,7 +706,8 @@ class EmgRehabilitationWindow(QMainWindow):
         self.startButton.setText("開始收集資料")
         self.tabs.addTab(self.settingsTab, "設定")
         self.tabs.addTab(self.collectionTab, "收集資料")
-        # Analysis and historical comparison are available in the Flask portal.
+        self.tabs.addTab(self.summaryTab, "後續分析")
+        self.tabs.addTab(self.comparisonTab, "測試比較")
         self.tabs.currentChanged.connect(self.onMainTabChanged)
         outer.addWidget(self.tabs, 1)
 
@@ -784,37 +779,31 @@ class EmgRehabilitationWindow(QMainWindow):
         subjectLayout.setContentsMargins(14, 12, 14, 12)
         subjectLayout.setHorizontalSpacing(12)
         subjectLayout.setVerticalSpacing(10)
-        subjectLayout.addWidget(QLabel("受試者資料", objectName="sectionTitle"), 0, 0, 1, 4)
+        subjectLayout.addWidget(QLabel("受試者資料", objectName="sectionTitle"), 0, 0, 1, 6)
+        self.patientIdEdit = QLineEdit()
+        self.patientIdEdit.setPlaceholderText("必填")
         self.patientNameEdit = QLineEdit()
-        self.patientNameEdit.setReadOnly(True)
+        self.patientNameEdit.setPlaceholderText("必填")
         self.genderCombo = QComboBox()
-        self.genderCombo.addItems(("未指定", "男性", "女性", "其他"))
-        self.genderCombo.setEnabled(False)
-        self.archivePatientCombo = QComboBox()
-        self.archivePatientCombo.setMinimumWidth(260)
-        self.archivePatientCombo.setToolTip("從網站建立的受測者清單選擇，姓名與性別會自動帶入")
-        self.archivePatientCombo.currentIndexChanged.connect(self.archivePatientSelected)
-        self.reloadPatientsButton = QPushButton("重新整理受測者")
-        self.reloadPatientsButton.clicked.connect(self.loadArchivePatients)
-        subjectLayout.addWidget(self.reloadPatientsButton, 0, 6, 1, 2)
-        subjectLayout.addWidget(QLabel("選擇受測者"), 1, 0)
-        subjectLayout.addWidget(self.archivePatientCombo, 1, 1, 1, 3)
-        subjectLayout.addWidget(QLabel("姓名"), 1, 4)
-        subjectLayout.addWidget(self.patientNameEdit, 1, 5)
-        subjectLayout.addWidget(QLabel("性別"), 1, 6)
-        subjectLayout.addWidget(self.genderCombo, 1, 7)
-        subjectLayout.addWidget(QLabel("資料輸出"), 2, 0)
+        self.genderCombo.addItems(("未指定", "男性", "女性"))
+        subjectLayout.addWidget(QLabel("ID"), 1, 0)
+        subjectLayout.addWidget(self.patientIdEdit, 1, 1)
+        subjectLayout.addWidget(QLabel("姓名"), 1, 2)
+        subjectLayout.addWidget(self.patientNameEdit, 1, 3)
+        subjectLayout.addWidget(QLabel("性別"), 1, 4)
+        subjectLayout.addWidget(self.genderCombo, 1, 5)
+        subjectLayout.addWidget(QLabel("\u8cc7\u6599\u8f38\u51fa"), 1, 6)
         self.pathEdit = QLineEdit()
         self.pathEdit.setPlaceholderText("\u8acb\u9078\u64c7 CSV \u8207\u651d\u5f71\u6a5f\u5f71\u7247\u7684\u8f38\u51fa\u8cc7\u6599\u593e")
         self.pathEdit.setText(str(self.settings.value("output/directory", "")).strip())
         self.browseButton = QPushButton("\u9078\u64c7\u8cc7\u6599\u593e")
         self.browseButton.setToolTip("\u9078\u64c7 CSV \u8207\u651d\u5f71\u6a5f\u5f71\u7247\u5171\u7528\u7684\u8f38\u51fa\u8cc7\u6599\u593e")
-        subjectLayout.addWidget(self.pathEdit, 2, 1, 1, 6)
-        subjectLayout.addWidget(self.browseButton, 2, 7)
-        self.patientNameEdit.setMinimumWidth(160)
+        subjectLayout.addWidget(self.pathEdit, 1, 7)
+        subjectLayout.addWidget(self.browseButton, 1, 8)
+        self.patientIdEdit.setFixedWidth(160)
+        self.patientNameEdit.setFixedWidth(180)
         self.genderCombo.setFixedWidth(100)
-        subjectLayout.setColumnStretch(3, 1)
-        subjectLayout.setColumnStretch(5, 1)
+        subjectLayout.setColumnStretch(7, 1)
         self.browseButton.clicked.connect(self.chooseOutput)
         self.pathEdit.editingFinished.connect(self.saveOutputDirectory)
         layout.addWidget(subject)
@@ -837,7 +826,7 @@ class EmgRehabilitationWindow(QMainWindow):
         usageGuideLayout.setSpacing(8)
         usageGuideLayout.addWidget(QLabel("\u64cd\u4f5c\u8aaa\u660e", objectName="sectionTitle"))
         usageGuideText = QLabel(
-            "1. \u9078\u64c7\u53d7\u8a66\u8005\u8207\u8cc7\u6599\u8f38\u51fa\u8cc7\u6599\u593e\n"
+            "1. \u586b\u5beb\u53d7\u8a66\u8005\u8cc7\u6599\u8207\u8cc7\u6599\u8f38\u51fa\u8cc7\u6599\u593e\n"
             "2. \u6307\u5b9a\u963b\u529b\u8a08\u3001\u8e0f\u677f\u8207\u651d\u5f71\u6a5f\u88dd\u7f6e\n"
             "3. \u6e2c\u8a66 EMG \u3001\u651d\u5f71\u6a5f\u8207\u8cc7\u6599\u5eab\u9023\u7dda\n"
             "4. \u78ba\u8a8d\u5404\u88dd\u7f6e\u8207\u8cc7\u6599\u5eab\u7684\u9023\u7dda\u72c0\u614b\n"
@@ -851,8 +840,8 @@ class EmgRehabilitationWindow(QMainWindow):
         bluetooth = QFrame()
         FluentThemeManager.set_property(bluetooth, "fluentRole", "surface")
         bluetoothLayout = QVBoxLayout(bluetooth)
-        bluetoothLayout.setContentsMargins(14, 12, 14, 12)
-        bluetoothLayout.setSpacing(8)
+        bluetoothLayout.setContentsMargins(14, 8, 14, 8)
+        bluetoothLayout.setSpacing(4)
         bluetoothHeader = QHBoxLayout()
         bluetoothHeader.addWidget(QLabel("騎乘裝置藍牙", objectName="sectionTitle"))
         bluetoothHeader.addStretch()
@@ -902,6 +891,7 @@ class EmgRehabilitationWindow(QMainWindow):
         inlineMappingLayout.setContentsMargins(0, 8, 0, 0)
         inlineMappingLayout.setSpacing(6)
         self.inlineMappingEdits: list[tuple[QLineEdit, QLineEdit, QLineEdit]] = []
+        self.inlineSensorStateLabels: list[QLabel] = []
         mappingContent = QWidget()
         mappingGrid = QGridLayout(mappingContent)
         mappingGrid.setContentsMargins(0, 0, 0, 0)
@@ -915,10 +905,11 @@ class EmgRehabilitationWindow(QMainWindow):
             slot = QLabel(f"S{mapping.slot:02d}")
             slot.setAlignment(Qt.AlignmentFlag.AlignCenter)
             mappingGrid.addWidget(slot, row, 0)
-            state = QLabel("\u5df2\u555f\u7528" if self.sensorActive[mapping.slot - 1] else "\u5f85\u9023\u7dda")
+            state = QLabel("待測試")
             state.setAlignment(Qt.AlignmentFlag.AlignCenter)
             FluentThemeManager.set_property(state, "fluentSeverity", "success" if self.sensorActive[mapping.slot - 1] else "info")
             mappingGrid.addWidget(state, row, 1)
+            self.inlineSensorStateLabels.append(state)
             chinese = QLineEdit(mapping.chinese_name)
             english = QLineEdit(mapping.english_name)
             abbreviation = QLineEdit(mapping.abbreviation)
@@ -1018,16 +1009,11 @@ class EmgRehabilitationWindow(QMainWindow):
         databaseLayout.addWidget(QLabel("SQL Server 資料庫", objectName="sectionTitle"))
         self.databaseStatusLabel = QLabel("填入帳密後測試連線，即可載入資料庫。", objectName="muted")
         databaseLayout.addWidget(self.databaseStatusLabel)
-        self.databaseServerEdit = QLineEdit(default_config().server)
-        self.databaseUserEdit = QLineEdit(default_config().username)
+        self.databaseServerEdit = QLineEdit("127.0.0.1")
+        self.databaseUserEdit = QLineEdit("Rehab-User")
         self.databasePasswordEdit = QLineEdit()
-        self.databasePasswordEdit.setText(default_config().password)
         self.databasePasswordEdit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.databaseServerEdit.setReadOnly(True)
-        self.databaseUserEdit.setReadOnly(True)
-        self.databasePasswordEdit.setReadOnly(True)
         self.databaseNameCombo = QComboBox()
-        self.databaseNameCombo.addItem(default_config().database)
         self.databaseNameCombo.setEnabled(False)
         self.databaseNameCombo.setPlaceholderText("先測試連線以載入資料庫")
         self.databaseTestButton = QPushButton("測試連線")
@@ -1088,7 +1074,11 @@ class EmgRehabilitationWindow(QMainWindow):
         return tab
 
     def databaseConfig(self) -> DatabaseConfig:
-        return default_config()
+        database = self.databaseNameCombo.currentText().strip() or "master"
+        return DatabaseConfig(
+            server=self.databaseServerEdit.text().strip(), database=database,
+            username=self.databaseUserEdit.text().strip(), password=self.databasePasswordEdit.text(),
+        )
 
     def databaseConnectionEdited(self, *_args) -> None:
         self.activeDatabaseConfig = None
@@ -1096,23 +1086,35 @@ class EmgRehabilitationWindow(QMainWindow):
         self.setDatabaseConnectionState(False)
 
     def testDatabaseConnection(self) -> None:
+        credentials = DatabaseConfig(
+            server=self.databaseServerEdit.text().strip(), database="master",
+            username=self.databaseUserEdit.text().strip(), password=self.databasePasswordEdit.text(),
+        )
         try:
+            store = SqlServerStorage(credentials)
+            databases = store.list_databases()
+            store.close()
+            if not databases:
+                raise RuntimeError("此帳號沒有可連線的資料庫。")
+            selected = self.databaseNameCombo.currentText()
+            self.databaseNameCombo.clear()
+            self.databaseNameCombo.addItems(databases)
+            self.databaseNameCombo.setEnabled(True)
+            preferred = "RehabPatients-ylh"
+            self.databaseNameCombo.setCurrentText(selected if selected in databases else preferred if preferred in databases else databases[0])
             config = self.databaseConfig()
             store = SqlServerStorage(config)
-            try:
-                name = store.test_connection()
-            finally:
-                store.close()
-            Archive(config).list_patients()
+            name = store.test_connection()
+            store.close()
         except Exception as exc:
             self.activeDatabaseConfig = None
             self.databaseStatusLabel.setText(f"連線失敗：{exc}")
             self.setDatabaseConnectionState(False)
             return
         self.activeDatabaseConfig = config
-        self.databaseStatusLabel.setText(f"已連線：{name}；量測與封存資料表可用")
-        self.loadArchivePatients()
+        self.databaseStatusLabel.setText(f"已連線：{name}；五張資料表可用")
         self.setDatabaseConnectionState(True)
+        self.saveDatabaseButton.setEnabled(self.databasePendingSave is not None)
         if hasattr(self, "databaseComparePatientCombo"):
             self.loadDatabaseComparisonPatients()
 
@@ -1121,6 +1123,168 @@ class EmgRehabilitationWindow(QMainWindow):
                 and self.activeDatabaseConfig is not None
                 and self.databaseComparePatientCombo.count() == 0):
             self.loadDatabaseComparisonPatients()
+
+    def startDatabaseRecording(self) -> None:
+        config = self.activeDatabaseConfig
+        if config is None:
+            self.appendLog("資料庫未寫入：請先在設定頁測試 SQL Server 連線")
+            return
+        self.databaseLastTestId = None
+        self.databaseTestId = prefixed_id("TEST")
+        self.databaseStartedAt = datetime.now()
+        self.databaseAggregator = SecondAggregator(self.databaseTestId, self.databaseStartedAt)
+        baselines: list[dict] = []
+        for slot, record in self.baselineManager.records.items():
+            mapping = self.mappings[slot - 1]
+            baselines.append({"muscle_name": f"{mapping.chinese_name} ({mapping.abbreviation})", "rms_mv": record.rms_mv,
+                "base_time": 10, "action_type": record.protocol or "基準測試", "yellow_pct": self.baselineManager.warning_percent,
+                "red_pct": self.baselineManager.focus_percent, "quality_status": "VALID"})
+        subject = self.collectionSubject
+        payload = {"test_id": self.databaseTestId, "patient_id": subject.patientId, "name": subject.name,
+            "sex": subject.gender, "action_type": "固定阻力騎乘", "test_time": None,
+            "resistance_level": self.resistanceSpin.value(), "has_baseline": bool(baselines), "notes": "EMG Cycling Monitor",
+            "started_at": self.databaseStartedAt, "baselines": baselines}
+        self.databaseStartPayload = payload
+        self.databaseBufferedRows = {"emg": [], "pedal": [], "trainer": []}
+        self.databasePendingSave = None
+
+    def databaseAddSample(self, kind: str, time_s: float, sample: dict) -> None:
+        if self.databaseAggregator is None:
+            return
+        rows = self.databaseAggregator.add(kind, time_s, sample)
+        if rows:
+            self.databaseBufferedRows[kind].extend(rows)
+
+    def finishDatabaseRecording(self, result: dict | None) -> None:
+        aggregator, test_id = self.databaseAggregator, self.databaseTestId
+        self.databaseAggregator = None
+        self.databaseTestId = None
+        if aggregator is None or test_id is None or self.databaseStartPayload is None:
+            return
+        for kind, rows in aggregator.flush_all().items():
+            if rows:
+                self.databaseBufferedRows[kind].extend(rows)
+        pedal = (result or {}).get("pedal", {})
+        trainer = (result or {}).get("trainer", {})
+        def stat(group: dict, key: str, field: str = "mean"):
+            value = group.get(key, {})
+            return value.get(field) if isinstance(value, dict) else None
+        avg_power = stat(pedal, "power_w") if stat(pedal, "power_w") is not None else stat(trainer, "power_watts")
+        max_power = stat(pedal, "power_w", "max") if stat(pedal, "power_w", "max") is not None else stat(trainer, "power_watts", "max")
+        avg_cadence = stat(pedal, "cadence_rpm") if stat(pedal, "cadence_rpm") is not None else stat(trainer, "cadence_rpm")
+        distance_m = stat(trainer, "session_distance_meters", "max")
+        elapsed = int(round(
+            (self.countdownStoppedAt or time.monotonic()) - self.countdownStartedAt
+        )) if self.countdownStartedAt is not None else int(round(self.rideTime()))
+        status = "失敗" if self.collectionError else ("中斷" if self.collectionStoppedEarly else "完成")
+        finish_payload = {"test_id": test_id, "test_time": elapsed, "status": status,
+            "avg_power_w": avg_power, "max_power_w": max_power,
+            "avg_cadence_rpm": avg_cadence, "distance_km": None if distance_m is None else distance_m / 1000,
+            "left_balance_pct": stat(pedal, "left_balance_percent"),
+            "right_balance_pct": None if stat(pedal, "left_balance_percent") is None else 100 - stat(pedal, "left_balance_percent"),
+            "notes": self.collectionError or ""}
+        self.databasePendingSave = (self.databaseStartPayload, self.databaseBufferedRows, finish_payload)
+        self.databaseStartPayload = None
+        self.saveDatabaseButton.setEnabled(self.activeDatabaseConfig is not None)
+        self.appendLog("本次測試待確認；按「儲存進資料庫」或「捨棄本次測試」")
+
+    def saveCurrentTestToDatabase(self) -> None:
+        pending = self.databasePendingSave
+        config = self.activeDatabaseConfig
+        if pending is None or config is None or self.rideSession is not None or self.bikeOnlySession or self.currentTestDecision is not None:
+            return
+        if self.databaseWriter is not None and self.databaseWriter.isRunning():
+            return
+        start_payload, rows_by_kind, finish_payload = pending
+        writer = DatabaseWriter(config)
+        self.databaseWriter = writer
+        self.databaseWriters.add(writer)
+        self.currentTestDecision = "saving"
+        self.saveDatabaseButton.setEnabled(False)
+        self.discardButton.setEnabled(False)
+        writer.connected.connect(lambda name: self.appendLog(f"資料庫已連線：{name}；TestID {start_payload['test_id']}"))
+        writer.failed.connect(lambda message: self.databaseSaveFailed(message))
+        writer.completed.connect(lambda message: self.databaseSaveCompleted(start_payload, message))
+        writer.finished.connect(lambda: self.databaseWriterFinished(writer))
+        writer.start()
+        writer.enqueue("save", pending)
+        writer.enqueue("stop")
+
+    def databaseSaveFailed(self, message: str) -> None:
+        self.currentTestDecision = None
+        self.appendLog(f"資料庫儲存失敗：{message}")
+        self.saveDatabaseButton.setEnabled(True)
+        self.discardButton.setEnabled(True)
+        QMessageBox.warning(self, "資料庫儲存失敗", f"{message}\n本次測試仍可重試儲存或捨棄。")
+
+    def databaseSaveCompleted(self, start_payload: dict, message: str) -> None:
+        self.appendLog(message)
+        self.currentTestDecision = "saved"
+        self.databasePendingSave = None
+        self.pendingBaselineRecords = None
+        self.previousBaselineRecords = None
+        self.decisionBeforeCalibration = None
+        self.databaseLastTestId = start_payload["test_id"]
+        if start_payload.get("action_type") != "EMG 20 秒基準":
+            self.databaseComparePendingPatient = start_payload["patient_id"]
+            self.databaseComparePendingTestId = start_payload["test_id"]
+
+    def databaseWriterFinished(self, writer: DatabaseWriter) -> None:
+        """Retain every writer until its QThread has actually exited."""
+        discard_test_id = self.databaseDiscardAfterWriter.pop(writer, None)
+        self.databaseWriters.discard(writer)
+        if self.databaseWriter is writer:
+            self.databaseWriter = None
+        writer.deleteLater()
+        self.saveDatabaseButton.setEnabled(
+            self.currentTestDecision is None and self.databasePendingSave is not None
+            and self.activeDatabaseConfig is not None
+        )
+        self.discardButton.setEnabled(
+            self.currentTestDecision is None
+            and (self.collectedRideSession is not None or self.pendingBaselineRecords is not None)
+        )
+        if self.databaseComparePendingTestId:
+            self.loadDatabaseComparisonPatients()
+        if discard_test_id:
+            self.startDatabaseDiscardWorker(discard_test_id)
+
+    def startDatabaseDiscardWorker(self, test_id: str) -> None:
+        """Delete a completed test after its original writer has closed."""
+        config = self.activeDatabaseConfig
+        if config is None:
+            self.appendLog("資料庫捨棄略過：本次沒有可用的資料庫連線設定")
+            return
+        writer = DatabaseWriter(config)
+        self.databaseWriters.add(writer)
+        writer.failed.connect(lambda message: self.appendLog(f"資料庫捨棄失敗：{message}"))
+        writer.completed.connect(lambda _message: self.appendLog("資料庫：已刪除本次測試資料"))
+        writer.finished.connect(lambda: self.databaseWriterFinished(writer))
+        writer.start()
+        writer.enqueue("discard", test_id)
+        writer.enqueue("stop")
+
+    def discardDatabaseRecording(self, active_writer: bool) -> None:
+        """Discard active rows, or wait until a completed writer has drained."""
+        test_id = self.databaseTestId or self.databaseLastTestId
+        writer = self.databaseWriter
+        self.databaseAggregator = None
+        self.databaseStartPayload = None
+        self.databaseBufferedRows = {"emg": [], "pedal": [], "trainer": []}
+        self.databasePendingSave = None
+        self.databaseTestId = None
+        self.databaseLastTestId = None
+        self.saveDatabaseButton.setEnabled(False)
+        if not test_id:
+            return
+        if active_writer and writer is not None and writer.isRunning():
+            writer.enqueue("discard", test_id)
+            writer.enqueue("stop")
+            return
+        if writer is not None and writer.isRunning():
+            self.databaseDiscardAfterWriter[writer] = test_id
+            return
+        self.startDatabaseDiscardWorker(test_id)
 
     def createResistanceTab(self) -> QWidget:
         tab = QWidget()
@@ -1822,9 +1986,8 @@ class EmgRehabilitationWindow(QMainWindow):
         self.hostEdit.setMinimumWidth(160)
         self.testButton, self.startButton, self.stopButton = QPushButton("測試連線"), QPushButton("開始串流", objectName="record"), QPushButton("停止")
         self.discardButton = QPushButton("捨棄本次測試")
-        self.uploadButton = QPushButton("上傳本次測試")
-        self.uploadButton.setEnabled(False)
-        self.uploadButton.setToolTip("將已完成的 EMG、踏板、阻力計原始資料與測試紀錄存入 SQL Server")
+        self.saveDatabaseButton = QPushButton("儲存進資料庫")
+        self.saveDatabaseButton.setEnabled(False)
         self.calibrateButton = QPushButton("測量 20 秒基準")
         FluentThemeManager.set_property(self.calibrateButton, "fluentAppearance", "danger")
         self.calibrationLabel = QLabel(objectName="muted")
@@ -1832,10 +1995,9 @@ class EmgRehabilitationWindow(QMainWindow):
         FluentThemeManager.set_property(self.startButton, "fluentAppearance", "success")
         FluentThemeManager.set_property(self.stopButton, "fluentAppearance", "danger")
         FluentThemeManager.set_property(self.discardButton, "fluentAppearance", "danger")
-        FluentThemeManager.set_property(self.uploadButton, "fluentAppearance", "success")
+        FluentThemeManager.set_property(self.saveDatabaseButton, "fluentAppearance", "success")
         self.discardButton.setToolTip("刪除剛完成或正在收集的測試檔案與資料庫資料")
-        for widget in (self.hostEdit, self.testButton, self.startButton, self.calibrateButton,
-                       self.stopButton, self.uploadButton, self.discardButton):
+        for widget in (self.hostEdit, self.testButton, self.startButton, self.calibrateButton, self.stopButton, self.saveDatabaseButton, self.discardButton):
             controls.addWidget(widget)
         controls.addWidget(self.calibrationLabel)
         controls.addSpacing(10)
@@ -1934,7 +2096,7 @@ class EmgRehabilitationWindow(QMainWindow):
         self.startButton.clicked.connect(self.startStream)
         self.stopButton.clicked.connect(self.stopStream)
         self.discardButton.clicked.connect(self.requestDiscardCurrentTest)
-        self.uploadButton.clicked.connect(self.uploadCurrentCollection)
+        self.saveDatabaseButton.clicked.connect(self.saveCurrentTestToDatabase)
         self.plotTimer = QTimer(self)
         self.plotTimer.setInterval(80)
         self.plotTimer.timeout.connect(self.refreshPlots)
@@ -2233,6 +2395,8 @@ class EmgRehabilitationWindow(QMainWindow):
             point = {key: data.get(key) for key in ("power_w", "cadence_rpm", "left_balance_percent", "right_balance_percent", "left_power_w", "right_power_w", "crank_revolutions")}
             point["time_s"] = self.rideTime()
             add_point(self.rideSession, "pedal", point)
+            point["quality_status"] = "VALID"
+            self.databaseAddSample("pedal", point["time_s"], point)
         if self.pedalRecorder:
             try:
                 self.pedalRecorder.append(data)
@@ -2299,6 +2463,10 @@ class EmgRehabilitationWindow(QMainWindow):
                 "heart_rate_bpm": data.heartRate, "session_distance_meters": sessionDistanceMeters,
                 "energy_kcal": data.energyKcal}
             add_point(self.rideSession, "trainer", point)
+            self.databaseAddSample("trainer", point["time_s"], {
+                "distance_km": None if sessionDistanceMeters is None else sessionDistanceMeters / 1000,
+                "speed_kph": data.speedKph, "power_w": data.powerWatts, "cadence_rpm": data.cadenceRpm,
+                "quality_status": "VALID"})
         if self.trainerRecorder:
             try:
                 self.trainerRecorder.append(data,self.resistanceSpin.value(),self.commandedNativeResistance,sessionDistanceMeters,)
@@ -2519,6 +2687,10 @@ class EmgRehabilitationWindow(QMainWindow):
             side = mapping.abbreviation.rsplit("-", 1)[-1] if "-" in mapping.abbreviation else ""
             title = f"{side} {mapping.english_name.upper()}" if side in {"R", "L"} else mapping.english_name.upper()
             detected = self.sensorActive[index]
+            if hasattr(self, "inlineSensorStateLabels"):
+                state_label = self.inlineSensorStateLabels[index]
+                state_label.setText("已啟用" if detected else "未啟用" if self.sensorStatesKnown else "待測試")
+                FluentThemeManager.set_property(state_label, "fluentSeverity", "success" if detected else "info")
             self.sensorChecks[index].setLabels(f"S{mapping.slot:02d} · {mapping.chinese_name}", mapping.english_name)
             serial = self.sensorSerials.get(mapping.slot, "未取得 SID")
             tooltip = f"S{mapping.slot:02d} · {title}\nSID：{serial}"
@@ -2556,16 +2728,28 @@ class EmgRehabilitationWindow(QMainWindow):
             self.syncMuscleMap()
 
     def startBaselineCalibration(self) -> None:
+        if self.databasePendingSave is not None:
+            QMessageBox.information(self, "基準測量", "請先儲存或捨棄上一筆測試。")
+            return
+        if self.databaseWriter is not None and self.databaseWriter.isRunning():
+            QMessageBox.information(self, "基準測量", "請等待上一筆測試儲存完成。")
+            return
         if self.streamWorker and self.streamWorker.isRunning():
             QMessageBox.information(self, "基準測量", "請先停止目前的串流，再開始基準測量。")
             return
         if not self.useEmgCheck.isChecked() or not any(self.sensorActive):
             QMessageBox.warning(self, "基準測量", "請先連線測試，確認至少一個 EMG 感測器啟用。")
             return
+        if not self.collectionSetupIsValid():
+            return
         protocol, accepted = QInputDialog.getText(self, "基準測量說明", "動作/姿勢/阻力/踏頻（待臨床確認）：", text=self.baselineManager.protocol)
         if not accepted:
             return
         self.baselineManager.protocol = protocol.strip()
+        self.previousBaselineRecords = dict(self.baselineManager.records)
+        self.pendingBaselineRecords = None
+        self.decisionBeforeCalibration = self.currentTestDecision
+        self.currentTestDecision = None
         self.calibrationOnly = True
         self.calibrationSession = None
         self.startStream()
@@ -2674,43 +2858,19 @@ class EmgRehabilitationWindow(QMainWindow):
         FluentThemeManager(QApplication.instance()).apply()
 
     def subjectInfo(self) -> SubjectInfo:
-        person = self.archivePatientCombo.currentData() or {}
-        return SubjectInfo(
-            patientId=person.get("patient_id", ""),
-            name=person.get("name", ""),
-            gender=person.get("gender", "未指定"),
-        )
-
-    def loadArchivePatients(self) -> None:
-        try:
-            patients = Archive(self.databaseConfig()).list_patients()
-        except Exception as exc:
-            self.appendLog(f"病人清單載入失敗：{exc}")
-            return
-        previous = self.subjectInfo().patientId
-        self.archivePatientCombo.blockSignals(True)
-        self.archivePatientCombo.clear()
-        self.archivePatientCombo.addItem("請選擇受測者", None)
-        for person in patients:
-            self.archivePatientCombo.addItem(f"{person['name']} · {person['patient_id']}", person)
-        for index in range(1, self.archivePatientCombo.count()):
-            if self.archivePatientCombo.itemData(index)["patient_id"] == previous:
-                self.archivePatientCombo.setCurrentIndex(index)
-                break
-        self.archivePatientCombo.blockSignals(False)
-        self.archivePatientSelected()
-
-    def archivePatientSelected(self, *_args) -> None:
-        person = self.archivePatientCombo.currentData() or {}
-        self.patientNameEdit.setText(person.get("name", ""))
-        self.genderCombo.setCurrentText(person.get("gender", "未指定"))
+        return SubjectInfo(patientId=self.patientIdEdit.text().strip(),name=self.patientNameEdit.text().strip(),gender=self.genderCombo.currentText(),)
 
     def collectionSetupIsValid(self) -> bool:
         subject = self.subjectInfo()
-        if not subject.patientId or not subject.name:
-            QMessageBox.warning(self, "尚未選擇受測者", "請先在設定頁選擇受測者，再開始收集。")
+        missing = []
+        if not subject.patientId:
+            missing.append("病人 ID")
+        if not subject.name:
+            missing.append("姓名")
+        if missing:
+            QMessageBox.warning(self,"缺少病人資訊","開始收集前請填寫：" + "、".join(missing),)
             self.tabs.setCurrentWidget(self.settingsTab)
-            self.archivePatientCombo.setFocus()
+            (self.patientIdEdit if not subject.patientId else self.patientNameEdit).setFocus()
             return False
 
         duplicates = duplicateMappingSlots(self.mappings)
@@ -2974,14 +3134,19 @@ class EmgRehabilitationWindow(QMainWindow):
 
     def setStreaming(self, streaming: bool) -> None:
         testing = self.testWorker is not None
-        self.startButton.setEnabled(not streaming and not testing and not self.archiveUploading)
+        self.startButton.setEnabled(not streaming and not testing)
         self.calibrateButton.setEnabled(not streaming and not testing)
         self.stopButton.setEnabled(streaming)
-        self.discardButton.setEnabled(streaming or self.collectedRideSession is not None)
-        self.uploadButton.setEnabled(
-            not streaming and not self.archiveUploading and self.rideSession is None
-            and self.collectedRideSession is not None
-            and self.archiveLastTestId != self.archiveUploadedTestId)
+        self.discardButton.setEnabled(
+            not self.calibrationOnly and self.currentTestDecision is None
+            and (streaming or self.collectedRideSession is not None or self.pendingBaselineRecords is not None)
+        )
+        self.saveDatabaseButton.setEnabled(
+            not streaming and self.databasePendingSave is not None
+            and self.activeDatabaseConfig is not None
+            and not (self.databaseWriter and self.databaseWriter.isRunning())
+            and self.currentTestDecision is None
+        )
         self.hostEdit.setEnabled(not streaming and not testing)
         self.testButton.setEnabled(not streaming and not testing)
         self.durationMinutesSpin.setEnabled(not streaming)
@@ -3012,11 +3177,6 @@ class EmgRehabilitationWindow(QMainWindow):
         if not host:
             QMessageBox.warning(self, "缺少位址", "請輸入 SDK Server IP 位址。")
             return
-        if not self.subjectInfo().patientId:
-            QMessageBox.warning(self, "尚未選擇受測者", "請先在設定頁選擇受測者，再測試連線。")
-            self.tabs.setCurrentWidget(self.settingsTab)
-            self.archivePatientCombo.setFocus()
-            return
         self.setEmgStatus("正在測試連線…", "working")
         self.testWorker = ConnectionWorker(host)
         self.testWorker.connected.connect(lambda banner: self.emgStatus.setToolTip(banner))
@@ -3032,15 +3192,21 @@ class EmgRehabilitationWindow(QMainWindow):
         if worker:
             worker.deleteLater()
         if not self.emgStatus.text().startswith("連線失敗"):
-            self.setEmgStatus("已連線；啟用感測器已更新", "connected")
+            status = "已連線；啟用感測器已更新" if any(self.sensorActive) else "SDK 已連線；沒有啟用的 EMG 感測器"
+            self.setEmgStatus(status, "connected")
             self.setEmgConnectionState(True)
         self.setStreaming(False)
 
     def emgConnectionFailed(self, message: str) -> None:
         self.setEmgStatus(f"連線失敗：{message}", "error")
         self.setEmgConnectionState(False)
+        self.sensorStatesKnown = False
+        self.sensorActive = [False] * CHANNEL_COUNT
+        self.sensorSerials = {}
+        self.updateSensorRows()
 
     def updateSensorStates(self, paired: list[int], active: list[int], serials: dict[int, str]) -> None:
+        self.sensorStatesKnown = True
         self.sensorActive = [index + 1 in active for index in range(CHANNEL_COUNT)]
         self.sensorSerials = serials
         if self.rideSession is not None:
@@ -3059,11 +3225,20 @@ class EmgRehabilitationWindow(QMainWindow):
         return max(0.0, time.monotonic() - self.rideStartedAt)
 
     def beginRideAnalysis(self) -> None:
-        # A ride owns its archive ID before its asynchronous worker starts.
-        self.archiveLastTestId = prefixed_id("TEST")
-        self.archiveUploadedTestId = None
-        self.uploadButton.setText("上傳本次測試")
-        self.uploadButton.setEnabled(False)
+        """Reset every live-analysis view before a new collection begins."""
+        self.saveDatabaseButton.setText("儲存進資料庫")
+        self.discardButton.setText("捨棄本次測試")
+        self.summaryRecords = []
+        self.latestPedalRecords = []
+        self.summarySourceLabel.setText("分析資料：等待本次測試")
+        self.refreshSummaryAnalysis()
+        for history in self.histories:
+            history.clear()
+        self.rebuildPlots()
+        self.sampleLabel.setText("0 samples")
+        self.rideMuscleTable.setRowCount(0)
+        self.rideStateLabel.setText("準備收集")
+        FluentThemeManager.set_property(self.rideStateLabel, "fluentSeverity", "info")
         self.pendingAutoAngleAnalysis = False
         self.angleEmgPath = None
         self.anglePedalPath = None
@@ -3074,7 +3249,17 @@ class EmgRehabilitationWindow(QMainWindow):
         self.angleComparisonTable.setRowCount(0)
         self.clearAngleReportTables()
         self.discardCurrentCollection = False
+        self.databaseLastTestId = None
+        self.databasePendingSave = None
+        self.pendingBaselineRecords = None
+        self.previousBaselineRecords = None
+        self.currentTestDecision = None
+        self.countdownStartedAt = None
+        self.countdownStoppedAt = None
+        self.countdownDeadline = None
+        self.saveDatabaseButton.setEnabled(False)
         self.angleExportButton.setEnabled(False)
+        self.exportReportButton.setEnabled(False)
         baselines = {str(slot): asdict(record) for slot, record in self.baselineManager.records.items()}
         self.rideSession = new_session(asdict(self.collectionSubject), baselines)
         self.rideSession["filter"] = asdict(self.filterSettings)
@@ -3090,6 +3275,9 @@ class EmgRehabilitationWindow(QMainWindow):
         self.currentSessionSummaryButton.setEnabled(True)
         self.refreshRideAnalysis()
         self.refreshComparison()
+        # refreshRideAnalysis renders the empty live session too; reporting
+        # remains unavailable until finishRideAnalysis has real test data.
+        self.exportReportButton.setEnabled(False)
 
     def startAutomaticAngleAnalysis(self) -> None:
         if not self.pendingAutoAngleAnalysis:
@@ -3103,8 +3291,6 @@ class EmgRehabilitationWindow(QMainWindow):
             return
         self.pendingAutoAngleAnalysis = False
         self.updateAngleFileStatus()
-        self.tabs.setCurrentWidget(self.collectionTab)
-        self.summaryTabs.setCurrentIndex(2)
         self.angleViews.setCurrentIndex(0)
         self.angleOverviewLabel.setText("正在分析 EMG 與踏板角度…")
         self.runAngleAnalysis()
@@ -3119,9 +3305,10 @@ class EmgRehabilitationWindow(QMainWindow):
         if session is None:
             return
         if self.discardCurrentCollection:
-            self.finalizeDiscardedTest()
+            self.finalizeDiscardedTest(active_database_writer=True)
             return
         result = analyze(session)
+        self.finishDatabaseRecording(result)
         self.latestRideSession = session
         self.collectedRideSession = session
         self.angleEmgPath = self.collectionOutput if self.collectionOutput and self.collectionOutput.is_file() else None
@@ -3137,117 +3324,67 @@ class EmgRehabilitationWindow(QMainWindow):
                 QMessageBox.warning(self, "無法保存分析", str(exc))
         self.refreshRideAnalysis()
         self.refreshComparison()
-        self.askArchiveUpload()
-
-    def currentCollectionFiles(self) -> dict[str, Path]:
-        return {kind: path for kind, path in (
-            ("emg", self.collectionOutput), ("pedal", self.pedalOutput),
-            ("trainer", self.trainerOutput), ("info", self.infoOutput))
-            if path is not None and path.is_file()}
-
-    def askArchiveUpload(self) -> None:
-        """Keep local files regardless of the user's database decision."""
-        files = self.currentCollectionFiles()
-        if not files and not any((self.collectedRideSession or {}).get(kind)
-                                 for kind in ("emg", "pedal", "trainer")):
-            self.appendLog("本次測試沒有可上傳的原始資料。")
-            return
-        labels = {"emg": "EMG", "pedal": "踏板", "trainer": "阻力計", "info": "測試資訊"}
-        available = "、".join(labels[kind] for kind in files) or "測試紀錄"
-        dialog = QMessageBox(self)
-        dialog.setWindowTitle("測試完成")
-        dialog.setText("本機測試資料已保存。是否上傳到 SQL Server，供網站查看？")
-        dialog.setInformativeText(f"可上傳：{available}。選擇僅保留本機後，仍可按「上傳本次測試」。")
-        upload = dialog.addButton("上傳到資料庫", QMessageBox.ButtonRole.AcceptRole)
-        local_only = dialog.addButton("僅保留本機", QMessageBox.ButtonRole.RejectRole)
-        dialog.setDefaultButton(local_only)
-        dialog.exec()
-        if dialog.clickedButton() is upload:
-            self.uploadCurrentCollection()
-        else:
-            self.appendLog("本次測試僅保留本機 CSV 與分析檔，尚未寫入資料庫。")
-
-    def uploadCurrentCollection(self) -> None:
-        """Archive the completed recording and its raw files on request."""
-        session = self.collectedRideSession
-        test_id = self.archiveLastTestId
-        if self.rideSession is not None or session is None or not test_id:
-            QMessageBox.information(self, "上傳本次測試", "請先完成測試，再上傳資料。")
-            return
-        if self.archiveUploading or self.archiveUploadedTestId == test_id:
-            return
-        files = self.currentCollectionFiles()
-        if not files and not any(session.get(kind) for kind in ("emg", "pedal", "trainer")):
-            QMessageBox.warning(self, "上傳本次測試", "找不到可上傳的原始資料。")
-            return
-        status = "失敗" if self.collectionError else ("中斷" if self.collectionStoppedEarly else "完成")
-        worker = ArchiveWorker(self.databaseConfig(), session, files, test_id, status)
-        self.archiveWorkers.add(worker)
-        self.archiveUploading = True
-        self.uploadButton.setEnabled(False)
-        self.startButton.setEnabled(False)
-        worker.archived.connect(lambda identifier: self.archiveUploadSucceeded(test_id, identifier))
-        worker.failed.connect(lambda message: self.archiveUploadFailed(test_id, message))
-        worker.finished.connect(lambda: self.archiveWorkers.discard(worker))
-        worker.finished.connect(worker.deleteLater)
-        worker.start()
-        self.appendLog("正在上傳本次測試與原始 CSV 到 SQL Server…")
-
-    def archiveUploadSucceeded(self, test_id: str, identifier: str) -> None:
-        self.appendLog(f"SQL Server 已保存測試與原始資料：{identifier}")
-        if self.archiveLastTestId == test_id:
-            self.archiveUploadedTestId = test_id
-            self.archiveUploading = False
-            self.uploadButton.setText("已上傳")
-            self.setStreaming(False)
-
-    def archiveUploadFailed(self, test_id: str, message: str) -> None:
-        self.appendLog(f"SQL Server 上傳失敗，本機 CSV 已保留：{message}")
-        if self.archiveLastTestId == test_id:
-            self.archiveUploading = False
-            self.uploadButton.setText("重試上傳")
-            self.setStreaming(False)
-            QMessageBox.warning(self, "上傳失敗", "本機原始資料仍在輸出資料夾，可按「上傳本次測試」重試。\n" + message)
+        if self.angleEmgPath is not None and self.anglePedalPath is not None and not self.collectionError:
+            self.pendingAutoAngleAnalysis = True
+            self.startAutomaticAngleAnalysis()
+        elif self.collectionError:
+            self.angleStatusLabel.setText(f"本次收集有錯誤，未啟動相位聯合分析：{self.collectionError}")
+        elif self.angleEmgPath is None or self.anglePedalPath is None:
+            self.angleStatusLabel.setText("本次沒有完整的 EMG 與踏板 CSV，無法產生肌電與踩踏相位聯合分析。")
 
     def requestDiscardCurrentTest(self) -> None:
         """Ask before permanently deleting the current collection and its database rows."""
+        if self.currentTestDecision in {"saving", "saved", "discarded"}:
+            return
+        if self.pendingBaselineRecords is not None and self.streamWorker is None:
+            choice = QMessageBox.question(
+                self, "捨棄基準測量", "捨棄本次 20 秒基準，恢復測量前的基準值？",
+                QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if choice != QMessageBox.StandardButton.Discard:
+                return
+            self.baselineManager.records = dict(self.previousBaselineRecords or {})
+            self.pendingBaselineRecords = None
+            self.previousBaselineRecords = None
+            self.decisionBeforeCalibration = None
+            self.databasePendingSave = None
+            self.currentTestDecision = "discarded"
+            self.saveDatabaseButton.setEnabled(False)
+            self.discardButton.setEnabled(False)
+            self.removeCurrentCollectionFiles()
+            self.calibrationLabel.setText("本次基準測量已捨棄")
+            self.updateSensorRows()
+            return
         has_current_test = self.rideSession is not None or self.collectedRideSession is not None
         if not has_current_test:
             QMessageBox.information(self, "捨棄本次測試", "目前沒有可捨棄的本次測試。")
             return
+        if self.databaseWriter is not None and self.databaseWriter.isRunning():
+            QMessageBox.information(self, "資料庫儲存中", "請等待儲存完成，再決定是否捨棄。")
+            return
         choice = QMessageBox.question(
             self, "捨棄本次測試",
-            "將刪除本次測試的 EMG、踏板、阻力計、資訊與分析檔；若已上傳，也會刪除資料庫中的同次測試資料。\n\n此操作無法復原，是否繼續？",
+            "將刪除本次測試的 EMG、踏板、阻力計、資訊與分析檔，並刪除資料庫中的同次測試資料。\n\n此操作無法復原，是否繼續？",
             QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
         if choice != QMessageBox.StandardButton.Discard:
             return
+        self.currentTestDecision = "discarded"
         if self.rideSession is not None:
             self.discardCurrentCollection = True
             self.discardButton.setEnabled(False)
             self.stopStream()
             return
-        self.finalizeDiscardedTest()
+        self.finalizeDiscardedTest(active_database_writer=False)
 
-    def finalizeDiscardedTest(self) -> None:
+    def finalizeDiscardedTest(self, active_database_writer: bool) -> None:
         """Clear the rejected session only after all recorders have stopped."""
-        archive_id = self.archiveLastTestId
-        for worker in tuple(self.archiveWorkers):
-            if worker.test_id == archive_id and worker.isRunning():
-                worker.wait()
-        archived = self.archiveUploadedTestId == archive_id or any(
-            worker.test_id == archive_id and worker.identifier for worker in self.archiveWorkers)
-        if archive_id and archived:
-            try:
-                Archive(self.databaseConfig()).delete_recording(archive_id)
-            except Exception as exc:
-                self.appendLog(f"SQL Server 歸檔刪除失敗：{exc}")
-        self.archiveLastTestId = None
-        self.archiveUploadedTestId = None
-        self.archiveUploading = False
+        self.discardDatabaseRecording(active_database_writer)
         removed, failures = self.removeCurrentCollectionFiles()
         self.discardCurrentCollection = False
+        self.currentTestDecision = "discarded"
         self.rideSession = None
         self.latestRideSession = None
         self.collectedRideSession = None
@@ -3267,6 +3404,7 @@ class EmgRehabilitationWindow(QMainWindow):
         self.summarySourceLabel.setText("本次測試已捨棄，未保留分析資料")
         self.refreshSummaryAnalysis()
         self.refreshComparison()
+        self.saveDatabaseButton.setEnabled(False)
         self.discardButton.setEnabled(False)
         detail = f"已刪除 {removed} 個檔案" if removed else "沒有需要刪除的檔案"
         if failures:
@@ -3435,6 +3573,7 @@ class EmgRehabilitationWindow(QMainWindow):
         return SqlServerStorage(self.activeDatabaseConfig)
 
     def loadDatabaseComparisonPatients(self) -> None:
+        selected_patient = self.databaseComparePendingPatient or self.databaseComparePatientCombo.currentData()
         store = self._comparisonStore()
         if store is None:
             return
@@ -3450,6 +3589,9 @@ class EmgRehabilitationWindow(QMainWindow):
         for patient in patients:
             name = str(patient["name"] or "未填姓名")
             self.databaseComparePatientCombo.addItem(f'{patient["patient_id"]} · {name}（{patient["test_count"]} 次）', patient["patient_id"])
+        selected_index = self.databaseComparePatientCombo.findData(selected_patient)
+        if selected_index >= 0:
+            self.databaseComparePatientCombo.setCurrentIndex(selected_index)
         self.databaseComparePatientCombo.blockSignals(False)
         if not patients:
             self.clearDatabaseComparisonCards()
@@ -3465,7 +3607,8 @@ class EmgRehabilitationWindow(QMainWindow):
         duration_text = f"{int(duration)} 秒" if duration is not None else "時間未記錄"
         resistance = session.get("resistance_level")
         resistance_text = f"阻力 {float(resistance):g}" if resistance is not None else "阻力未記錄"
-        return f"{timestamp} ｜ {duration_text} ｜ {resistance_text}"
+        test_id = str(session.get("test_id") or "")
+        return f"{timestamp} ｜ {duration_text} ｜ {resistance_text} ｜ {test_id[-8:]}"
 
     def loadDatabaseComparisonSessions(self, *_args) -> None:
         patient_id = self.databaseComparePatientCombo.currentData()
@@ -3491,8 +3634,13 @@ class EmgRehabilitationWindow(QMainWindow):
             self.clearDatabaseComparisonCards()
             self.comparisonStatusLabel.setText("此病人需要至少兩次含 RMS 資料的量測，才能比較。")
             return
-        self.databaseCompareACombo.setCurrentIndex(0)
-        self.databaseCompareBCombo.setCurrentIndex(1)
+        current_index = self.databaseCompareACombo.findData(
+            next((session for session in sessions if session["test_id"] == self.databaseComparePendingTestId), None)
+        )
+        self.databaseCompareACombo.setCurrentIndex(current_index if current_index >= 0 else 0)
+        self.databaseCompareBCombo.setCurrentIndex(1 if self.databaseCompareACombo.currentIndex() == 0 else 0)
+        self.databaseComparePendingPatient = None
+        self.databaseComparePendingTestId = None
         self.clearDatabaseComparisonCards()
         self.comparisonStatusLabel.setText("已載入兩次量測選項，請確認 A、B 與前後段秒數，再按「比較 RMS」顯示結果。")
 
@@ -4570,6 +4718,12 @@ class EmgRehabilitationWindow(QMainWindow):
         self.appendLog(f"HTML 報表已匯出：{output.name}")
 
     def startStream(self) -> None:
+        if self.databasePendingSave is not None:
+            QMessageBox.information(self, "本次測試待確認", "請先按「儲存進資料庫」或「捨棄本次測試」，再開始下一次測試。")
+            return
+        if self.databaseWriter is not None and self.databaseWriter.isRunning():
+            QMessageBox.information(self, "資料庫儲存中", "請等待本次測試儲存完成。")
+            return
         if self.calibrationOnly:
             self.startCalibrationStream()
             return
@@ -4633,9 +4787,8 @@ class EmgRehabilitationWindow(QMainWindow):
             return
         self.beginRideAnalysis()
         self.collectionStoppedEarly = False
+        self.startDatabaseRecording()
         self.emgRateLabel.setText("EMG 頻率：正在向 SDK 查詢…")
-        for history in self.histories:
-            history.clear()
         self.streamWorker = StreamWorker(host, output, self.mappings)
         self.streamWorker.status_changed.connect(self.streamStatusChanged)
         self.streamWorker.connected.connect(lambda banner: self.emgStatus.setToolTip(banner))
@@ -4649,10 +4802,6 @@ class EmgRehabilitationWindow(QMainWindow):
         self.streamWorker.finished.connect(self.streamFinished)
         self.setStreaming(True)
         self.streamWorker.start()
-        # Start the camera as collection begins.  Waiting for a later EMG
-        # status callback made the GoPro appear unresponsive after this button
-        # was pressed; beginGoProRecording guards against duplicate requests.
-        self.beginGoProRecording()
 
     def startCalibrationStream(self) -> None:
         host = self.hostEdit.text().strip()
@@ -4662,6 +4811,12 @@ class EmgRehabilitationWindow(QMainWindow):
             return
         self.collectionError = None
         self.collectionSummary = None
+        self.countdownStartedAt = None
+        self.countdownStoppedAt = None
+        self.countdownDeadline = None
+        self.collectionOutput = None
+        self.infoOutput = None
+        self.collectionSubject = self.subjectInfo()
         self.calibrationRecording = self.trainerIsConnected or self.pedalIsConnected
         output = None
         self.trainerRecorder = None
@@ -4695,6 +4850,10 @@ class EmgRehabilitationWindow(QMainWindow):
                 return
         self.preprocessor = None
         self.rmsExtractor = None
+        for history in self.histories:
+            history.clear()
+        self.rebuildPlots()
+        self.sampleLabel.setText("0 samples")
         self.streamWorker = StreamWorker(host, output, self.mappings)
         self.streamWorker.status_changed.connect(self.streamStatusChanged)
         self.streamWorker.sensor_states_ready.connect(self.updateSensorStates)
@@ -4743,6 +4902,7 @@ class EmgRehabilitationWindow(QMainWindow):
             return
         self.beginRideAnalysis()
         self.collectionStoppedEarly = False
+        self.startDatabaseRecording()
         self.bikeOnlySession = True
         self.beginTrainerRecording()
         self.beginPedalRecording()
@@ -4752,9 +4912,19 @@ class EmgRehabilitationWindow(QMainWindow):
         self.startCountdown()
 
     def stopStream(self) -> None:
+        if self.countdownMode == "collection" and self.countdownStartedAt is not None and self.countdownStoppedAt is None:
+            self.countdownStoppedAt = time.monotonic()
         if self.remainingSeconds > 0:
             self.collectionStoppedEarly = True
         self.stopGoProRecording()
+        # Freeze the independent cycling-device recordings at the user's stop
+        # request.  Waiting for StreamWorker.finished() is unsafe: its queued
+        # EMG frame signals can keep the GUI event loop busy while BLE telemetry
+        # continues to arrive, causing Pedal/Trainer CSVs to outlive the EMG CSV.
+        # The close methods are idempotent, so streamFinished() may still call
+        # them as a normal cleanup fallback.
+        self.closeTrainerRecording()
+        self.closePedalRecording()
         if self.bikeOnlySession:
             self.finishBikeOnlySession()
             return
@@ -4816,6 +4986,8 @@ class EmgRehabilitationWindow(QMainWindow):
         # A start worker now owns one persistent BLE session.  Do not open a
         # competing second connection: ask that same worker to send Stop.
         if self.goproWorker and self.goproWorker.isRunning() and self.goproWorker.action == "connect":
+            if not self.goproRecordingStarted and not self.goproAwaitingStartConfirmation:
+                return
             if self.goproStopRequested:
                 return
             self.goproStopRequested = True
@@ -5207,7 +5379,17 @@ class EmgRehabilitationWindow(QMainWindow):
     def startCountdown(self) -> None:
         self.countdownMode = "collection"
         self.countdownStopsStream = True
+        self.countdownStartedAt = time.monotonic()
+        self.countdownStoppedAt = None
+        self.rideStartedAt = self.countdownStartedAt
+        if self.databaseAggregator is not None and self.databaseStartPayload is not None:
+            self.databaseStartedAt = datetime.now()
+            self.databaseAggregator.started_at = self.databaseStartedAt
+            self.databaseStartPayload["started_at"] = self.databaseStartedAt
         self.remainingSeconds = self.configuredDurationSeconds()
+        self.countdownDeadline = (
+            self.countdownStartedAt + self.remainingSeconds if self.remainingSeconds > 0 else None
+        )
         self.updateCountdownLabel()
         if self.remainingSeconds > 0:
             self.countdownTimer.start()
@@ -5217,11 +5399,12 @@ class EmgRehabilitationWindow(QMainWindow):
         self.countdownMode = "calibration"
         self.countdownStopsStream = False
         self.remainingSeconds = 20
+        self.countdownDeadline = time.monotonic() + 20
         self.updateCountdownLabel()
         self.countdownTimer.start()
 
     def updateCountdown(self) -> None:
-        self.remainingSeconds -= 1
+        self.remainingSeconds = max(0, math.ceil(self.countdownDeadline - time.monotonic())) if self.countdownDeadline is not None else max(0, self.remainingSeconds - 1)
         self.updateCountdownLabel()
         if self.remainingSeconds <= 0:
             self.countdownTimer.stop()
@@ -5265,6 +5448,21 @@ class EmgRehabilitationWindow(QMainWindow):
                             comparison["quality"] = "基準不相容"
                         add_point(self.rideSession, "emg", {"time_s": stamp, "slot": channel + 1,
                             "rms_mv": current, **comparison})
+                        mapping = self.mappings[channel]
+                        percent = comparison.get("percent")
+                        alert = "NONE"
+                        if isinstance(percent, (int, float)):
+                            if abs(percent) >= self.baselineManager.focus_percent:
+                                alert = "RED"
+                            elif abs(percent) >= self.baselineManager.warning_percent:
+                                alert = "YELLOW"
+                            else:
+                                alert = "NORMAL"
+                        self.databaseAddSample("emg", stamp, {
+                            "muscle_name": f"{mapping.chinese_name} ({mapping.abbreviation})",
+                            "rms_mv": current, "base_rms_mv": record.rms_mv if compatible and record else None,
+                            "deviation_pct": percent, "alert_status": alert,
+                            "quality_status": comparison.get("quality", "VALID")})
         self.sampleLabel.setText(f"{len(self.histories[activeChannels[0]]):,} samples in view")
 
     def emgRateReady(self, sampleRate: float, samplesPerFrame: int, frameInterval: float) -> None:
@@ -5282,7 +5480,7 @@ class EmgRehabilitationWindow(QMainWindow):
         session = self.calibrationSession
         if session is None:
             return
-        saved, invalid = [], []
+        saved, invalid, saved_slots = [], [], []
         for channel in session.channels:
             rms = session.rms_mv(channel)
             if rms is None or rms <= 1e-9:
@@ -5290,12 +5488,43 @@ class EmgRehabilitationWindow(QMainWindow):
                 continue
             self.baselineManager.set_measured(channel + 1, rms, self.mappingIdentity(channel), self.sensorSerials.get(channel + 1, "Unknown SID"), self.currentSampleRate, self.filterSettings)
             saved.append(f"S{channel + 1:02d}")
+            saved_slots.append(channel + 1)
         try:
             self.baselineManager.save()
         except OSError as exc:
             QMessageBox.warning(self, "無法保存基準", str(exc))
         self.calibrationLabel.setText(f"基準完成：{', '.join(saved) or '無有效通道'}" + (f"；無效：{', '.join(invalid)}" if invalid else ""))
+        if saved_slots:
+            self.saveDatabaseButton.setText("儲存基準進資料庫")
+            self.discardButton.setText("捨棄本次基準")
+            self.pendingBaselineRecords = {slot: self.baselineManager.records[slot] for slot in saved_slots}
+            started_at = datetime.now()
+            test_id = prefixed_id("TEST")
+            self.databasePendingSave = ({
+                "test_id": test_id, "patient_id": self.collectionSubject.patientId,
+                "name": self.collectionSubject.name, "sex": self.collectionSubject.gender,
+                "action_type": "EMG 20 秒基準", "test_time": None,
+                "resistance_level": self.resistanceSpin.value(), "has_baseline": True,
+                "notes": self.baselineManager.protocol, "started_at": started_at,
+                "baselines": [{
+                    "muscle_name": f"{self.mappings[slot - 1].chinese_name} ({self.mappings[slot - 1].abbreviation})",
+                    "rms_mv": self.baselineManager.records[slot].rms_mv,
+                    "base_time": 10, "action_type": self.baselineManager.protocol or "基準測試",
+                    "yellow_pct": self.baselineManager.warning_percent,
+                    "red_pct": self.baselineManager.focus_percent,
+                    "quality_status": "VALID",
+                } for slot in saved_slots],
+            }, {"emg": [], "pedal": [], "trainer": []}, {
+                "test_id": test_id, "test_time": 20, "status": "完成",
+                "notes": self.baselineManager.protocol,
+            })
+            next_step = ("請選擇儲存進資料庫或捨棄" if self.activeDatabaseConfig is not None
+                         else "請先在設定頁測試資料庫連線，再儲存；也可捨棄")
+            self.calibrationLabel.setText(self.calibrationLabel.text() + "；" + next_step)
         self.calibrationSession = None
+        self.remainingSeconds = 0
+        self.countdownTimer.stop()
+        self.updateCountdownLabel()
         self.updateSensorRows()
         self.stopStream()
 
@@ -5340,15 +5569,28 @@ class EmgRehabilitationWindow(QMainWindow):
         self.stopGoProRecording()
         self.closeTrainerRecording()
         self.closePedalRecording()
-        if not self.calibrationOnly:
+        was_calibration = self.calibrationOnly
+        if not was_calibration:
             self.finishRideAnalysis()
-        self.setStreaming(False)
-        if self.calibrationOnly:
+        if was_calibration:
             self.calibrationOnly = False
             self.calibrationRecording = False
+            if self.collectionError and self.pendingBaselineRecords is not None:
+                self.baselineManager.records = dict(self.previousBaselineRecords or {})
+                self.pendingBaselineRecords = None
+                self.databasePendingSave = None
+                self.updateSensorRows()
+            if self.pendingBaselineRecords is None:
+                self.currentTestDecision = self.decisionBeforeCalibration
+                self.previousBaselineRecords = None
+                self.saveDatabaseButton.setText("儲存進資料庫")
+                self.discardButton.setText("捨棄本次測試")
+            self.decisionBeforeCalibration = None
+            self.setStreaming(False)
             if self.collectionError:
                 self.calibrationLabel.setText("基準測量失敗；既有基準未變更")
             return
+        self.setStreaming(False)
         if self.collectionError:
             return
         if self.collectionSummary:
@@ -5530,10 +5772,6 @@ class EmgRehabilitationWindow(QMainWindow):
                 event.ignore()
                 QTimer.singleShot(250, self.close)
                 return
-        if any(worker.isRunning() for worker in self.archiveWorkers):
-            event.ignore()
-            QTimer.singleShot(250, self.close)
-            return
         if self.bluetoothScanWorker and self.bluetoothScanWorker.isRunning():
             self.bluetoothScanWorker.stop()
             if not self.bluetoothScanWorker.wait(3000):
@@ -5596,12 +5834,20 @@ class EmgRehabilitationWindow(QMainWindow):
                 event.ignore()
                 QTimer.singleShot(150, self.close)
                 return
+        for writer in tuple(self.databaseWriters):
+            if writer.isRunning():
+                writer.enqueue("stop")
+                if not writer.wait(5000):
+                    self.appendLog("Database writer is still stopping; close delayed")
+                    event.ignore()
+                    QTimer.singleShot(150, self.close)
+                    return
         event.accept()
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    window = EmgRehabilitationWindow()
+    window = TrignoWindow()
     window.show()
     return app.exec()
 

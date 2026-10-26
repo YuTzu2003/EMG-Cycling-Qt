@@ -1,59 +1,12 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from queue import Queue
 from threading import Lock
 from typing import Any
 from uuid import uuid4
 import math
-
-
-class _CursorAdapter:
-    """Keep parameterized SQL calls consistent across the shared archive."""
-
-    def __init__(self, cursor: Any) -> None:
-        self._cursor = cursor
-
-    def execute(self, statement: str, *values: Any) -> _CursorAdapter:
-        query = statement.replace("?", "%s")
-        if values:
-            # FreeTDS maps bytearray to SQL varbinary; plain bytes become varchar.
-            parameters = tuple(bytearray(value) if isinstance(value, (bytes, memoryview)) else value
-                               for value in values)
-            self._cursor.execute(query, parameters)
-        else:
-            self._cursor.execute(query)
-        return self
-
-    def fetchone(self) -> Any:
-        return self._cursor.fetchone()
-
-    def fetchall(self) -> Any:
-        return self._cursor.fetchall()
-
-    @property
-    def description(self) -> Any:
-        return self._cursor.description
-
-    @property
-    def rowcount(self) -> int:
-        return self._cursor.rowcount
-
-
-class _ConnectionAdapter:
-    def __init__(self, connection: Any) -> None:
-        self._connection = connection
-
-    def cursor(self) -> _CursorAdapter:
-        return _CursorAdapter(self._connection.cursor())
-
-    def commit(self) -> None:
-        self._connection.commit()
-
-    def rollback(self) -> None:
-        self._connection.rollback()
-
-    def close(self) -> None:
-        self._connection.close()
+from PySide6.QtCore import QThread, Signal
 
 def prefixed_id(prefix: str) -> str:
     return f"{prefix}-{uuid4()}"
@@ -87,13 +40,17 @@ class DatabaseConfig:
 
     def is_complete(self) -> bool:
         return bool(self.server.strip() and self.username.strip() and self.password)
+    def connection_string(self) -> str:
+        def escape(value: str) -> str:
+            return "{" + value.replace("}", "}}") + "}"
+        parts = [f"Server={escape(self.server)}", f"Database={escape(self.database)}",
+                 f"UID={escape(self.username)}", f"PWD={escape(self.password)}",
+                 "Encrypt=yes", "TrustServerCertificate=yes"]
+        return ";".join(parts) + ";"
 
 
 class SqlServerStorage:
-    required_tables = {
-        "Sessions", "TestBaselines", "EMGData", "PedalData", "TrainerData",
-        "Patients", "SessionArchives", "RawFiles",
-    }
+    required_tables = {"Sessions", "TestBaselines", "EMGData", "PedalData", "TrainerData"}
     def __init__(self, config: DatabaseConfig) -> None:
         self.config = config
         self.connection: Any | None = None
@@ -101,25 +58,15 @@ class SqlServerStorage:
     @staticmethod
     def _driver() -> Any:
         try:
-            import pymssql
+            import mssql_python
         except ImportError as exc:  # keeps the main app usable until installed
-            raise RuntimeError("找不到 pymssql。請執行 uv sync 安裝 SQL Server 支援。") from exc
-        return pymssql
+            raise RuntimeError("找不到 mssql-python。請執行 uv sync 安裝 SQL Server 支援。") from exc
+        return mssql_python
 
     def connect(self) -> None:
         if not self.config.is_complete():
             raise ValueError("請填寫 SQL Server、資料庫與登入資訊。")
-        host, separator, port_text = self.config.server.rpartition(",")
-        if separator and port_text.isdecimal():
-            server, port = host, int(port_text)
-        else:
-            server, port = self.config.server, 1433
-        connection = self._driver().connect(
-            server=server, port=port, user=self.config.username,
-            password=self.config.password, database=self.config.database,
-            login_timeout=5, timeout=30,
-        )
-        self.connection = _ConnectionAdapter(connection)
+        self.connection = self._driver().connect(self.config.connection_string(), timeout=5)
 
     def close(self) -> None:
         if self.connection is not None:
@@ -147,7 +94,7 @@ class SqlServerStorage:
         rows = cursor.execute("SELECT name FROM sys.databases WHERE state_desc='ONLINE' AND HAS_DBACCESS(name)=1 ORDER BY name").fetchall()
         return [str(row[0]) for row in rows]
 
-    def start_session(self, payload: dict[str, Any]) -> None:
+    def start_session(self, payload: dict[str, Any], commit: bool = True) -> None:
         cursor = self._cursor()
         cursor.execute("""INSERT INTO dbo.Sessions(TestID, PatientID, Name, Sex, ActionType, TestTime, ResistanceLevel, HasBaseline, Status, Notes, CreatedAt)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -164,7 +111,8 @@ class SqlServerStorage:
                 item.get("action_type"), item.get("rms_mv"), item.get("yellow_pct"),
                 item.get("red_pct"), quality_code(item.get("quality_status"), "VALID"), payload["started_at"],
             )
-        self.connection.commit()
+        if commit:
+            self.connection.commit()
 
     def _upsert(self, table: str, key_fields: tuple[str, ...], values: dict[str, Any], prefix: str) -> None:
         cursor = self._cursor()
@@ -181,7 +129,7 @@ class SqlServerStorage:
             cursor.execute(f"INSERT INTO dbo.{table} ({', '.join(fields)}) VALUES ({', '.join('?' for _ in fields)})",
                            prefixed_id(prefix), *values.values())
 
-    def write_rows(self, kind: str, rows: list[dict[str, Any]]) -> None:
+    def write_rows(self, kind: str, rows: list[dict[str, Any]], commit: bool = True) -> None:
         if not rows:
             return
         if kind == "emg":
@@ -195,9 +143,10 @@ class SqlServerStorage:
                 self._upsert("TrainerData", ("TestID", "TimeOffsetSec"), row, "TRAINER")
         else:
             raise ValueError(f"Unsupported database row type: {kind}")
-        self.connection.commit()
+        if commit:
+            self.connection.commit()
 
-    def finish_session(self, payload: dict[str, Any]) -> None:
+    def finish_session(self, payload: dict[str, Any], commit: bool = True) -> None:
         cursor = self._cursor()
         cursor.execute(
             """UPDATE dbo.Sessions SET TestTime=?, Status=?, AvgPowerW=?, MaxPowerW=?,
@@ -208,7 +157,21 @@ class SqlServerStorage:
             payload.get("left_balance_pct"), payload.get("right_balance_pct"), payload.get("notes"),
             payload["test_id"],
         )
-        self.connection.commit()
+        if commit:
+            self.connection.commit()
+
+    def save_session_bundle(self, payload: tuple[dict, dict[str, list[dict]], dict]) -> None:
+        """Commit an approved test as one database transaction."""
+        start, rows_by_kind, finish = payload
+        try:
+            self.start_session(start, commit=False)
+            for kind, rows in rows_by_kind.items():
+                self.write_rows(kind, rows, commit=False)
+            self.finish_session(finish, commit=False)
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def discard_session(self, test_id: str) -> None:
         cursor = self._cursor()
@@ -343,3 +306,48 @@ class SecondAggregator:
         return result
 
 
+class DatabaseWriter(QThread):
+    """Serial database writer.  Failures do not stop collection or CSV output."""
+    connected = Signal(str)
+    failed = Signal(str)
+    completed = Signal(str)
+
+    def __init__(self, config: DatabaseConfig) -> None:
+        super().__init__()
+        self.config = config
+        self.queue: Queue[tuple[str, Any]] = Queue()
+
+    def enqueue(self, command: str, payload: Any = None) -> None:
+        self.queue.put((command, payload))
+
+    def run(self) -> None:
+        store = SqlServerStorage(self.config)
+        try:
+            store.connect()
+            self.connected.emit(store.test_connection())
+            completed_message = "資料庫已完成儲存"
+            while True:
+                command, payload = self.queue.get()
+                if command == "start":
+                    store.start_session(payload)
+                elif command == "save":
+                    store.save_session_bundle(payload)
+                elif command == "rows":
+                    store.write_rows(payload[0], payload[1])
+                elif command == "finish":
+                    store.finish_session(payload)
+                elif command == "discard":
+                    store.discard_session(str(payload))
+                    completed_message = "資料庫：已刪除本次測試資料"
+                elif command == "stop":
+                    break
+            self.completed.emit(completed_message)
+        except Exception as exc:
+            try:
+                if store.connection is not None:
+                    store.connection.rollback()
+            except Exception:
+                pass
+            self.failed.emit(str(exc))
+        finally:
+            store.close()

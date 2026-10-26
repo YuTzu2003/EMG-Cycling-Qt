@@ -5,7 +5,7 @@ import html
 import math
 from statistics import median
 
-from emg_rehab.emg.session_analysis import finite
+from delsys.session_analysis import finite
 
 
 def _percentile(values: list[float], fraction: float) -> float | None:
