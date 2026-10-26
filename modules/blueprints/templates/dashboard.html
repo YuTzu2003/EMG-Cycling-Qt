@@ -35,11 +35,11 @@
 <div class="dashboard-record-list" id="recent-record-list">
   {% for row in sessions %}
   <article class="surface dashboard-record-card" data-source="{{ 'qt' if row.source == 'qt' else 'csv' }}" data-search="{{ (row.name or row.patient_id) ~ ' ' ~ row.patient_id ~ ' ' ~ (row.started_at or '') }}">
-    <div class="dashboard-record-field dashboard-record-person"><span>受測者</span><strong>{{ row.name or row.patient_id }}</strong><small>{{ row.patient_id }}</small></div>
-    <div class="dashboard-record-field"><span>測試時間</span><time datetime="{{ row.started_at }}">{{ row.started_at[:19]|replace('T',' ') }}</time></div>
-    <div class="dashboard-record-field"><span>來源</span><span class="source-tag {{ 'source-tag-qt' if row.source == 'qt' else 'source-tag-csv' }}">{{ 'Qt 收集' if row.source == 'qt' else 'CSV 匯入' }}</span></div>
-    <div class="dashboard-record-field"><span>原始檔案</span><strong>{{ row.file_count }} 份</strong></div>
-    <a class="dashboard-record-link" href="{{ url_for('analysis.session_detail', session_id=row.session_id) }}">查看分析 <span aria-hidden="true">↗</span></a>
+    <div class="dashboard-record-field dashboard-record-person"><span>測試者</span><strong>{{ row.name or row.patient_id }}</strong><small>病歷號 {{ row.patient_id }}</small></div>
+    <div class="dashboard-record-field"><span>建立時間</span><time class="dashboard-record-date" datetime="{{ row.started_at }}"><span>{{ row.started_at[:10]|replace('-', '/') }}</span><small>{{ row.started_at[11:19] }}</small></time></div>
+    <div class="dashboard-record-field"><span>測試時長</span><strong>{{ row.duration_label }}</strong></div>
+    <div class="dashboard-record-field dashboard-record-items"><span>測試項目</span><strong>{{ row.test_item }}</strong></div>
+    <a class="btn btn-outline-dark dashboard-record-open" href="{{ url_for('analysis.session_detail', session_id=row.session_id) }}">查看分析 <span aria-hidden="true">↗</span></a>
   </article>
   {% else %}
   <div class="surface empty dashboard-record-empty">目前沒有測試資料。請由 Qt 收集程式儲存資料，或匯入 CSV。</div>

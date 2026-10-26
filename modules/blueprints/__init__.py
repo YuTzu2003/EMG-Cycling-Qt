@@ -12,7 +12,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .analysis.routes import _list_sessions, analysis_bp
 from .patient import patient_bp
-from .patient.routes import _list_patients
+from .patient.routes import _duration_label, _list_patients
 
 ROOT = Path(__file__).resolve().parents[2]
 general_bp = Blueprint("general", __name__)
@@ -22,6 +22,16 @@ general_bp = Blueprint("general", __name__)
 def dashboard():
     """Render the common home page with current patients and recordings."""
     sessions = _list_sessions()
+    for row in sessions[:5]:
+        row["duration_label"] = _duration_label(row.get("duration_seconds"))
+        test_item = str(row.get("test_item") or "").strip()
+        if not test_item or test_item.casefold() in {"csv import", "csv_import", "csv 匯入", "csv匯入"}:
+            items = [label for key, label in (("emg_count", "肌電 RMS 測試"), ("pedal_count", "踏板測試"),
+                                             ("trainer_count", "訓練器測試"))
+                     if row.get(key, 0)]
+            if not items and row.get("baseline_count", 0):
+                items.append("肌電基準測試")
+            row["test_item"] = "、".join(items) or "未記錄"
     return render_template(
         "dashboard.html",
         patients=_list_patients(),

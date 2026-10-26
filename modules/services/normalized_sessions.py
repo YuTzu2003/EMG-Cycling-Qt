@@ -306,7 +306,8 @@ def list_sessions(patient_id: str | None = None) -> list[dict]:
             (SELECT COUNT(*) FROM dbo.EMGData e WHERE e.TestID=s.TestID) AS emg_count,
             (SELECT COUNT(*) FROM dbo.PedalData e WHERE e.TestID=s.TestID) AS pedal_count,
             (SELECT COUNT(*) FROM dbo.TrainerData e WHERE e.TestID=s.TestID) AS trainer_count,
-            (SELECT COUNT(*) FROM dbo.TestBaselines b WHERE b.TestID=s.TestID) AS baseline_count
+            (SELECT COUNT(*) FROM dbo.TestBaselines b WHERE b.TestID=s.TestID) AS baseline_count,
+            s.ActionType AS test_item
             FROM dbo.Sessions s LEFT JOIN dbo.Patients p ON p.PatientID=s.PatientID"""
         cursor.execute(query + (" WHERE s.PatientID=%s" if patient_id else "") + " ORDER BY s.CreatedAt DESC", (patient_id,) if patient_id else ())
         keys = [column[0] for column in cursor.description]

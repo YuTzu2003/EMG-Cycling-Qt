@@ -3407,6 +3407,93 @@ body {
     white-space: nowrap
 }
 
+.dashboard-record-open {
+    justify-self: end;
+    white-space: nowrap;
+}
+
+.dashboard-record-list .dashboard-record-card {
+    grid-template-columns: minmax(150px, 1fr) minmax(155px, .9fr) minmax(115px, .65fr) minmax(210px, 1.35fr) auto;
+    gap: 24px;
+    padding: 20px 24px;
+    background: #fff;
+    border: 1px solid #dce0e4;
+    border-radius: 6px;
+    box-shadow: none;
+    transition: border-color .15s ease;
+}
+
+.dashboard-record-list .dashboard-record-card:nth-of-type(even) {
+    background: #f6f7f8;
+}
+
+.dashboard-record-list .dashboard-record-card:hover,
+.dashboard-record-list .dashboard-record-card:focus-within {
+    background: #f0f5f5;
+    border-color: #a9bdbc;
+    box-shadow: none;
+    transform: none;
+}
+
+.dashboard-record-list .dashboard-record-field:nth-of-type(n+2) {
+    padding-left: 22px;
+    border-left: 1px solid #edf0f2;
+}
+
+.dashboard-record-list .dashboard-record-field > span:first-child {
+    font-size: .75rem;
+    color: #69737d;
+    margin-bottom: 2px;
+}
+
+.dashboard-record-list .dashboard-record-person strong {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #365f5c;
+}
+
+.dashboard-record-date {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 10px;
+    font-variant-numeric: tabular-nums;
+}
+
+.dashboard-record-date > span {
+    color: var(--ink);
+    font-size: .86rem;
+}
+
+.dashboard-record-items strong {
+    font-size: .85rem;
+    font-weight: 500;
+    line-height: 1.65;
+    padding: 4px 8px;
+    border: 1px solid #dfe7ed;
+    border-radius: 4px;
+    background: #edf2f6;
+    color: #40596e;
+}
+
+@media(max-width:1000px) {
+    .dashboard-record-list .dashboard-record-card {
+        grid-template-columns: 1fr 1fr;
+        gap: 18px 24px;
+        padding: 18px;
+    }
+
+    .dashboard-record-list .dashboard-record-field:nth-of-type(n+2) {
+        padding-left: 0;
+        border-left: 0;
+    }
+
+    .dashboard-record-list .dashboard-record-open {
+        grid-column: 1/-1;
+        justify-self: end;
+    }
+}
+
 .dashboard-record-link:hover {
     text-decoration: underline
 }
