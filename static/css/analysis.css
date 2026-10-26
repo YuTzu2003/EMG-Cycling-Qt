@@ -539,6 +539,62 @@
     min-height: 42px
 }
 
+.analysis-page-actions .action-button {
+    border-width: 1px;
+    font-weight: 600;
+    box-shadow: none;
+    transition: background-color .16s ease, border-color .16s ease, color .16s ease, transform .16s ease
+}
+
+.analysis-page-actions .action-button:hover {
+    transform: translateY(-1px)
+}
+
+.analysis-page-actions .action-button-back {
+    background: #fff;
+    border-color: #94a3b8;
+    color: #334155
+}
+
+.analysis-page-actions .action-button-back:hover { background: #f1f5f9; border-color: #64748b; color: #1e293b }
+
+.analysis-page-actions .action-button-angle {
+    background: #6d4aa2;
+    border-color: #6d4aa2;
+    color: #fff
+}
+
+.analysis-page-actions .action-button-angle:hover { background: #593887; border-color: #593887; color: #fff }
+
+.analysis-page-actions .action-button-import {
+    background: #087f5b;
+    border-color: #087f5b;
+    color: #fff
+}
+
+.analysis-page-actions .action-button-import:hover { background: #056946; border-color: #056946; color: #fff }
+
+.analysis-page-actions .action-button-export {
+    background: #1769aa;
+    border-color: #1769aa;
+    color: #fff
+}
+
+.analysis-page-actions .action-button-export:hover { background: #11588f; border-color: #11588f; color: #fff }
+
+.analysis-page-actions .action-button-delete {
+    background: #fff;
+    border-color: #dc3545;
+    color: #c42535
+}
+
+.analysis-page-actions .action-button-delete:hover { background: #fff1f2; border-color: #b91c2b; color: #a41422 }
+
+.analysis-page-actions .action-button:focus-visible {
+    outline: 3px solid var(--focus);
+    outline-offset: 3px
+}
+
 .analysis-page-actions .btn-export {
     background: var(--teal);
     border-color: var(--teal);

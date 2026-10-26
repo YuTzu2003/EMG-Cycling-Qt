@@ -3,44 +3,111 @@
 {% macro metric(label, stats, unit='') -%}
 <div class="qt-metric"><span>{{ label }}</span><strong>{{ '%.2f'|format(stats.mean) if stats and stats.mean is not none else '—' }}{{ unit }}</strong><small>最高 {{ '%.2f'|format(stats.max) if stats and stats.max is not none else '—' }}{{ unit }}</small></div>
 {%- endmacro %}
+{% macro angle_report_table(title, headers, rows) -%}
+<h4 class="angle-report-heading">【{{ title }}】</h4>
+<div class="table-responsive angle-table"><table class="table table-sm data-table angle-qt-table"><thead><tr>{% for header in headers %}<th scope="col">{{ header }}</th>{% endfor %}</tr></thead><tbody>{% for row in rows %}<tr>{% for value in row %}<td>{{ value }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div>
+{%- endmacro %}
 {% block content %}
-<div class="analysis-page-actions analysis-page-actions-right"><a class="btn btn-outline-secondary" data-history-back href="{{ url_for('patients.sessions', patient_id=record.patient_id) }}">← 返回上一頁</a><button class="btn btn-success" type="button" data-bs-toggle="modal" data-bs-target="#raw-data-import">匯入原始資料</button><a class="btn btn-export" href="{{ url_for('analysis.download_pdf_report', session_id=record.session_id) }}">匯出 PDF</a><form method="post" action="{{ url_for('analysis.delete_session', session_id=record.session_id) }}" class="d-inline"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button type="submit" class="btn btn-outline-danger" onclick="return confirm('確定要永久刪除這次測試的分析與原始資料嗎？此操作無法復原。');">刪除測試</button></form></div>
+<div class="analysis-page-actions analysis-page-actions-right"><a class="btn btn-secondary" href="{{ url_for('patients.sessions', patient_id=record.patient_id) }}">← 返回分析頁</a><button class="btn btn-info" type="button" data-bs-toggle="modal" data-bs-target="#detail-angle-settings">角度分析設定</button><button class="btn btn-success" type="button" data-bs-toggle="modal" data-bs-target="#raw-data-import">匯入原始資料</button><a class="btn btn-dark" href="{{ url_for('analysis.download_pdf_report', session_id=record.session_id) }}">匯出 PDF</a><form method="post" action="{{ url_for('analysis.delete_session', session_id=record.session_id) }}" class="d-inline"><input type="hidden" name="csrf" value="{{ csrf_token }}"><button type="submit" class="btn btn-danger" onclick="return confirm('確定要永久刪除這次測試的分析與原始資料嗎？此操作無法復原。');">刪除測試</button></form></div>
 <div class="modal fade" id="raw-data-import" tabindex="-1" aria-labelledby="raw-data-import-title" aria-hidden="true"><div class="modal-dialog modal-lg"><form method="post" action="{{ url_for('analysis.upload') }}" enctype="multipart/form-data" class="modal-content"><input type="hidden" name="csrf" value="{{ csrf_token }}"><input type="hidden" name="test_id" value="{{ record.session_id }}"><div class="modal-header"><div><h2 class="modal-title fs-5" id="raw-data-import-title">匯入原始資料</h2><p class="text-secondary small mb-0">資料會套用到目前這筆測試並重新分析。</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="關閉"></button></div><div class="modal-body"><div class="alert alert-warning small">匯入後會覆蓋此測試目前的 EMG、踏板、阻力／訓練器、基準與原始檔資料。</div><div class="row g-3">{% for kind, label in [('emg','EMG 原始 CSV'),('pedal','踏板 CSV'),('trainer','阻力／訓練器 CSV'),('angle','踏板角度 CSV')] %}<div class="col-md-6"><label class="form-label" for="modal-{{ kind }}">{{ label }}</label><input class="form-control" type="file" id="modal-{{ kind }}" name="{{ kind }}" accept=".csv,text/csv"></div>{% endfor %}</div></div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button><button type="submit" class="btn btn-success">匯入並重新分析</button></div></form></div></div>
 <section class="test-overview surface mb-4">
-  <div class="table-responsive"><table class="table test-overview-table mb-0"><thead><tr><th>測試者</th><th>病歷編號</th><th>測試時間</th><th>狀態</th><th>資料概況</th></tr></thead><tbody><tr><td><strong>{{ record.patient_name or record.patient_id }}</strong></td><td>{{ record.patient_id }}</td><td><strong>{{ record.started_at[:19]|replace('T', ' ') }}</strong></td><td><span class="status-pill">{{ record.status }}</span></td><td><strong>EMG {{ analysis.emg|length }} 個通道</strong><small class="d-block text-secondary">踏板 {{ pedal_sample_count }} 筆 · 訓練器 {{ trainer_sample_count }} 筆</small></td></tr></tbody></table></div>
+  <div class="table-responsive"><table class="table test-overview-table mb-0"><thead><tr><th>測試者</th><th>病歷編號</th><th>測試時間</th><th>測試時長</th><th>狀態</th><th>資料概況</th></tr></thead><tbody><tr><td><strong>{{ record.patient_name or record.patient_id }}</strong></td><td>{{ record.patient_id }}</td><td><strong>{{ record.started_at[:19]|replace('T', ' ') }}</strong></td><td><strong>{{ test_duration_label }}</strong></td><td><span class="status-pill">完成</span></td><td><strong>EMG {{ analysis.emg|length }} 個通道</strong><small class="d-block text-secondary">踏板 {{ pedal_sample_count }} 筆 · 訓練器 {{ trainer_sample_count }} 筆</small></td></tr></tbody></table></div>
 </section>
 <ul class="nav nav-pills analysis-tabs mb-4" id="analysis-tabs" role="tablist">
-  <li class="nav-item"><a class="nav-link {{ 'active' if selected_view == 'pedal' else '' }}" href="{{ url_for('analysis.session_detail', session_id=record.session_id, view='pedal') }}">踏板分析</a></li>
-  <li class="nav-item"><a class="nav-link {{ 'active' if selected_view == 'emg' else '' }}" href="{{ url_for('analysis.session_detail', session_id=record.session_id, view='emg') }}">肌電分析</a></li>
-  <li class="nav-item"><a class="nav-link {{ 'active' if selected_view == 'angle' else '' }}" href="{{ url_for('analysis.session_detail', session_id=record.session_id, view='angle') }}">踏板角度分析</a></li>
-  <li class="nav-item"><a class="nav-link {{ 'active' if selected_view == 'files' else '' }}" href="{{ url_for('analysis.session_detail', session_id=record.session_id, view='files') }}">原始資料</a></li>
+  <li class="nav-item"><a class="nav-link {{ 'active' if selected_view == 'pedal' else '' }}" href="{{ url_for('analysis.session_detail', session_id=record.session_id, view='pedal') }}{{ angle_query_suffix }}">踏板分析</a></li>
+  <li class="nav-item"><a class="nav-link {{ 'active' if selected_view == 'emg' else '' }}" href="{{ url_for('analysis.session_detail', session_id=record.session_id, view='emg') }}{{ angle_query_suffix }}">肌電分析</a></li>
+  <li class="nav-item"><a class="nav-link {{ 'active' if selected_view == 'angle' else '' }}" href="{{ url_for('analysis.session_detail', session_id=record.session_id, view='angle') }}{{ angle_query_suffix }}">踏板角度分析</a></li>
+  <li class="nav-item"><a class="nav-link {{ 'active' if selected_view == 'files' else '' }}" href="{{ url_for('analysis.session_detail', session_id=record.session_id, view='files') }}{{ angle_query_suffix }}">原始資料</a></li>
 </ul>
 <div class="tab-content analysis-content" id="analysis-content">
   {% if selected_view == 'pedal' %}
 <section class="tab-pane analysis-pane is-active" id="pedal-tab">
-    <div class="qt-tab-intro"><h2>踏板分析</h2><p>呈現與 Qt 相同的功率、踏頻、左右平衡、騎乘摘要、訓練區間與效能指標。</p></div>
+    <div class="qt-tab-intro"><h2>踏板分析</h2></div>
+    <form class="angle-chart-controls pedal-ftp-controls" method="get" action="{{ url_for('analysis.session_detail', session_id=record.session_id) }}">
+      <input type="hidden" name="view" value="pedal">
+      {% for key, value in angle_query if key != 'ftp_w' %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+      <label for="pedal-ftp">FTP</label><input id="pedal-ftp" class="form-control" type="number" name="ftp_w" min="1" max="600" value="{{ ftp_w }}" required><span>W</span>
+      <span class="text-secondary small">僅供騎乘訓練指標計算</span><button class="btn btn-outline-dark btn-sm" type="submit">套用</button>
+    </form>
     {% if pedal_power_series or pedal_cadence_series or pedal_balance_series %}
-    <div class="row g-3 pedal-workspace"><div class="col-xl-8"><div class="d-grid gap-3"><div class="surface analysis-chart-card"><div class="chart-card-header"><h3>功率</h3><span>平均 {{ '%.0f W'|format(pedal_summary.average_power_w) if pedal_summary and pedal_summary.average_power_w is not none else '—' }} · 最大 {{ '%.0f W'|format(pedal_summary.maximum_power_w) if pedal_summary and pedal_summary.maximum_power_w is not none else '—' }}</span></div><div id="pedal-power-chart" class="qt-chart pedal-chart"></div></div><div class="surface analysis-chart-card"><div class="chart-card-header"><h3>踏頻</h3><span>平均 {{ '%.0f rpm'|format(pedal_summary.average_cadence_rpm) if pedal_summary and pedal_summary.average_cadence_rpm is not none else '—' }} · 最大 {{ '%.0f rpm'|format(pedal_summary.maximum_cadence_rpm) if pedal_summary and pedal_summary.maximum_cadence_rpm is not none else '—' }}</span></div><div id="pedal-cadence-chart" class="qt-chart pedal-chart"></div></div><div class="surface analysis-chart-card"><div class="chart-card-header"><h3>左右平衡</h3><span>單位：%</span></div><div id="pedal-balance-chart" class="qt-chart pedal-chart"></div></div></div></div><div class="col-xl-4"><div class="d-grid gap-3"><div class="surface form-panel pedal-summary-card"><h2>踏板資訊</h2><div class="pedal-facts"><div><span>資料筆數</span><strong>{{ pedal_summary.sample_count if pedal_summary else '—' }}</strong></div><div><span>測試時間</span><strong>{{ '%.0f 秒'|format(pedal_summary.duration_seconds) if pedal_summary and pedal_summary.duration_seconds is not none else '—' }}</strong></div><div><span>平均功率</span><strong>{{ '%.1f W'|format(pedal_summary.average_power_w) if pedal_summary and pedal_summary.average_power_w is not none else '—' }}</strong></div><div><span>最高功率</span><strong>{{ '%.1f W'|format(pedal_summary.maximum_power_w) if pedal_summary and pedal_summary.maximum_power_w is not none else '—' }}</strong></div><div><span>平均踏頻</span><strong>{{ '%.1f rpm'|format(pedal_summary.average_cadence_rpm) if pedal_summary and pedal_summary.average_cadence_rpm is not none else '—' }}</strong></div><div><span>最高踏頻</span><strong>{{ '%.1f rpm'|format(pedal_summary.maximum_cadence_rpm) if pedal_summary and pedal_summary.maximum_cadence_rpm is not none else '—' }}</strong></div></div></div><div class="surface form-panel pedal-summary-card"><h2>雙腳平衡與估計功率</h2><div class="balance-rings"><div class="balance-ring balance-left" style="--balance: {{ pedal_summary.average_left_balance_percent if pedal_summary and pedal_summary.average_left_balance_percent is not none else 0 }}%"><span class="balance-value">{{ '%.1f%%'|format(pedal_summary.average_left_balance_percent) if pedal_summary and pedal_summary.average_left_balance_percent is not none else '—' }}</span><small>左側平衡</small><strong>{{ '%.1f W'|format(pedal_summary.average_left_power_w) if pedal_summary and pedal_summary.average_left_power_w is not none else '—' }}</strong></div><div class="balance-ring balance-right" style="--balance: {{ pedal_summary.average_right_balance_percent if pedal_summary and pedal_summary.average_right_balance_percent is not none else 0 }}%"><span class="balance-value">{{ '%.1f%%'|format(pedal_summary.average_right_balance_percent) if pedal_summary and pedal_summary.average_right_balance_percent is not none else '—' }}</span><small>右側平衡</small><strong>{{ '%.1f W'|format(pedal_summary.average_right_power_w) if pedal_summary and pedal_summary.average_right_power_w is not none else '—' }}</div></div></div><div class="surface form-panel pedal-summary-card"><h2>訓練效能</h2>{% if pedal_performance %}<div class="performance-grid"><div><span>正規化功率</span><strong>{{ '%.1f W'|format(pedal_performance.normalized_power_w) if pedal_performance.normalized_power_w is not none else '—' }}</strong></div><div><span>強度係數</span><strong>{{ '%.2f'|format(pedal_performance.intensity_factor) if pedal_performance.intensity_factor is not none else '—' }}</strong></div><div><span>訓練負荷 TSS</span><strong>{{ '%.1f'|format(pedal_performance.tss) if pedal_performance.tss is not none else '—' }}</strong></div><div><span>累積輸出</span><strong>{{ '%.1f kJ'|format(pedal_performance.energy_kj) if pedal_performance.energy_kj is not none else '—' }}</strong></div><div><span>5 秒峰值</span><strong>{{ '%.0f W'|format(pedal_performance.peak_5s_w) if pedal_performance.peak_5s_w is not none else '—' }}</strong></div><div><span>60 秒峰值</span><strong>{{ '%.0f W'|format(pedal_performance.peak_60s_w) if pedal_performance.peak_60s_w is not none else '—' }}</strong></div></div>{% endif %}</div></div></div></div>
+    <div class="pedal-workspace">
+      <aside class="pedal-sidebar">
+        <div class="surface form-panel pedal-summary-card">
+          <h3>踏板重點</h3>
+          <div class="pedal-facts">
+            <div><span>測試時長</span><strong>{{ '%.0f 秒'|format(pedal_summary.duration_seconds) if pedal_summary and pedal_summary.duration_seconds is not none else '—' }}</strong></div>
+            <div><span>資料筆數</span><strong>{{ pedal_summary.sample_count if pedal_summary else '—' }} 筆</strong></div>
+            <div><span>平均／最大功率</span><strong>{{ '%.0f'|format(pedal_summary.average_power_w) if pedal_summary and pedal_summary.average_power_w is not none else '—' }}／{{ '%.0f W'|format(pedal_summary.maximum_power_w) if pedal_summary and pedal_summary.maximum_power_w is not none else '—' }}</strong></div>
+            <div><span>平均／最大踏頻</span><strong>{{ '%.0f'|format(pedal_summary.average_cadence_rpm) if pedal_summary and pedal_summary.average_cadence_rpm is not none else '—' }}／{{ '%.0f rpm'|format(pedal_summary.maximum_cadence_rpm) if pedal_summary and pedal_summary.maximum_cadence_rpm is not none else '—' }}</strong></div>
+          </div>
+        </div>
+        {% if pedal_performance %}<div class="surface form-panel pedal-summary-card">
+          <h3>訓練負荷</h3>
+          <div class="performance-grid">
+            <div><span>標準化功率</span><strong>{{ '%.0f W'|format(pedal_performance.normalized_power_w) if pedal_performance.normalized_power_w is not none else '—' }}</strong></div>
+            <div><span>強度因子</span><strong>{{ '%.2f'|format(pedal_performance.intensity_factor) if pedal_performance.intensity_factor is not none else '—' }}</strong></div>
+            <div><span>訓練負荷 TSS</span><strong>{{ '%.1f'|format(pedal_performance.tss) if pedal_performance.tss is not none else '—' }}</strong></div>
+            <div><span>累積踩踏輸出</span><strong>{{ '%.1f kJ'|format(pedal_performance.energy_kj) if pedal_performance.energy_kj is not none else '—' }}</strong></div>
+          </div>
+        </div>{% endif %}
+        <div class="surface form-panel pedal-summary-card">
+          <h3>雙腳平衡與估計功率</h3>
+          <p class="text-secondary small">左右功率由總功率與踏板回報的左右平衡估算，並非 Power Phase。</p>
+          <div class="balance-rings">
+            <div class="balance-ring balance-left" style="--balance: {{ pedal_summary.average_left_balance_percent if pedal_summary and pedal_summary.average_left_balance_percent is not none else 0 }}%">
+              <span class="balance-value">{{ '%.1f%%'|format(pedal_summary.average_left_balance_percent) if pedal_summary and pedal_summary.average_left_balance_percent is not none else '—' }}</span>
+              <small>左腳</small><strong>{{ '%.1f W'|format(pedal_summary.average_left_power_w) if pedal_summary and pedal_summary.average_left_power_w is not none else '—' }}</strong>
+            </div>
+            <div class="balance-ring balance-right" style="--balance: {{ pedal_summary.average_right_balance_percent if pedal_summary and pedal_summary.average_right_balance_percent is not none else 0 }}%">
+              <span class="balance-value">{{ '%.1f%%'|format(pedal_summary.average_right_balance_percent) if pedal_summary and pedal_summary.average_right_balance_percent is not none else '—' }}</span>
+              <small>右腳</small><strong>{{ '%.1f W'|format(pedal_summary.average_right_power_w) if pedal_summary and pedal_summary.average_right_power_w is not none else '—' }}</strong>
+            </div>
+          </div>
+        </div>
+      </aside>
+      <div class="pedal-chart-stack">
+        <div class="surface analysis-chart-card pedal-power-card"><div id="pedal-power-chart" class="qt-chart pedal-chart"></div></div>
+        <div class="surface analysis-chart-card pedal-cadence-card"><div id="pedal-cadence-chart" class="qt-chart pedal-chart"></div></div>
+        <div class="surface analysis-chart-card pedal-balance-card"><div id="pedal-balance-chart" class="qt-chart pedal-chart"></div></div>
+      </div>
+    </div>
     {% if pedal_performance and pedal_performance.zones %}<div class="surface table-responsive mt-3"><table class="table data-table"><thead><tr><th>訓練區間</th><th>功率範圍</th><th>時間</th><th>比例</th></tr></thead><tbody>{% for zone in pedal_performance.zones %}<tr><td>{{ zone.name }}</td><td>{{ zone.bounds }}</td><td>{{ zone.seconds }} 秒</td><td>{{ '%.1f%%'|format(zone.percent) }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
     {% else %}<div class="surface empty mb-4">此測試沒有踏板時間序列資料。</div>{% endif %}
   </section>
 {% endif %}
   {% if selected_view == 'emg' %}
 <section class="tab-pane analysis-pane is-active" id="emg-tab">
-    <div class="qt-tab-intro"><h2>肌電分析</h2><p>查看各肌肉的 RMS 平均值、峰值，以及每秒最高值形成的包絡線。</p></div>
+    <div class="qt-tab-intro"><h2>肌電分析</h2></div>
+    <div class="qt-metric-grid emg-metric-grid mb-4"><div class="qt-metric"><span>收集時間</span><strong>{{ '%.0f'|format(analysis.duration_s) if analysis.duration_s is not none else '--' }} <small class="d-inline">s</small></strong></div><div class="qt-metric"><span>肌肉</span><strong>{{ emg_bars|length }} <small class="d-inline">部位</small></strong></div></div>
     {% if emg_bars %}
-    <div class="row g-3 mb-4"><div class="col-xl-6"><div class="surface analysis-chart-card"><div class="chart-card-header"><h3>RMS 平均值</h3><span>單位：mV</span></div><div id="emg-average-chart" class="qt-chart"></div></div></div><div class="col-xl-6"><div class="surface analysis-chart-card"><div class="chart-card-header"><h3>RMS 峰值</h3><span>單位：mV</span></div><div id="emg-peak-chart" class="qt-chart"></div></div></div></div>
-    <div class="surface analysis-chart-card mb-4"><div class="chart-card-header envelope-header"><div><h3>RMS Peak 包絡線</h3><span>每 1 秒最高值</span></div><div class="d-flex align-items-center gap-2"><label class="form-label mb-0" for="envelope-muscle">肌肉</label><select id="envelope-muscle" class="form-select form-select-sm envelope-select">{% for item in emg_envelopes %}<option value="{{ item.slot }}">{{ item.label }}</option>{% endfor %}</select></div></div><div id="emg-envelope-chart" class="qt-chart qt-chart-large"></div></div>
+    <div class="row g-3 mb-4 emg-chart-row"><div class="col-xl-6"><div class="surface analysis-chart-card"><div id="emg-average-chart" class="qt-chart"></div></div></div><div class="col-xl-6"><div class="surface analysis-chart-card"><div id="emg-peak-chart" class="qt-chart"></div></div></div></div>
+    <div class="surface analysis-chart-card mb-4"><div class="chart-card-header envelope-header"><div class="d-flex align-items-center gap-2"><label class="form-label mb-0" for="envelope-muscle">肌肉</label><select id="envelope-muscle" class="form-select form-select-sm envelope-select">{% for item in emg_envelopes %}<option value="{{ item.slot }}">{{ item.label }}</option>{% endfor %}</select></div></div><div id="emg-envelope-chart" class="qt-chart qt-chart-large"></div></div>
     {% else %}<div class="surface empty mb-4">此測試沒有可分析的 EMG RMS 資料。</div>{% endif %}
-    <div class="surface table-responsive"><table class="table data-table"><thead><tr><th>通道 / 肌肉</th><th>RMS 平均值</th><th>RMS Peak 值</th><th>前段 RMS</th><th>後段 RMS</th><th>基準差異</th><th>品質</th></tr></thead><tbody>{% for slot, item in analysis.emg.items() %}<tr><td><strong>S{{ '%02d'|format(slot|int) }}</strong><small class="d-block text-secondary">{{ emg_channel_names.get(slot|string, '未設定肌肉名稱') }}</small></td><td>{{ '%.3f mV'|format(item.rms_mv.mean) if item.rms_mv.mean is not none else '—' }}</td><td>{{ '%.3f mV'|format(emg_peak_by_slot.get('S%02d'|format(slot|int))) if emg_peak_by_slot.get('S%02d'|format(slot|int)) is not none else '—' }}</td><td>{{ '%.3f mV'|format(item.early_rms_mv) if item.early_rms_mv is not none else '—' }}</td><td>{{ '%.3f mV'|format(item.late_rms_mv) if item.late_rms_mv is not none else '—' }}</td><td>{{ '%.3f mV'|format(item.comparison.mean) if item.comparison.mean is not none else '—' }}</td><td>{{ item.quality|join('、') if item.quality else '良好' }}</td></tr>{% else %}<tr><td colspan="7" class="empty">沒有 EMG 通道資料。</td></tr>{% endfor %}</tbody></table></div>
+    <p class="text-secondary small mb-2">基準比較只使用本次訊號已套用的基準值；其他測試保存的基準會另外標示，須確認感測器與分析設定相容後才能比較。</p>
+    <div class="surface table-responsive emg-qt-table">
+      <table class="table data-table">
+        <thead><tr><th>肌肉／側別</th><th>平均 RMS</th><th>最大 RMS</th><th>基準比較</th><th>前段 → 後段</th><th>資料狀態</th></tr></thead>
+        <tbody>
+        {% for slot, item in analysis.emg.items() %}
+          <tr>
+            <td class="emg-muscle-cell"><strong>{{ emg_channel_names.get(slot|string, '未設定肌肉名稱') }}</strong><small>S{{ '%02d'|format(slot|int) }}</small></td>
+            <td>{{ '%.3f mV'|format(item.rms_mv.mean) if item.rms_mv.mean is not none else '--' }}</td>
+            <td>{{ '%.3f mV'|format(item.rms_mv.max) if item.rms_mv.max is not none else '--' }}</td>
+            <td>{% set baseline = emg_baseline_info.get(slot|string, {}) %}{% if baseline.applied is defined and baseline.applied is not none %}<strong>{{ 'Δ %+.3f mV'|format(item.comparison.mean) if item.comparison.mean is not none else '—' }}</strong><small class="d-block text-secondary">已套用 {{ '%.3f mV'|format(baseline.applied) }}</small>{% elif baseline.reference is defined and baseline.reference is not none %}<strong>本次測試有基準，未套用</strong><small class="d-block text-secondary">儲存值 {{ '%.3f mV'|format(baseline.reference) }}</small>{% elif baseline.prior is defined and baseline.prior is not none %}<span class="text-secondary">此測試未套用基準值</span>{% else %}<span class="text-secondary">此測試無基準值</span>{% endif %}</td>
+            <td>{{ '%.3f'|format(item.early_rms_mv) if item.early_rms_mv is not none else '--' }} → {{ '%.3f'|format(item.late_rms_mv) if item.late_rms_mv is not none else '--' }} mV</td>
+            <td>{{ item.quality|join('、') if item.quality else '有效' }}</td>
+          </tr>
+        {% else %}<tr><td colspan="6" class="empty">沒有 EMG 通道資料。</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
   </section>
 {% endif %}
   {% if selected_view == 'angle' %}
 <section class="tab-pane analysis-pane is-active" id="angle-tab">
-    <div class="d-flex justify-content-end mb-3"><button class="btn btn-outline-dark" type="button" data-bs-toggle="modal" data-bs-target="#detail-angle-settings">角度分析設定</button></div>
-    <div class="qt-tab-intro"><h2>踩踏角度分析</h2><p>使用 Qt 原本的 EMG 與踏板角度分析流程，呈現逐圈與前後段結果。</p></div>
+    <div class="qt-tab-intro"><h2>踩踏角度分析</h2></div>
     <nav class="angle-view-nav mb-3" aria-label="踩踏角度分析項目">
-      {% for key, title in angle_sections %}<a class="angle-view-link {{ 'active' if angle_section == key else '' }}" href="{{ url_for('analysis.session_detail', session_id=record.session_id, view='angle', angle_section=key) }}">{{ title }}</a>{% endfor %}
+      {% for key, title in angle_sections %}<a class="angle-view-link {{ 'active' if angle_section == key else '' }}" href="{{ url_for('analysis.session_detail', session_id=record.session_id, view='angle', angle_section=key) }}{{ angle_query_suffix }}">{{ title }}</a>{% endfor %}
     </nav>
     <section class="surface form-panel angle-view-content">
       <h3 class="small-title">{{ dict(angle_sections)[angle_section] }}</h3>
@@ -48,30 +115,87 @@
         <div class="angle-empty"><span class="angle-empty-icon" aria-hidden="true">◌</span><p class="fw-semibold mb-2">等待原始資料以完成分析</p><p class="text-secondary mb-0">{% if angle_error %}{{ angle_error }}{% else %}這筆測試尚未保存原始 EMG 與踏板曲柄事件或角度資料。此位置會顯示 Qt 對應的「{{ dict(angle_sections)[angle_section] }}」分析結果。{% endif %}</p></div>
       {% elif angle_section == 'overview' %}
         <p class="preserve-lines mb-0">{{ angle_result.overview }}</p>
-      {% elif angle_section in ('muscle', 'profiles') %}
-        <div class="profile-grid">{{ angle_result.profile_charts }}</div><div class="table-responsive angle-table mt-3">{{ angle_tables.profiles }}</div>
-      {% elif angle_section in ('fatigue', 'comparison', 'values') %}
-        <div class="table-responsive angle-table">{{ angle_tables.summary }}</div>
-      {% elif angle_section in ('fatigue_trend', 'cycle8') %}
-        <div class="table-responsive angle-table">{{ angle_tables.cycles }}</div>
+      {% elif angle_section == 'muscle' %}
+        <div class="angle-chart-controls"><label for="angle-detail-muscle">查看肌肉</label><select id="angle-detail-muscle" class="form-select"></select></div>
+        <p id="angle-detail-label" class="text-secondary"></p><div id="angle-detail-chart" class="qt-chart qt-chart-large"></div>
+        <p class="text-secondary small mb-0">藍線＝前段，紅線＝後段；垂直虛線＝各段峰值相位。肌電訊號強度不等於施力大小。</p>
+      {% elif angle_section == 'fatigue' %}
+        <p class="text-secondary">每個肌肉一組直向長條；藍色為左腳、橘色為右腳。</p>
+        <div class="angle-chart-scroll mb-4"><div id="angle-rms-change" class="qt-chart qt-chart-large"></div></div><div class="angle-chart-scroll"><div id="angle-mdf-change" class="qt-chart qt-chart-large"></div></div>
+      {% elif angle_section == 'fatigue_trend' %}
+        <div class="angle-chart-controls"><label for="angle-fatigue-muscle">肌肉</label><select id="angle-fatigue-muscle" class="form-select form-select-sm"></select></div>
+        <p class="text-secondary">每條線為一側肌肉，以 9 圈移動平均顯示逐圈變化。</p>
+        <div id="angle-fatigue-rms" class="qt-chart qt-chart-large"></div><div id="angle-fatigue-mdf" class="qt-chart qt-chart-large"></div>
+      {% elif angle_section == 'phase' %}
+        <div class="angle-chart-controls"><label for="angle-phase-input">查看踩踏相位</label><input id="angle-phase-input" class="form-control angle-phase-input" type="number" min="0" max="359" step="15" value="0"><span>°</span></div>
+        <p id="angle-phase-description" class="text-secondary"></p><div class="angle-chart-scroll"><div id="angle-phase-chart" class="qt-chart qt-chart-large"></div></div>
+        <p class="text-secondary small mb-0">每條肌肉各自正規化；百分比用於比較該肌肉在不同相位的訊號，不代表實際出力或跨肌肉力量。</p>
+      {% elif angle_section == 'heatmap' %}
+        <div class="angle-chart-scroll"><div id="angle-heatmap-chart" class="qt-chart qt-chart-large"></div></div>
+      {% elif angle_section == 'profiles' %}
+        <div class="angle-chart-controls"><label for="angle-profile-muscle">肌肉</label><select id="angle-profile-muscle" class="form-select"></select></div>
+        <p class="text-secondary">每個肌肉的左、右腳並排；藍線為前段、紅線為後段。</p>
+        <div class="row g-3"><div class="col-lg-6"><div id="angle-profile-left" class="qt-chart qt-chart-large"></div></div><div class="col-lg-6"><div id="angle-profile-right" class="qt-chart qt-chart-large"></div></div></div>
+      {% elif angle_section == 'polar' %}
+        <div class="angle-chart-controls"><label for="angle-polar-muscle">肌肉</label><select id="angle-polar-muscle" class="form-select"></select></div>
+        <p class="text-secondary">0° 位於正上方，角度順時針增加；半徑是各肌肉自身相對活化（%）。藍線為前段，紅線為後段。</p>
+        <div id="angle-polar-grid" class="angle-polar-grid"></div>
+      {% elif angle_section == 'cycle8' %}
+        <div class="angle-chart-controls"><label for="angle-cycle-muscle">肌肉</label><select id="angle-cycle-muscle" class="form-select"></select><label for="angle-cycle-angle">踩踏角度</label><select id="angle-cycle-angle" class="form-select"><option value="">全部角度</option>{% for degree in range(0, 360, 45) %}<option value="{{ degree }}">{{ degree }}°</option>{% endfor %}</select></div>
+        <p class="text-secondary">可選擇單一角度來比較左、右腳逐圈變化；「全部角度」顯示 0°、45°、90°…315°。已以 5 圈移動平均平滑，淡藍為前段、淡紅為後段。</p>
+        <div class="row g-3"><div class="col-lg-6"><div id="angle-cycle-left" class="qt-chart qt-chart-large"></div></div><div class="col-lg-6"><div id="angle-cycle-right" class="qt-chart qt-chart-large"></div></div></div>
+      {% elif angle_section == 'comparison' %}
+        <h4 class="angle-report-heading">前後段數值比較</h4>
+        <div class="table-responsive angle-table"><table class="table table-sm data-table angle-qt-table"><thead><tr>{% for heading in ['肌肉／側別', '前段圈數', '後段圈數', '前段 RMS µV', '後段 RMS µV', 'RMS 變化 %', '前段峰值 °', '後段峰值 °', '峰值位移 °', 'MDF 變化 Hz'] %}<th scope="col">{{ heading }}</th>{% endfor %}</tr></thead><tbody>{% for row in qt_angle_report.comparison %}<tr class="angle-comparison-row" data-channel="{{ qt_angle_report.comparison_channels[loop.index0] }}" tabindex="0" title="開啟肌肉曲線">{% for value in row %}<td>{{ value }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div>
+      {% elif angle_section == 'values' %}
+        <div class="angle-chart-controls"><label for="angle-value-muscle">肌肉</label><select id="angle-value-muscle" class="form-select"></select></div>
+        <p class="text-secondary">每個角度為 ±15° 視窗平均；Δ = 後段 − 前段。</p>
+        <div class="table-responsive angle-table"><table class="table table-sm data-table angle-qt-table"><thead><tr>{% for heading in ['踩踏角度', '左前段', '左後段', '左 Δ', '右前段', '右後段', '右 Δ'] %}<th scope="col">{{ heading }}</th>{% endfor %}</tr></thead><tbody id="angle-value-rows"></tbody></table></div>
       {% elif angle_section == 'interpretation' %}
-        <p class="preserve-lines">{{ angle_result.overview }}</p><pre class="json-block">{{ angle_result.settings | tojson(indent=2) }}
-{{ angle_result.sync | tojson(indent=2) }}</pre>
-      {% else %}
-        <div class="angle-empty"><p class="fw-semibold mb-2">此圖表位置已預留</p><p class="text-secondary mb-0">Qt 的「{{ dict(angle_sections)[angle_section] }}」互動圖仍待轉成網頁圖表。現有數值可在前後段表格與逐圈資料查看。</p></div>
+        {{ angle_report_table('測試與同步', ['項目', '數值'], qt_angle_report.sync) }}
+        {{ angle_report_table('通道與貼片對應', ['肌肉 / 部位', '通道'], qt_angle_report.mapping) }}
+        {{ angle_report_table('重點結果', ['項目', '結果'], qt_angle_report.highlights) }}
+        {{ angle_report_table('通道前後段數值', ['肌肉 / 通道', 'RMS 前→後 (µV)', 'RMS %', 'MDF 前→後 (Hz)', '峰值角度變化', '判讀提示'], qt_angle_report.channels) }}
+        <h4 class="angle-report-heading">【判讀限制】</h4><div class="table-responsive angle-table"><table class="table table-sm data-table angle-qt-table"><thead><tr><th scope="col">注意事項</th></tr></thead><tbody>{% for note in qt_angle_report.limitations %}<tr><td>{{ note }}</td></tr>{% endfor %}</tbody></table></div>
       {% endif %}
     </section>
   </section>
-<div class="modal fade" id="detail-angle-settings" tabindex="-1" aria-labelledby="detail-angle-settings-title" aria-hidden="true"><div class="modal-dialog modal-lg modal-dialog-scrollable"><form method="get" action="{{ url_for('analysis.session_detail', session_id=record.session_id) }}" class="modal-content"><input type="hidden" name="view" value="angle"><input type="hidden" name="angle_settings" value="1"><div class="modal-header"><div><h2 class="modal-title fs-5" id="detail-angle-settings-title">角度分析設定</h2><p class="text-secondary small mb-0">設定與 Qt 角度分析一致；儲存後會在此頁重新分析。</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="關閉"></button></div><div class="modal-body"><div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" role="switch" id="detail-auto-range" name="angle_automatic_range" {% if request.args.get('angle_settings') != '1' or request.args.get('angle_automatic_range') == 'on' %}checked{% endif %}><label class="form-check-label" for="detail-auto-range">自動選取前後段比較時間</label></div><div class="row g-3"><div class="col-6 col-md-3"><label class="form-label">前段開始 / 秒</label><input class="form-control" type="number" name="angle_start_a" value="{{ request.args.get('angle_start_a', '5') }}" step="0.1"></div><div class="col-6 col-md-3"><label class="form-label">前段結束 / 秒</label><input class="form-control" type="number" name="angle_start_b" value="{{ request.args.get('angle_start_b', '65') }}" step="0.1"></div><div class="col-6 col-md-3"><label class="form-label">後段開始 / 秒</label><input class="form-control" type="number" name="angle_end_a" value="{{ request.args.get('angle_end_a', '240') }}" step="0.1"></div><div class="col-6 col-md-3"><label class="form-label">後段結束 / 秒</label><input class="form-control" type="number" name="angle_end_b" value="{{ request.args.get('angle_end_b', '300') }}" step="0.1"></div><div class="col-md-3"><label class="form-label">角度區間數</label><input class="form-control" type="number" name="angle_bins" min="8" max="72" value="{{ request.args.get('angle_bins', '24') }}"></div><div class="col-md-3"><label class="form-label">正規化百分位</label><input class="form-control" type="number" name="angle_percentile" min="50" max="99.9" step="0.1" value="{{ request.args.get('angle_percentile', '99') }}"></div><div class="col-md-3"><label class="form-label">手動 EMG 時鐘比例</label><input class="form-control" type="number" name="angle_scale" min="0.8" max="1.2" step="0.00001" value="{{ request.args.get('angle_scale', '1') }}"></div><div class="col-md-3"><label class="form-label">手動起點偏移 / 秒</label><input class="form-control" type="number" name="angle_offset_s" min="-30" max="30" step="0.001" value="{{ request.args.get('angle_offset_s', '0') }}"></div></div><div class="row g-3 mt-1"><div class="col-md-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" role="switch" id="detail-auto-scale" name="angle_auto_scale" {% if request.args.get('angle_settings') != '1' or request.args.get('angle_auto_scale') == 'on' %}checked{% endif %}><label class="form-check-label" for="detail-auto-scale">自動校正 EMG 時鐘比例</label></div></div><div class="col-md-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" role="switch" id="detail-auto-offset" name="angle_auto_offset" {% if request.args.get('angle_auto_offset') == 'on' %}checked{% endif %}><label class="form-check-label" for="detail-auto-offset">依角度資料自動估計起點偏移</label></div></div></div></div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button><button type="submit" class="btn btn-dark">儲存並重新分析</button></div></form></div></div>
 {% endif %}
+<div class="modal fade" id="detail-angle-settings" tabindex="-1" aria-labelledby="detail-angle-settings-title" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable"><form method="get" action="{{ url_for('analysis.session_detail', session_id=record.session_id) }}" class="modal-content">
+    <input type="hidden" name="view" value="angle"><input type="hidden" name="angle_settings" value="1"><input type="hidden" name="ftp_w" value="{{ ftp_w }}">
+    <div class="modal-header"><div><h2 class="modal-title fs-5" id="detail-angle-settings-title">踩踏角度分析設定</h2><p class="text-secondary small mb-0">操作與 Qt 版相同；儲存並套用後立即重新分析。</p></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="關閉"></button></div>
+    <div class="modal-body qt-angle-settings">
+      <div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" role="switch" id="detail-auto-range" name="angle_automatic_range" {% if request.args.get('angle_settings') != '1' or request.args.get('angle_automatic_range') == 'on' %}checked{% endif %}><label class="form-check-label" for="detail-auto-range">自動選取前後段比較時間</label><div class="form-text">依 EMG 與踏板共同資料長度，選取開頭及結尾的比較時段。</div></div>
+      <div class="row g-3 mb-3"><div class="col-md-6"><label class="form-label">前段比較時間 / 秒</label><div class="input-group"><input class="form-control" type="number" name="angle_start_a" value="{{ request.args.get('angle_start_a', '5') }}" step="0.1"><span class="input-group-text">至</span><input class="form-control" type="number" name="angle_start_b" value="{{ request.args.get('angle_start_b', '65') }}" step="0.1"></div></div><div class="col-md-6"><label class="form-label">後段比較時間 / 秒</label><div class="input-group"><input class="form-control" type="number" name="angle_end_a" value="{{ request.args.get('angle_end_a', '240') }}" step="0.1"><span class="input-group-text">至</span><input class="form-control" type="number" name="angle_end_b" value="{{ request.args.get('angle_end_b', '300') }}" step="0.1"></div></div></div>
+      <div class="row g-3 align-items-center mb-3"><div class="col-md-6"><div class="form-check form-switch"><input class="form-check-input" type="checkbox" role="switch" id="detail-auto-scale" name="angle_auto_scale" {% if request.args.get('angle_settings') != '1' or request.args.get('angle_auto_scale') == 'on' %}checked{% endif %}><label class="form-check-label" for="detail-auto-scale">自動估算 EMG 時鐘比例</label><div class="form-text">使用 EMG 與踏板 CSV 的時間戳，不需要額外校正角度資料。</div></div></div><div class="col-md-6"><label class="form-label mb-1">手動時間比例</label><input class="form-control" type="number" name="angle_scale" min="0.8" max="1.2" step="0.00001" value="{{ request.args.get('angle_scale', '1') }}"></div></div>
+      <div class="row g-3 align-items-center"><div class="col-md-6"><label class="form-label mb-1">起點偏移 / 秒</label><input class="form-control" type="number" name="angle_offset_s" min="-30" max="30" step="0.001" value="{{ request.args.get('angle_offset_s', '0') }}"><div class="form-text">只有已量測偏移時才需要填寫，否則維持 0。</div></div></div>
+    </div>
+    <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">取消</button><button type="submit" class="btn btn-dark">儲存並套用</button></div>
+  </form></div>
+</div>
   {% if selected_view == 'files' %}
-<section class="surface form-panel mb-3"><h2 class="h5">處理後資料下載</h2><p class="text-secondary small">每份 CSV 都會標示測試時長；EMG 另含基準參考欄位。基準值則可用獨立檔案清楚查看。</p><div class="d-flex flex-wrap gap-2"><a class="btn btn-outline-dark" href="{{ url_for('analysis.download_processed_data', session_id=record.session_id, kind='emg') }}">下載 EMGData CSV</a><a class="btn btn-outline-dark" href="{{ url_for('analysis.download_processed_data', session_id=record.session_id, kind='pedal') }}">下載 PedalData CSV</a><a class="btn btn-outline-dark" href="{{ url_for('analysis.download_processed_data', session_id=record.session_id, kind='trainer') }}">下載 TrainerData CSV</a><a class="btn btn-outline-primary" href="{{ url_for('analysis.download_processed_data', session_id=record.session_id, kind='baseline') }}">下載 TestBaselines CSV</a></div></section>
-<section class="tab-pane analysis-pane is-active" id="files-tab"><div class="surface file-list">{% for file in files %}<div><span><strong>{{ file.filename }}</strong><small>{{ file.kind|upper }} · {{ (file.size / 1024)|round(1) }} KB</small></span><a href="{{ url_for('analysis.download_file', session_id=record.session_id, kind=file.kind) }}">下載</a></div>{% else %}<div class="table-responsive"><table class="table data-table database-record-table mb-0"><thead><tr><th>資料來源</th><th>EMG 資料</th><th>踏板資料</th><th>訓練器資料</th></tr></thead><tbody><tr><td>Qt 收集後儲存於資料庫</td><td>{{ emg_sample_count }} 筆 · {{ analysis.emg|length }} 個通道</td><td>{{ pedal_sample_count }} 筆</td><td>{{ trainer_sample_count }} 筆</td></tr></tbody></table></div><p class="text-secondary small px-4 pt-3 mb-0">此筆舊測試沒有另外保存 CSV 檔案，網站已直接使用資料庫中的 EMG、踏板與訓練器記錄進行分析。</p>{% endfor %}</div></section>
+<section class="tab-pane analysis-pane is-active data-download-page" id="files-tab">
+  <section class="surface form-panel download-section">
+    <div class="download-section-heading"><div><h2>處理後資料</h2><p>由資料庫整理後的 CSV，可直接用於後續統計與判讀。</p></div><span class="download-count">4 份資料表</span></div>
+    <div class="table-responsive pt-3"><table class="table data-table download-data-table processed-download-data-table mb-0"><thead><tr><th>資料種類</th><th>檔案名稱</th><th>資料內容</th><th class="text-end">下載</th></tr></thead><tbody>
+      {% for kind, name, filename, description in [('emg','EMG','EMGData.csv','RMS、最大值、基準參考、偏差與資料品質'), ('pedal','Pedal','PedalData.csv','總功率、左右功率、平衡、踏頻與角度'), ('trainer','Trainer','TrainerData.csv','阻力、目標功率、速度與訓練器狀態'), ('baseline','Baseline','TestBaselines.csv','各肌肉基準 RMS、測量時間與判讀門檻')] %}
+      <tr><td>{{ name }}</td><td><strong>{{ filename }}</strong></td><td>{{ description }}</td><td class="text-end"><a class="btn btn-outline-dark btn-sm" href="{{ url_for('analysis.download_processed_data', session_id=record.session_id, kind=kind) }}">下載 CSV</a></td></tr>
+      {% endfor %}
+    </tbody></table></div>
+  </section>
+  <section class="surface download-section raw-download-section">
+    <div class="download-section-heading"><div><h2>原始匯入檔案</h2><p>保留當時上傳的 CSV，可重新匯入或另行檢查。</p></div><span class="download-count">{{ files|length }} 個檔案</span></div>
+    {% if files %}<div class="table-responsive pt-3"><table class="table data-table download-data-table raw-download-data-table mb-0"><thead><tr><th>資料種類</th><th>檔案名稱</th><th>大小</th><th class="text-end">下載</th></tr></thead><tbody>{% for file in files %}<tr><td>{{ {'emg':'EMG 原始資料', 'pedal':'踏板原始資料', 'trainer':'訓練器／阻力原始資料', 'angle':'踏板角度原始資料'}.get(file.kind, file.kind|upper ~ ' 原始資料') }}</td><td><strong>{{ file.filename }}</strong></td><td>{{ (file.size / 1024)|round(1) }} KB</td><td class="text-end"><a class="btn btn-outline-dark btn-sm" href="{{ url_for('analysis.download_file', session_id=record.session_id, kind=file.kind) }}">下載 CSV</a></td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="download-empty"><strong>沒有另外保存的原始 CSV 檔案</strong><span>此筆測試仍可下載上方由資料庫整理出的處理後資料。</span></div>{% endif %}
+  </section>
+</section>
 {% endif %}
 </div>
 {% endblock %}
 {% block scripts %}
+<script src="{{ url_for('static', filename='js/qt-angle-report.js') }}"></script>
 <script id="session-chart-data" type="application/json">{{ chart_payload|tojson }}</script>
+{% if angle_chart_payload %}<script id="angle-chart-data" type="application/json">{{ angle_chart_payload|tojson }}</script>{% endif %}
 <script>
   const angleSettingModal = document.getElementById('detail-angle-settings');
   if (angleSettingModal) {
@@ -91,6 +215,14 @@
       offsetField.disabled = autoOffset.checked;
     };
     [autoRange, autoScale, autoOffset].forEach((control) => control.addEventListener('change', updateQtSettingState));
+    // Disabled controls are normally omitted from a GET form.  Keep their
+    // current values in the resulting URL as well, so every subsequent
+    // report-tab link can faithfully retain this exact configuration.
+    angleSettingModal.querySelector('form').addEventListener('submit', () => {
+      rangeFields.forEach((field) => { field.disabled = false; });
+      scaleField.disabled = false;
+      offsetField.disabled = false;
+    });
     updateQtSettingState();
   }
 </script>

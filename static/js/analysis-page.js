@@ -21,17 +21,6 @@ document.addEventListener('click', (event) => {
     return;
   }
 
-  const link = event.target.closest('[data-history-back]');
-  if (!link || !document.referrer || window.history.length < 2) return;
-  try {
-    const previous = new URL(document.referrer);
-    if (previous.origin === window.location.origin && previous.href !== window.location.href) {
-      event.preventDefault();
-      window.history.back();
-    }
-  } catch (_error) {
-    // The fallback href remains available when the referrer is invalid.
-  }
 });
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -74,4 +63,65 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const comparisonRows = readAnalysisData('comparison-chart-data');
   if (comparisonRows) window.EmgCharts.comparison('comparison-rms-chart', comparisonRows);
+
+  const angleReport = readAnalysisData('angle-chart-data');
+  if (angleReport) window.QtAngleReport?.render(angleReport);
+
+  // Angle report tabs share one expensive calculation.  Switch the report
+  // panel in-place so moving between Qt-equivalent views does not redraw the
+  // whole page or flash the navigation shell.  The server response is cached
+  // for Back/Forward-like repeated view changes during this visit.
+  const anglePageCache = new Map();
+  const replaceAnglePanel = (html, targetUrl, pushState = true) => {
+    const documentFragment = new DOMParser().parseFromString(html, 'text/html');
+    const nextPanel = documentFragment.getElementById('angle-tab');
+    const currentPanel = document.getElementById('angle-tab');
+    if (!nextPanel || !currentPanel) return;
+    currentPanel.querySelectorAll('.qt-chart').forEach(element => {
+      window.echarts?.getInstanceByDom(element)?.dispose();
+    });
+    currentPanel.replaceWith(nextPanel);
+    const nextData = documentFragment.getElementById('angle-chart-data');
+    const currentData = document.getElementById('angle-chart-data');
+    if (nextData && currentData) currentData.textContent = nextData.textContent;
+    else if (nextData) document.body.append(nextData);
+    else currentData?.remove();
+    if (pushState) history.pushState({ anglePanel: true }, '', targetUrl);
+    const data = readAnalysisData('angle-chart-data');
+    if (data) window.QtAngleReport?.render(data);
+  };
+
+  document.addEventListener('click', async (event) => {
+    const link = event.target.closest('.angle-view-link');
+    if (!link || event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    const targetUrl = link.href;
+    const panel = document.getElementById('angle-tab');
+    if (!panel || targetUrl === window.location.href) return;
+    panel.classList.add('angle-tab-loading');
+    try {
+      let html = anglePageCache.get(targetUrl);
+      if (!html) {
+        const response = await fetch(targetUrl, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        html = await response.text();
+        anglePageCache.set(targetUrl, html);
+      }
+      replaceAnglePanel(html, targetUrl);
+    } catch (error) {
+      // A normal navigation still gives the user the report if a transient
+      // network error interrupts the optional accelerated transition.
+      window.location.assign(targetUrl);
+    } finally {
+      document.getElementById('angle-tab')?.classList.remove('angle-tab-loading');
+    }
+  });
+
+  window.addEventListener('popstate', () => {
+    if (!document.getElementById('angle-tab') || !window.location.search.includes('view=angle')) return;
+    const targetUrl = window.location.href;
+    const html = anglePageCache.get(targetUrl);
+    if (html) replaceAnglePanel(html, targetUrl, false);
+    else window.location.reload();
+  });
 });

@@ -1,9 +1,9 @@
 {% extends 'base.html' %}
 {% block title %}踩踏角度分析{% endblock %}
 {% block content %}
-<div class="analysis-page-actions analysis-page-actions-right"><button class="btn btn-outline-dark" type="button" data-bs-toggle="modal" data-bs-target="#angle-advanced-modal">進階設定</button><a class="btn btn-outline-secondary" data-history-back
-        href="{{ url_for('analysis.session_detail', session_id=record.session_id, view='angle') }}">← 返回上一頁</a><a
-        class="btn btn-export" data-angle-pdf
+<div class="analysis-page-actions analysis-page-actions-right"><button class="btn btn-dark" type="button" data-bs-toggle="modal" data-bs-target="#angle-advanced-modal">進階設定</button><a class="btn btn-secondary" data-history-back
+        href="{{ url_for('patients.sessions', patient_id=record.patient_id) }}">← 返回分析頁</a><a
+        class="btn btn-success" data-angle-pdf
         href="{{ url_for('analysis.download_pdf_report', session_id=record.session_id) }}">匯出 PDF</a></div>
 <header class="page-heading angle-heading">
     <h1>踩踏角度分析</h1>

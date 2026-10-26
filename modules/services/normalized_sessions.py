@@ -7,6 +7,7 @@ and are referenced through the legacy spelling used by ``SourceFiles``.
 from __future__ import annotations
 
 import math
+import re
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +16,7 @@ from uuid import uuid4
 from werkzeug.utils import secure_filename
 
 from modules.services.database import connect
+from modules.services.analysis_cache import invalidate as invalidate_analysis_cache
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -25,6 +27,11 @@ def _number(value):
     except (TypeError, ValueError):
         return None
     return value if math.isfinite(value) else None
+
+
+def _muscle_key(value) -> str:
+    """Make database muscle labels comparable across Qt and CSV records."""
+    return re.sub(r"\s+", "", str(value or "")).casefold()
 
 
 def _second(value):
@@ -67,6 +74,8 @@ def save(session: dict, files: dict[str, tuple[str, bytes]], *, source: str = "u
     target_folder = _source_root() / test_id
     if replacing and target_folder.resolve().parent != _source_root().resolve():
         raise ValueError("Invalid test storage path.")
+    if replacing:
+        invalidate_analysis_cache(test_id)
     folder = (_source_root() / f".staging-{uuid4()}" if replacing else target_folder)
     folder.mkdir()
     paths: dict[str, Path] = {}
@@ -212,13 +221,14 @@ def delete(test_id: str) -> bool:
         if parent != root:
             try: parent.rmdir()
             except OSError: pass
+    invalidate_analysis_cache(test_id)
     return True
 
 
 def load_session(test_id: str):
     """Rebuild the analysis document from the normalized clinical tables."""
     # Imported lazily to keep database services independent from Flask imports.
-    from modules.blueprints.analysis.emg.session_analysis import add_point, new_session
+    from modules.blueprints.analysis.emg.session_analysis import add_point, compare_rms, new_session
     with connect() as db:
         cursor = db.cursor()
         cursor.execute("SELECT TestID, PatientID, Name, Sex, CreatedAt, Status FROM dbo.Sessions WHERE TestID=%s", (test_id,))
@@ -226,15 +236,56 @@ def load_session(test_id: str):
         if not session: return None
         identifier, patient_id, name, sex, created_at, status = session
         cursor.execute("SELECT MuscleName, BaseRMSmV, ActionType, QualityStatus FROM dbo.TestBaselines WHERE TestID=%s", (test_id,))
-        baselines = {str(index): {"mapping_name": row[0], "rms_mv": _number(row[1]), "protocol": row[2], "quality": row[3]}
-                     for index, row in enumerate(cursor.fetchall(), 1)}
-        document = new_session({"patientId": patient_id, "name": name, "gender": sex}, baselines)
+        baseline_rows = cursor.fetchall()
+        baseline_by_muscle = {_muscle_key(row[0]): row for row in baseline_rows if _number(row[1]) is not None}
+        cursor.execute("""SELECT b.MuscleName, b.BaseRMSmV, baseline_test.CreatedAt
+            FROM dbo.TestBaselines b JOIN dbo.Sessions baseline_test ON baseline_test.TestID=b.TestID
+            WHERE baseline_test.PatientID=%s AND b.TestID<>%s AND baseline_test.CreatedAt<=%s
+            ORDER BY baseline_test.CreatedAt DESC, b.CreatedAt DESC""",
+            (patient_id, test_id, created_at or datetime.now()))
+        prior_by_muscle = {}
+        for muscle, value, recorded_at in cursor.fetchall():
+            key = _muscle_key(muscle)
+            if key not in prior_by_muscle and (_number(value) or 0) > 1e-9:
+                prior_by_muscle[key] = {"rms_mv": _number(value),
+                                        "recorded_at": recorded_at.isoformat() if recorded_at else ""}
+        document = new_session({"patientId": patient_id, "name": name, "gender": sex}, {})
         document["started_at"] = created_at.isoformat() if created_at else ""
         cursor.execute("SELECT MuscleName, TimeOffsetSec, AvgRMSmV, MaxRMSmV, BaseRMSmV, QualityStatus FROM dbo.EMGData WHERE TestID=%s ORDER BY MuscleName, TimeOffsetSec", (test_id,))
         emg_rows = cursor.fetchall(); slots = {str(label): index for index, label in enumerate(sorted({str(row[0]) for row in emg_rows}), 1)}
         document["channels"] = {str(slot): {"label": name, "mapping_name": name} for name, slot in slots.items()}
+        document["baselines"] = {
+            str(slot): {"mapping_name": muscle, "rms_mv": _number(baseline_by_muscle[_muscle_key(muscle)][1]),
+                        "protocol": baseline_by_muscle[_muscle_key(muscle)][2],
+                        "quality": baseline_by_muscle[_muscle_key(muscle)][3]}
+            for muscle, slot in slots.items() if _muscle_key(muscle) in baseline_by_muscle
+        }
+        document["prior_baselines"] = {
+            str(slot): prior_by_muscle[_muscle_key(muscle)]
+            for muscle, slot in slots.items() if _muscle_key(muscle) in prior_by_muscle
+        }
         for muscle, time_s, rms, peak, base, quality in emg_rows:
-            add_point(document, "emg", {"time_s": float(time_s or 0), "slot": slots[str(muscle)], "rms_mv": _number(rms), "rms_peak_mv": _number(peak), "base_rms_mv": _number(base), "quality": str(quality or "UNKNOWN")})
+            baseline = _number(base)
+            comparison = compare_rms(_number(rms), baseline)
+            # Qt writes BaseRMSmV only when the reference was compatible at
+            # capture time.  A TestBaselines row can exist without being
+            # applied, so it must never be substituted into this comparison.
+            stored_quality = str(quality or "").strip()
+            quality_labels = {
+                "NO_BASELINE": "本次測試未套用基準" if (_muscle_key(muscle) in baseline_by_muscle or
+                                                    _muscle_key(muscle) in prior_by_muscle) else "無基準值",
+                "BASELINE_INCOMPATIBLE": "基準不相容",
+                "BASELINE_TOO_LOW": "基準值過低",
+                "INSUFFICIENT_DATA": "EMG 資料不足",
+            }
+            point_quality = (quality_labels.get(stored_quality.upper()) or
+                             (comparison["quality"] if stored_quality.upper() in {"", "VALID", "UNKNOWN"} else stored_quality))
+            if baseline is None and (_muscle_key(muscle) in baseline_by_muscle or
+                                     _muscle_key(muscle) in prior_by_muscle) and point_quality == "無基準值":
+                point_quality = "本次測試未套用基準"
+            add_point(document, "emg", {"time_s": float(time_s or 0), "slot": slots[str(muscle)],
+                "rms_mv": _number(rms), "rms_peak_mv": _number(peak), "base_rms_mv": baseline,
+                **comparison, "quality": point_quality})
         cursor.execute("SELECT TimeOffsetSec, TotalPowerW, LeftPowerW, RightPowerW, LeftBalancePct, RightBalancePct, CadenceRPM, QualityStatus FROM dbo.PedalData WHERE TestID=%s ORDER BY TimeOffsetSec", (test_id,))
         for time_s, total, left, right, left_pct, right_pct, cadence, quality in cursor.fetchall():
             elapsed = float(time_s or 0); add_point(document, "pedal", {"time_s": elapsed, "timestamp": elapsed, "power_w": _number(total), "left_power_w": _number(left), "right_power_w": _number(right), "left_balance_percent": _number(left_pct), "cadence_rpm": _number(cadence), "quality": str(quality or "UNKNOWN")})

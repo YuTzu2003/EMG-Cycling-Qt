@@ -3,15 +3,19 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import math
+from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlencode
 from uuid import uuid4
 from flask import Blueprint, abort, flash, redirect, render_template, request, send_file, url_for
 from markupsafe import Markup
 from werkzeug.utils import secure_filename
 from modules.services.database import connect as _connection
 from modules.services.file_storage import temporary_files
+from modules.services.analysis_cache import load_angle as _load_cached_angle, save_angle as _save_cached_angle
 from modules.services.normalized_sessions import (
     delete as _normalized_delete,
     get_file as _normalized_get_file,
@@ -24,7 +28,9 @@ from modules.services.normalized_sessions import (
 from modules.blueprints.analysis.emg.sensor_mapping import loadMappings, recordingChannelSides
 from modules.blueprints.analysis.emg.importers import attach_pedal_csv, import_emg_csv
 from modules.blueprints.analysis.pedal.angle_emg import AngleSettings, analyze_angle_emg
-from modules.blueprints.analysis.pedal.analysis import analyze_pedal_records, summarize_pedal_records
+from modules.blueprints.analysis.pedal.analysis import (
+    analyze_pedal_records, pedal_summary_lines, summarize_pedal_records,
+)
 from modules.blueprints.analysis.emg.session_analysis import add_point, analyze, new_session, peak_envelope, summary_lines
 from modules.blueprints.analysis.emg.session_compare import compare_sessions, comparison_charts
 from modules.blueprints.analysis.emg.visuals import angle_profile_charts
@@ -42,6 +48,45 @@ def _db_number(value):
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _duration_label(value) -> str:
+    """Present an analysis duration consistently in the test overview."""
+    seconds = _db_number(value)
+    if seconds is None:
+        return "—"
+    total = max(0, round(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours} 小時 {minutes:02d} 分 {seconds:02d} 秒"
+    if minutes:
+        return f"{minutes} 分 {seconds:02d} 秒"
+    return f"{seconds} 秒"
+
+
+@lru_cache(maxsize=48)
+def _cached_session(session_id: str):
+    """Keep the rebuilt database document available while a user changes tabs."""
+    return _normalized_load_session(session_id)
+
+
+@lru_cache(maxsize=48)
+def _cached_analysis(session_id: str):
+    found = _cached_session(session_id)
+    return analyze(found[1]) if found else None
+
+
+@lru_cache(maxsize=48)
+def _cached_files(session_id: str):
+    return tuple(_normalized_list_files(session_id))
+
+
+def _clear_session_cache(session_id: str) -> None:
+    """Invalidate all view data after an upload, replacement, or deletion."""
+    _cached_session.cache_clear()
+    _cached_analysis.cache_clear()
+    _cached_files.cache_clear()
 
 
 def _list_patients():
@@ -108,7 +153,7 @@ def _save_recording(session, files, *, source="upload"):
     return identifier
 
 def _get_session(session_id):
-    return _normalized_load_session(session_id)
+    return _cached_session(session_id)
     with _connection() as db:
         import json
         cursor = db.cursor(); cursor.execute("""SELECT a.TestID AS session_id, a.PatientID AS patient_id,
@@ -160,7 +205,7 @@ def _get_session(session_id):
                  "source": "qt", "status": status or "completed"}, document)
 
 def _list_files(session_id):
-    return _normalized_list_files(session_id)
+    return list(_cached_files(session_id))
     with _connection() as db:
         cursor = db.cursor(); cursor.execute("SELECT Kind AS kind, FileName AS filename, DATALENGTH(Content) AS size FROM dbo.RawFiles WHERE TestID=%s ORDER BY Kind", (session_id,)); return _rows(cursor, cursor.fetchall())
 
@@ -193,13 +238,16 @@ def _emg_ride_charts(document: dict, result: dict) -> tuple[list[dict], list[dic
     envelopes: list[dict] = []
     for slot in sorted(result.get("emg", {}), key=lambda value: int(value) if str(value).isdigit() else str(value)):
         stats = result["emg"][slot].get("rms_mv", {})
+        if stats.get("mean") is None:
+            continue
         label = channels.get(str(slot), {}).get("label") or channels.get(str(slot), {}).get("mapping_name") or f"S{slot}"
         display = f"S{int(slot):02d} {label}" if str(slot).isdigit() else str(label)
         rows = [row for row in document.get("emg", []) if str(row.get("slot")) == str(slot)]
-        recorded_peaks = [_db_number(row.get("rms_peak_mv")) for row in rows if row.get("rms_peak_mv") is not None]
-        bars.append({"label": display, "mean": stats.get("mean"),
-                     "peak": max(recorded_peaks) if recorded_peaks else stats.get("max")})
-        points = peak_envelope([{**row, "rms_mv": row.get("rms_peak_mv") or row.get("rms_mv")} for row in rows])
+        # Qt uses the same archived RMS feature for the bars and the one
+        # second peak envelope.  A separately archived RMS Peak field is not
+        # interchangeable with Qt's max(rms_mv).
+        bars.append({"label": display, "mean": stats.get("mean"), "peak": stats.get("max")})
+        points = peak_envelope(rows)
         stride = max(1, len(points) // 2000)
         envelopes.append({"slot": str(slot), "label": display,
                           "data": [[time_s, value] for time_s, value in points[::stride]]})
@@ -235,19 +283,22 @@ def _pedal_chart_series(performance: dict | None) -> tuple[list[dict], list[dict
 
 
 
-def _detail_angle_settings(emg_path: Path, pedal_path: Path) -> AngleSettings:
+def _detail_angle_settings(emg_path: Path, pedal_path: Path, duration_s: float | None = None) -> AngleSettings:
     """Read the Qt-equivalent angle options submitted by the detail-page modal."""
     values = request.args
     custom = values.get("angle_settings") == "1"
     automatic_range = not custom or values.get("angle_automatic_range") == "on"
     if automatic_range:
-        with emg_path.open(encoding="utf-8-sig", newline="") as stream:
-            emg_duration = max((float(row.get("time_seconds", 0) or 0) for row in csv.DictReader(stream)), default=0)
-        with pedal_path.open(encoding="utf-8-sig", newline="") as stream:
-            reader = csv.DictReader(stream)
-            time_column = "t_session_s" if "t_session_s" in (reader.fieldnames or ()) else "session_seconds"
-            pedal_duration = max((float(row.get(time_column, 0) or 0) for row in reader), default=0)
-        duration = min(emg_duration, pedal_duration)
+        duration = float(duration_s or 0)
+        if duration <= 0:
+            # Fallback for older database rows that have no rebuilt streams.
+            with emg_path.open(encoding="utf-8-sig", newline="") as stream:
+                emg_duration = max((float(row.get("time_seconds", 0) or 0) for row in csv.DictReader(stream)), default=0)
+            with pedal_path.open(encoding="utf-8-sig", newline="") as stream:
+                reader = csv.DictReader(stream)
+                time_column = "t_session_s" if "t_session_s" in (reader.fieldnames or ()) else "session_seconds"
+                pedal_duration = max((float(row.get(time_column, 0) or 0) for row in reader), default=0)
+            duration = min(emg_duration, pedal_duration)
         if duration < 35:
             raise ValueError("角度分析至少需要 35 秒的共同 EMG 與踏板資料。")
         window = min(60.0, max(10.0, (duration - 5.0) / 3.0))
@@ -258,6 +309,81 @@ def _detail_angle_settings(emg_path: Path, pedal_path: Path) -> AngleSettings:
     return AngleSettings(start=start, end=end,
                          scale=None if (not custom or values.get("angle_auto_scale") == "on") else float(values.get("angle_scale", 1)),
                          offset_s=None if custom and values.get("angle_auto_offset") == "on" else float(values.get("angle_offset_s", 0)))
+
+
+def _angle_chart_payload(result: dict | None) -> dict | None:
+    """Serialize the exact Qt angle-analysis frames for browser charts.
+
+    ``DataFrame.to_json`` deliberately converts NaN/Infinity to JSON null, so a
+    partial channel never prevents the complete report from rendering.
+    """
+    if result is None:
+        return None
+
+    def records(name: str) -> list[dict]:
+        return json.loads(result[name].to_json(orient="records"))
+
+    return {
+        "summary": records("summary"),
+        "profiles": records("profiles"),
+        "cycles": records("cycles"),
+        "bins": int(result["settings"]["bins"]),
+        "angle_label": result["sync"]["angle_label"],
+    }
+
+
+def _qt_angle_report(result: dict) -> dict:
+    """Build the same text and table values as the Qt angle report."""
+    rows = result["summary"].sort_values(["side", "location_zh", "channel_label"])
+    sync, settings = result["sync"], result["settings"]
+    top_rms = rows.loc[rows.rms_change_percent.idxmax()]
+    lowest_mdf = rows.loc[rows.mdf_change_hz.idxmin()]
+    rms_up = int((rows.rms_change_percent > 0).sum())
+    mdf_down = int((rows.mdf_change_hz < 0).sum())
+    calibration = "已校正角度" if sync["angle_calibrated"] else "相對踩踏相位"
+    sync_rows = [
+        ("角度基準", f'{sync["angle_label"]}（{calibration}）'),
+        ("有效踩踏圈", f'{sync["valid_cycles"]} 圈'),
+        ("分析區間", f'前段 {settings["start"][0]:g}–{settings["start"][1]:g} 秒；後段 {settings["end"][0]:g}–{settings["end"][1]:g} 秒'),
+        ("EMG 時鐘同步", f'比例 {sync["scale"]:.5f}；起點偏移 {sync["offset_s"]:+.3f} 秒'),
+        ("側別來源", sync.get("side_source", "目前設定")),
+    ]
+    highlights = [
+        ("RMS 上升通道", f"{rms_up}/{len(rows)}"),
+        ("MDF 下降通道", f"{mdf_down}/{len(rows)}"),
+        ("最大 RMS 變化", f"{top_rms.location_zh} ({top_rms.channel_label}) {top_rms.rms_change_percent:+.1f}% ({top_rms.rms_uv_start:.1f} → {top_rms.rms_uv_end:.1f} µV)"),
+        ("最大 MDF 下降", f"{lowest_mdf.location_zh} ({lowest_mdf.channel_label}) {lowest_mdf.mdf_change_hz:+.1f} Hz ({lowest_mdf.mdf_start:.1f} → {lowest_mdf.mdf_end:.1f} Hz)"),
+    ]
+    weak = rows[rows.norm_uv < 10]
+    limitations = []
+    if not sync["angle_calibrated"]:
+        limitations.append("目前為相對踩踏相位；若要解釋 TDC 絕對角度，需加入可重現的影片或曲柄同步校正。")
+    limitations.extend((
+        "每條肌肉以自身 99 百分位正規化；可比較同一肌肉的時間變化，不可跨肌肉排名出力。",
+        "EMG 振幅不等於肌力、力矩或踩踏效率；必須與踩板功率、動作影片一起解釋。",
+    ))
+    if not weak.empty:
+        labels = "、".join(f"{row.location_zh} ({row.channel_label})" for row in weak.itertuples())
+        limitations.append(f"訊號偏弱、需謹慎解讀：{labels}。")
+    channels = []
+    comparison = []
+    for row in rows.itertuples():
+        rms_up_channel, mdf_down_channel = row.rms_change_percent > 0, row.mdf_change_hz < 0
+        hint = ("RMS↑、MDF↓：疲勞相關趨勢" if rms_up_channel and mdf_down_channel else
+                "RMS↑；MDF未下降" if rms_up_channel else
+                "MDF↓；RMS未上升" if mdf_down_channel else "前後變化不一致")
+        channels.append((f"{row.location_zh} / {row.channel_label}",
+                         f"{row.rms_uv_start:.1f} → {row.rms_uv_end:.1f}", f"{row.rms_change_percent:+.1f}%",
+                         f"{row.mdf_start:.1f} → {row.mdf_end:.1f}", f"{row.peak_angle_shift:+.0f}°", hint))
+        comparison.append((f"{row.location_zh} · {row.channel_label}", str(row.n_start), str(row.n_end),
+                           f"{row.rms_uv_start:.1f}", f"{row.rms_uv_end:.1f}", f"{row.rms_change_percent:+.1f}",
+                           f"{row.peak_angle_start:.0f}", f"{row.peak_angle_end:.0f}",
+                           f"{row.peak_angle_shift:+.0f}", f"{row.mdf_change_hz:+.1f}"))
+    return {"sync": sync_rows,
+            "mapping": [(row.location_zh, row.channel_label) for row in rows.itertuples()],
+            "highlights": highlights, "channels": channels,
+            "comparison": comparison, "comparison_channels": list(rows.channel),
+            "limitations": limitations}
 
 
 def window_comparison(first: dict, second: dict, early_s: int, late_s: int) -> list[dict]:
@@ -313,13 +439,13 @@ def _analysis_sections(document: dict, result: dict, pedal_performance: dict | N
 def _pedal_performance_lines(performance: dict) -> list[str]:
     def value(key: str, unit: str, digits: int = 1) -> str:
         number = performance.get(key)
-        return "—" if number is None else f"{float(number):.{digits}f} {unit}"
+        return "--" if number is None else f"{float(number):.{digits}f} {unit}"
 
     return [
-        f"累積功：{value('energy_kj', 'kJ')}",
-        f"最高平均功率：5 秒 {value('peak_5s_w', 'W')}；60 秒 {value('peak_60s_w', 'W')}",
-        f"資料涵蓋率：{value('coverage_percent', '%', 0)}（缺少 {performance.get('missing_seconds', 0)} 秒）",
-        f"滑行時間：{performance.get('coasting_seconds', 0)} 秒",
+        f"累積踩踏輸出：{value('energy_kj', 'kJ')}",
+        f"短時間最高平均：5 秒 {value('peak_5s_w', 'W')}｜60 秒 {value('peak_60s_w', 'W')}",
+        f"資料完整度：{performance.get('observed_seconds', 0)}／{performance.get('observed_seconds', 0) + performance.get('missing_seconds', 0)} 秒（{value('coverage_percent', '%', 0)}）｜未收到 {performance.get('missing_seconds', 0)} 秒",
+        f"零功率時間：{performance.get('coasting_seconds', 0)} 秒",
     ]
 
 
@@ -371,6 +497,7 @@ def upload():
                 files = {kind: (uploads[kind].filename, path.read_bytes()) for kind, path in paths.items()}
                 identifier = (_normalized_replace(target_test_id, recording, files)
                               if target else _save_recording(recording, files, source="upload"))
+                _clear_session_cache(identifier)
             flash("CSV 已匯入並建立分析測試。", "success")
             return redirect(url_for("analysis.session_detail", session_id=identifier))
         except (ValueError, OSError, TypeError, OverflowError) as exc:
@@ -400,29 +527,39 @@ def session_detail(session_id: str):
     angle_section = request.args.get("angle_section", "overview")
     if angle_section not in {key for key, _ in angle_sections}:
         abort(404)
-    result = analyze(document)
+    # Keep a submitted Qt-equivalent configuration while users move between
+    # report tabs (and even temporarily inspect pedal/EMG/file views).
+    angle_query = [(key, value) for key, value in request.args.items()
+                   if key != "angle_section" and (key in {"angle_settings", "ftp_w"} or key.startswith("angle_"))]
+    angle_query_suffix = f"&{urlencode(angle_query)}" if angle_query else ""
+    try:
+        ftp_w = int(request.args.get("ftp_w", 200))
+    except (TypeError, ValueError):
+        ftp_w = 200
+    if not 1 <= ftp_w <= 600:
+        ftp_w = 200
+    result = _cached_analysis(session_id)
     pedal_performance = None
     pedal_summary = None
     performance_lines: list[str] = []
+    pedal_detail_lines: list[str] = []
     if document.get("pedal"):
         try:
-            # FTP is only needed for training-zone calculations. It remains
-            # explicit until a per-patient FTP field is available.
-            pedal_performance = analyze_pedal_records(document["pedal"], ftp_w=200)
+            pedal_performance = analyze_pedal_records(document["pedal"], ftp_w=ftp_w)
             pedal_summary = summarize_pedal_records(document["pedal"])
             performance_lines = _pedal_performance_lines(pedal_performance)
+            pedal_detail_lines = [*pedal_summary_lines(pedal_summary), "", *performance_lines]
         except (ValueError, KeyError, TypeError):
             # Old captures may not retain every timestamp field required by this optional analysis.
             performance_lines = ["此筆踏板原始資料缺少進階效能分析所需欄位。"]
     files = _list_files(session_id)
     source_kinds = {item["kind"] for item in files}
     emg_bars, emg_envelopes = _emg_ride_charts(document, result)
-    emg_peak_by_slot = {row["label"].split(" ", 1)[0]: row["peak"] for row in emg_bars}
     pedal_power_series, pedal_cadence_series, pedal_balance_series = _pedal_chart_series(pedal_performance)
     angle_result = None
-    angle_tables = None
+    qt_angle_report = None
     angle_error = None
-    if {"emg", "pedal"} <= source_kinds or {"emg", "angle"} <= source_kinds:
+    if selected_view == "angle" and ({"emg", "pedal"} <= source_kinds or {"emg", "angle"} <= source_kinds):
         try:
             with temporary_files() as temp_path:
                 emg_path = temp_path("emg.csv")
@@ -435,19 +572,42 @@ def session_detail(session_id: str):
                     emg_path, headers, loadMappings(ROOT / "sensor_mapping.json"),
                     document.get("channels", {}),
                 )
-                angle_result = analyze_angle_emg(emg_path, pedal_path, sides,
-                                                 _detail_angle_settings(emg_path, pedal_path))
-            angle_tables = {
-                key: Markup(angle_result[key].to_html(index=False, classes="table table-sm data-table", border=0))
-                for key in ("summary", "profiles", "cycles")
-            }
-            angle_result["profile_charts"] = angle_profile_charts(angle_result)
+                emg_duration = max((float(row.get("time_s", 0) or 0) for row in document.get("emg", [])), default=0)
+                pedal_duration = max((float(row.get("time_s", 0) or 0) for row in document.get("pedal", [])), default=0)
+                shared_duration = min(emg_duration, pedal_duration) if emg_duration and pedal_duration else None
+                angle_settings = _detail_angle_settings(emg_path, pedal_path, shared_duration)
+                angle_result = _load_cached_angle(session_id, angle_settings)
+                if angle_result is None:
+                    angle_result = analyze_angle_emg(emg_path, pedal_path, sides, angle_settings)
+                    _save_cached_angle(session_id, angle_settings, angle_result)
+            qt_angle_report = _qt_angle_report(angle_result)
         except (ValueError, OSError, KeyError, TypeError) as exc:
             angle_error = str(exc)
-    emg_channel_names = {
-        str(slot): str(channel.get("label") or channel.get("mapping_name") or f"S{slot}")
-        for slot, channel in document.get("channels", {}).items()
-    }
+    mappings = loadMappings(ROOT / "sensor_mapping.json")
+    mapping_by_code = {mapping.abbreviation.strip().upper(): mapping for mapping in mappings if mapping.abbreviation.strip()}
+    emg_channel_names = {}
+    emg_baseline_info = {}
+    for slot, channel in document.get("channels", {}).items():
+        identity = str(channel.get("mapping_name") or "")
+        code = identity.rsplit("|", 1)[-1].strip().upper()
+        mapping = mapping_by_code.get(code)
+        if mapping is None:
+            identity_upper = f" {identity.upper()} "
+            mapping = next((item for item in mappings if item.abbreviation and
+                            item.abbreviation.upper() in identity_upper), None)
+        if mapping is None:
+            label = str(channel.get("label") or "")
+            mapping = next((item for item in mappings if item.chinese_name == label), None)
+        emg_channel_names[str(slot)] = (mapping.chinese_name if mapping else
+                                        str(channel.get("label") or identity or f"S{slot}"))
+        values = [_db_number(point.get("base_rms_mv")) for point in document.get("emg", [])
+                  if str(point.get("slot")) == str(slot)]
+        applied = next((value for value in values if value is not None), None)
+        reference = _db_number((document.get("baselines", {}).get(str(slot)) or {}).get("rms_mv"))
+        prior = document.get("prior_baselines", {}).get(str(slot)) or {}
+        emg_baseline_info[str(slot)] = {"applied": applied, "reference": reference,
+                                        "prior": _db_number(prior.get("rms_mv")),
+                                        "prior_date": str(prior.get("recorded_at") or "")[:10]}
     chart_payload = {
         "emg_bars": emg_bars,
         "emg_envelopes": emg_envelopes,
@@ -459,11 +619,13 @@ def session_detail(session_id: str):
         "average_cadence_rpm": pedal_summary.get("average_cadence_rpm") if pedal_summary else None,
         "maximum_cadence_rpm": pedal_summary.get("maximum_cadence_rpm") if pedal_summary else None,
     }
+    angle_chart_payload = _angle_chart_payload(angle_result)
     return render_template("session_detail.html", record=record, files=files, analysis=result,
                            selected_view=selected_view, angle_sections=angle_sections, angle_section=angle_section,
                            lines=summary_lines(result),
                            analysis_sections=_analysis_sections(document, result, pedal_performance, source_kinds),
                            pedal_performance=pedal_performance, performance_lines=performance_lines,
+                           pedal_detail_lines=pedal_detail_lines, ftp_w=ftp_w, angle_query=angle_query,
                            emg_chart_series=_emg_chart_series(document),
                            pedal_summary=pedal_summary,
                            pedal_power_series=pedal_power_series,
@@ -471,12 +633,15 @@ def session_detail(session_id: str):
                            pedal_balance_series=pedal_balance_series,
                            trainer_power_series=_telemetry_chart_series(document, "trainer", "power_watts", "訓練器功率"),
                            emg_bars=emg_bars, emg_envelopes=emg_envelopes, chart_payload=chart_payload,
-                           emg_peak_by_slot=emg_peak_by_slot,
                            emg_sample_count=len(document.get("emg", [])),
                            pedal_sample_count=len(document.get("pedal", [])),
                            trainer_sample_count=len(document.get("trainer", [])),
-                           emg_channel_names=emg_channel_names, angle_result=angle_result,
-                           angle_tables=angle_tables, angle_error=angle_error)
+                           test_duration_label=_duration_label((result or {}).get("duration_s")),
+                           emg_channel_names=emg_channel_names, emg_baseline_info=emg_baseline_info, angle_result=angle_result,
+                           angle_error=angle_error,
+                           angle_chart_payload=angle_chart_payload,
+                           angle_query_suffix=angle_query_suffix,
+                           qt_angle_report=qt_angle_report)
 
 
 @analysis_bp.post("/sessions/<session_id>/delete")
@@ -488,6 +653,7 @@ def delete_session(session_id: str):
     patient_id = found[0]["patient_id"]
     try:
         _normalized_delete(session_id)
+        _clear_session_cache(session_id)
     except OSError:
         flash("測試資料已刪除，但部分來源檔案無法移除。", "warning")
     else:
@@ -501,7 +667,7 @@ def download_pdf_report(session_id: str):
     if found is None:
         abort(404)
     record, document = found
-    result = analyze(document)
+    result = _cached_analysis(session_id)
     files = _list_files(session_id)
     pedal_summary = pedal_performance = None
     if document.get("pedal"):
@@ -574,7 +740,7 @@ def source_data(session_id: str):
     if found is None:
         abort(404)
     record, document = found
-    result = analyze(document)
+    result = _cached_analysis(session_id)
     return render_template("source_data.html", record=record, analysis=result,
                            files=_list_files(session_id),
                            emg_rows=len(document.get("emg", [])),

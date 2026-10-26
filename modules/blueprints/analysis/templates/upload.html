@@ -1,22 +1,48 @@
-{% extends 'base.html' %}{% block title %}匯入資料{% endblock %}{% block content %}<div class="page-heading">
-    <div class="eyebrow">IMPORT MEASUREMENT</div>
-    <h1>匯入原始資料</h1>
-    <p>選擇病人並上傳收集產生的 CSV。EMG、踏板、訓練器可單獨或一起匯入。</p>
+{% extends 'base.html' %}
+{% block title %}匯入資料{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div class="eyebrow">IMPORT MEASUREMENT</div>
+  <h1>新增／匯入資料</h1>
+  <p>可補上既有測試遺漏的原始檔，或為指定受測者建立一筆新測試。</p>
 </div>
-<div class="surface form-panel upload-panel">
-    <form method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{ csrf_token }}">
-        <div class="mb-4"><label class="form-label" for="test_id">套用到既有測試（選填）</label><select class="form-select form-select-lg" name="test_id" id="test_id"><option value="">建立新的測試紀錄</option><optgroup label="既有測試">{% for test in tests %}<option value="{{ test.session_id }}" {% if selected_test_id == test.session_id %}selected{% endif %}>{{ test.started_at[:16]|replace('T', ' ')|replace('-', '/') }}　｜　{{ test.name or test.patient_id }}　｜　EMG {{ test.emg_count }}　踏板 {{ test.pedal_count }}　阻力 {{ test.trainer_count }}</option>{% endfor %}</optgroup></select><div class="form-text">選擇既有測試時，將以本次原始 CSV 重新分析並覆蓋該測試的 EMG、踏板、阻力與來源檔資料。</div></div>
-        <div class="mb-4"><label class="form-label" for="patient_id">病人</label><select
-                class="form-select form-select-lg" name="patient_id" id="patient_id">
-                <option value="">選擇病人</option>{% for person in patients %}<option value="{{ person.patient_id }}">{{ person.name }} · {{ person.patient_id }}</option>{% endfor %}
-            </select>
-            <div class="form-text">沒有病人？<a href="{{ url_for('patients.patients') }}">先建立病人</a></div>
-        </div>
-        <div class="row g-3">{% for kind, label, help in [('emg','EMG 原始 CSV','重新濾波並計算 RMS'),('pedal','踏板 CSV','功率、踏頻與角度資料'),('trainer','訓練器 CSV','阻力、速度與心率'),('angle','校正角度 CSV','可選；優先用於相位分析')] %}<div
-                class="col-md-6">
-                <div class="file-field"><label class="form-label" for="{{ kind }}">{{ label }}</label><input
-                        class="form-control" type="file" id="{{ kind }}" name="{{ kind }}"
-                        accept=".csv,text/csv"><small>{{ help }}</small></div>
-            </div>{% endfor %}</div><button class="btn btn-success btn-lg mt-4">匯入並分析</button>
-    </form>
-</div>{% endblock %}
+
+<form method="post" enctype="multipart/form-data" class="upload-workflow"><input type="hidden" name="csrf" value="{{ csrf_token }}">
+  <section class="surface form-panel upload-panel">
+    <div class="upload-section-heading"><span class="upload-step">1</span><div><h2>選擇匯入目標</h2><p>選擇既有測試時，系統會直接使用該測試的受測者，不需要再次選擇病人。</p></div></div>
+    <div class="row g-3 align-items-end">
+      <div class="col-lg-7"><label class="form-label" for="test_id">既有測試（選填）</label><select class="form-select form-select-lg" name="test_id" id="test_id"><option value="">建立新的測試</option><optgroup label="既有測試">{% for test in tests %}<option value="{{ test.session_id }}" {% if selected_test_id == test.session_id %}selected{% endif %}>{{ test.started_at[:16]|replace('T', ' ')|replace('-', '/') }} · {{ test.name or test.patient_id }} · EMG {{ test.emg_count }}／踏板 {{ test.pedal_count }}</option>{% endfor %}</optgroup></select></div>
+      <div class="col-lg-5" id="new-test-patient"><label class="form-label" for="patient_id">新測試的受測者</label><select class="form-select form-select-lg" name="patient_id" id="patient_id"><option value="">請選擇受測者</option>{% for person in patients %}<option value="{{ person.patient_id }}">{{ person.name }} · {{ person.patient_id }}</option>{% endfor %}</select><div class="form-text">沒有受測者？<a href="{{ url_for('patients.patients') }}">先建立病人</a></div></div>
+    </div>
+    <div class="alert alert-info mt-3 mb-0" id="existing-test-note" hidden>目前會更新所選測試的原始資料並重新分析；受測者已由該測試自動帶入。</div>
+  </section>
+
+  <section class="surface form-panel upload-panel">
+    <div class="upload-section-heading"><span class="upload-step">2</span><div><h2>選擇原始 CSV</h2><p>至少選擇一個 CSV；EMG 與踏板同時提供時可執行完整的肌電與踩踏分析。</p></div></div>
+    <div class="row g-3">
+      {% for kind, label, help, required in [('emg','EMG 原始 CSV','重新濾波並計算 RMS 與肌肉統計', false), ('pedal','踏板 CSV','功率、踏頻、左右平衡與曲柄事件', false), ('trainer','訓練器 CSV','阻力、速度與心率；可選', false)] %}
+      <div class="col-md-6 col-xl-4"><div class="card h-100 upload-file-card"><div class="card-body"><label class="form-label fw-semibold" for="{{ kind }}">{{ label }}</label><input class="form-control" type="file" id="{{ kind }}" name="{{ kind }}" accept=".csv,text/csv"><div class="form-text mt-2">{{ help }}</div></div></div></div>
+      {% endfor %}
+    </div>
+    <div class="alert alert-secondary mt-3 mb-0"><strong>踏板角度說明：</strong>不需要另外上傳「校正角度 CSV」。系統會使用踏板 CSV 的曲柄事件建立相對踩踏相位；沒有上死點（TDC）校正資料時，結果不會宣稱為絕對角度。</div>
+  </section>
+
+  <div class="d-flex justify-content-end gap-2"><a class="btn btn-secondary" href="{{ url_for('patients.sessions') }}">取消</a><button class="btn btn-success" type="submit">匯入並開始分析</button></div>
+</form>
+{% endblock %}
+{% block scripts %}
+<script>
+  const targetTest = document.getElementById('test_id');
+  const patientBlock = document.getElementById('new-test-patient');
+  const patientField = document.getElementById('patient_id');
+  const existingNote = document.getElementById('existing-test-note');
+  const syncTarget = () => {
+    const existing = Boolean(targetTest.value);
+    patientBlock.hidden = existing;
+    patientField.required = !existing;
+    existingNote.hidden = !existing;
+  };
+  targetTest.addEventListener('change', syncTarget);
+  syncTarget();
+</script>
+{% endblock %}

@@ -5,11 +5,11 @@
   <div>
     <h1>後續分析</h1>
   </div>
-  <button class="btn btn-outline-secondary workflow-help-button" type="button" aria-label="後續分析使用說明"
+  <div class="d-flex align-items-center gap-2"><a class="btn btn-primary" href="{{ url_for('analysis.upload') }}">新增／匯入資料</a><button class="btn btn-outline-secondary workflow-help-button" type="button" aria-label="後續分析使用說明"
     data-bs-toggle="popover" data-bs-trigger="focus" data-bs-placement="bottom"
     data-bs-custom-class="workflow-help-popover" data-bs-title="如何使用後續分析"
     data-bs-content="1. 篩選受測者：預設顯示全部測試，也可依姓名、編號與來源篩選。&#10;2. 選擇測試：點選查看分析，檢視肌電、踏板、阻力計與角度資料。&#10;3. 比較測試：選擇同一位受測者的兩筆測試，進行 RMS 比較。"><span
-      class="workflow-help-mark" aria-hidden="true">?</span><span>使用說明</span></button>
+      class="workflow-help-mark" aria-hidden="true">?</span><span>使用說明</span></button></div>
 </header>
 
 <div class="session-workspace">
@@ -43,7 +43,6 @@
     <header class="session-results-heading">
       <div>
         <h2 id="session-results-title">{{ '受測者的測試' if selected_patient else '全部測試' }}</h2>
-        <a class="btn btn-success mt-2" href="{{ url_for('analysis.upload') }}">匯入原始資料</a>
       </div>
       {% if selected_patient and patient_record_count >= 2 %}<a class="btn btn-outline-dark"
         href="{{ url_for('analysis.compare', patient_id=selected_patient) }}">比較此受測者</a>{% endif %}
@@ -70,9 +69,7 @@
             資料，無法顯示肌電分析。</small>{% endif %}
           <div class="session-record-duration"><span>收集時間</span><strong>{{ row.duration_label }}</strong></div>
         </div>
-        <div class="session-record-badges"><span
-            class="source-tag {{ 'source-tag-qt' if row.source == 'qt' else 'source-tag-csv' }}">{{ 'Qt 收集' if
-            row.source == 'qt' else 'CSV 匯入' }}</span><span class="status-pill">{{ row.status }}</span></div>
+        <div class="session-record-badges"><span class="status-pill">完成</span></div>
         <a class="btn btn-outline-dark session-record-open"
           href="{{ url_for('analysis.session_detail', session_id=row.session_id) }}">查看分析 <span
             aria-hidden="true">↗</span></a>
