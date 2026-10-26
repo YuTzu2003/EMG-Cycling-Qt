@@ -50,7 +50,7 @@ class DatabaseConfig:
 
 
 class SqlServerStorage:
-    required_tables = {"Sessions", "TestBaselines", "EMGData", "PedalData", "TrainerData"}
+    required_tables = {"Patients", "Sessions", "TestBaselines", "EMGData", "PedalData", "TrainerData"}
     def __init__(self, config: DatabaseConfig) -> None:
         self.config = config
         self.connection: Any | None = None
@@ -94,8 +94,24 @@ class SqlServerStorage:
         rows = cursor.execute("SELECT name FROM sys.databases WHERE state_desc='ONLINE' AND HAS_DBACCESS(name)=1 ORDER BY name").fetchall()
         return [str(row[0]) for row in rows]
 
+    def list_patients(self) -> list[dict[str, str]]:
+        """Read the shared patient registry maintained by the website."""
+        rows = self._cursor().execute(
+            "SELECT PatientID, Name, Sex FROM dbo.Patients ORDER BY Name, PatientID"
+        ).fetchall()
+        return [{"patient_id": str(row[0]), "name": str(row[1] or "").strip(),
+                 "sex": str(row[2] or "未指定").strip()} for row in rows]
+
     def start_session(self, payload: dict[str, Any], commit: bool = True) -> None:
         cursor = self._cursor()
+        patient = cursor.execute(
+            "SELECT Name, Sex FROM dbo.Patients WITH (HOLDLOCK) WHERE PatientID=?", payload["patient_id"]
+        ).fetchone()
+        if patient is None:
+            raise ValueError("此受測者不存在，請先在網頁建立，再於 Qt 重新載入受測者。")
+        if (str(patient[0] or "").strip() != (payload.get("name") or "").strip()
+                or str(patient[1] or "未指定").strip() != (payload.get("sex") or "未指定").strip()):
+            raise ValueError("網頁的受測者資料已變更，請確認本次測試的受測者資料後再儲存。")
         cursor.execute("""INSERT INTO dbo.Sessions(TestID, PatientID, Name, Sex, ActionType, TestTime, ResistanceLevel, HasBaseline, Status, Notes, CreatedAt)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             payload["test_id"], payload["patient_id"], payload.get("name"), payload.get("sex"),
@@ -311,6 +327,7 @@ class DatabaseWriter(QThread):
     connected = Signal(str)
     failed = Signal(str)
     completed = Signal(str)
+    patients_loaded = Signal(list)
 
     def __init__(self, config: DatabaseConfig) -> None:
         super().__init__()
@@ -332,6 +349,8 @@ class DatabaseWriter(QThread):
                     store.start_session(payload)
                 elif command == "save":
                     store.save_session_bundle(payload)
+                elif command == "patients":
+                    self.patients_loaded.emit(store.list_patients())
                 elif command == "rows":
                     store.write_rows(payload[0], payload[1])
                 elif command == "finish":

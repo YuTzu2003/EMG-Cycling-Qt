@@ -231,10 +231,10 @@ def load_session(test_id: str):
     from modules.blueprints.analysis.emg.session_analysis import add_point, compare_rms, new_session
     with connect() as db:
         cursor = db.cursor()
-        cursor.execute("SELECT TestID, PatientID, Name, Sex, CreatedAt, Status FROM dbo.Sessions WHERE TestID=%s", (test_id,))
+        cursor.execute("SELECT TestID, PatientID, Name, Sex, CreatedAt, Status, TestTime FROM dbo.Sessions WHERE TestID=%s", (test_id,))
         session = cursor.fetchone()
         if not session: return None
-        identifier, patient_id, name, sex, created_at, status = session
+        identifier, patient_id, name, sex, created_at, status, test_time = session
         cursor.execute("SELECT MuscleName, BaseRMSmV, ActionType, QualityStatus FROM dbo.TestBaselines WHERE TestID=%s", (test_id,))
         baseline_rows = cursor.fetchall()
         baseline_by_muscle = {_muscle_key(row[0]): row for row in baseline_rows if _number(row[1]) is not None}
@@ -252,7 +252,9 @@ def load_session(test_id: str):
         document = new_session({"patientId": patient_id, "name": name, "gender": sex}, {})
         document["started_at"] = created_at.isoformat() if created_at else ""
         cursor.execute("SELECT MuscleName, TimeOffsetSec, AvgRMSmV, MaxRMSmV, BaseRMSmV, QualityStatus FROM dbo.EMGData WHERE TestID=%s ORDER BY MuscleName, TimeOffsetSec", (test_id,))
-        emg_rows = cursor.fetchall(); slots = {str(label): index for index, label in enumerate(sorted({str(row[0]) for row in emg_rows}), 1)}
+        emg_rows = cursor.fetchall()
+        muscles = {str(row[0]) for row in emg_rows} | {str(row[0]) for row in baseline_rows}
+        slots = {label: index for index, label in enumerate(sorted(muscles), 1)}
         document["channels"] = {str(slot): {"label": name, "mapping_name": name} for name, slot in slots.items()}
         document["baselines"] = {
             str(slot): {"mapping_name": muscle, "rms_mv": _number(baseline_by_muscle[_muscle_key(muscle)][1]),
@@ -292,7 +294,7 @@ def load_session(test_id: str):
         cursor.execute("SELECT TimeOffsetSec, DistanceKm, SpeedKmh, PowerW, CadenceRPM, QualityStatus FROM dbo.TrainerData WHERE TestID=%s ORDER BY TimeOffsetSec", (test_id,))
         for time_s, distance, speed, power, cadence, quality in cursor.fetchall():
             elapsed = float(time_s or 0); add_point(document, "trainer", {"time_s": elapsed, "session_distance_meters": None if distance is None else _number(distance)*1000, "speed_kph": _number(speed), "power_watts": _number(power), "cadence_rpm": _number(cadence), "quality": str(quality or "UNKNOWN")})
-    return ({"session_id": identifier, "patient_id": patient_id, "patient_name": name, "started_at": document["started_at"], "source": "upload" if list_files(test_id) else "qt", "status": status or "completed"}, document)
+    return ({"session_id": identifier, "patient_id": patient_id, "patient_name": name, "started_at": document["started_at"], "source": "upload" if list_files(test_id) else "qt", "status": status or "completed", "duration_seconds": _number(test_time)}, document)
 
 
 def list_sessions(patient_id: str | None = None) -> list[dict]:
@@ -303,7 +305,8 @@ def list_sessions(patient_id: str | None = None) -> list[dict]:
             s.TestTime AS duration_seconds, (SELECT COUNT(*) FROM dbo.SourceFiles f WHERE f.TestID=s.TestID) AS file_count,
             (SELECT COUNT(*) FROM dbo.EMGData e WHERE e.TestID=s.TestID) AS emg_count,
             (SELECT COUNT(*) FROM dbo.PedalData e WHERE e.TestID=s.TestID) AS pedal_count,
-            (SELECT COUNT(*) FROM dbo.TrainerData e WHERE e.TestID=s.TestID) AS trainer_count
+            (SELECT COUNT(*) FROM dbo.TrainerData e WHERE e.TestID=s.TestID) AS trainer_count,
+            (SELECT COUNT(*) FROM dbo.TestBaselines b WHERE b.TestID=s.TestID) AS baseline_count
             FROM dbo.Sessions s LEFT JOIN dbo.Patients p ON p.PatientID=s.PatientID"""
         cursor.execute(query + (" WHERE s.PatientID=%s" if patient_id else "") + " ORDER BY s.CreatedAt DESC", (patient_id,) if patient_id else ())
         keys = [column[0] for column in cursor.description]

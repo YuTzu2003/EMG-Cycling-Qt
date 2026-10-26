@@ -65,8 +65,8 @@
           <div class="session-record-subject"><span class="session-record-id">病歷編號 {{ row.patient_id }}</span>
             <h4>{{ row.name or row.patient_id }}</h4>
           </div>
-          {% if row.source == 'qt' and row.emg_count == 0 %}<small class="session-record-note">此筆沒有 EMG
-            資料，無法顯示肌電分析。</small>{% endif %}
+          {% if row.emg_count == 0 and row.baseline_count > 0 %}<small class="text-secondary">基準測試：已儲存 {{ row.baseline_count }} 個肌肉基準值。</small>
+          {% elif row.source == 'qt' and row.emg_count == 0 %}<small class="session-record-note">此筆尚無 EMG 時間序列或基準值資料。</small>{% endif %}
           <div class="session-record-duration"><span>收集時間</span><strong>{{ row.duration_label }}</strong></div>
         </div>
         <div class="session-record-badges"><span class="status-pill">完成</span></div>

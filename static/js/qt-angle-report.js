@@ -45,7 +45,7 @@
   };
   const toolbox = (instance, title) => window.EmgCharts.toolbox(instance, title);
   const line = (title, series, instance, yName = '%', max = 105) => ({
-    title: { text: title, left: 'center', top: 8, textStyle: { fontSize: 14, lineHeight: 20 } },
+    title: { show: false },
     toolbox: toolbox(instance, title),
     tooltip: { trigger: 'axis' }, legend: { type: 'scroll', top: 62 },
     grid: { left: 75, right: 28, top: 105, bottom: 65, containLabel: true },
@@ -96,7 +96,7 @@
         });
         for (const [instance, field, title, unit] of [[rmsChart, 'rms_change_percent', 'RMS 變化（後段比前段）', '%'], [mdfChart, 'mdf_change_hz', 'MDF 變化（後段減前段）', 'Hz']]) {
           if (!instance) continue;
-          instance.setOption({ title: { text: title, left: 'center', top: 8 },
+          instance.setOption({ title: { show: false },
             toolbox: toolbox(instance, title), tooltip: { trigger: 'axis' },
             legend: { top: 42 }, grid: { left: 65, right: 25, top: 78, bottom: 76, containLabel: true },
             xAxis: { type: 'category', data: labels, axisLabel: { interval: 0, formatter: value => value.replace('\n', '\n') } },
@@ -119,7 +119,7 @@
               data: values.map((value, index) => [index + 1, value]) };
           });
           const title = `${muscle}：逐圈 ${field === 'rms_uv' ? 'RMS' : 'MDF'} 趨勢`;
-          instance.setOption({ title: { text: `${title}\n9 圈移動平均`, left: 'center', top: 8, textStyle: { fontSize: 14, lineHeight: 20 } },
+          instance.setOption({ title: { show: false },
             toolbox: toolbox(instance, title),
             tooltip: { trigger: 'axis' }, legend: { top: 58 }, grid: { left: 65, right: 24, top: 94, bottom: 60, containLabel: true },
             xAxis: { type: 'value', name: '踩踏圈數', min: 1, nameLocation: 'middle', nameGap: 32 },
@@ -160,7 +160,7 @@
           const highestEnd = rows[0];
           document.getElementById('angle-phase-description').textContent = `${data.angle_label} ${degree}°｜後段相對活化最高：${highestEnd.location_zh}（${highestEnd.channel_label}）${Math.round(highestEnd.end)}%；前段相對活化最高：${highestStart.location_zh}（${highestStart.channel_label}）${Math.round(highestStart.start)}%。藍色為前段、紅色為後段。此為各肌肉內的相對 EMG 活化，不代表哪條肌肉實際最費力。`;
           const phaseChart = chart('angle-phase-chart');
-          phaseChart?.setOption({ title: { text: `${degree}° 肌肉相對 EMG 活化｜藍色：前段；紅色：後段`, left: 'center', top: 8, textStyle: { fontSize: 15 } },
+          phaseChart?.setOption({ title: { show: false },
             toolbox: toolbox(phaseChart, `${degree}° 肌肉相對 EMG 活化`),
             tooltip: { trigger: 'axis' }, legend: { top: 42 }, grid: { left: 260, right: 28, top: 80, bottom: 56, containLabel: true },
             xAxis: { type: 'value', min: 0, max: 105, name: '相對自身參考值（%）', nameLocation: 'middle', nameGap: 32 },
@@ -179,7 +179,7 @@
         const binIndex = new Map(bins.map((degree, index) => [degree, index]));
         const matrix = profiles.filter(row => row.phase === 'all').map(row => [binIndex.get(row.angle_bin_center), channelIndex.get(row.channel), finite(row.mean_percent)])
           .filter(row => row[0] != null && row[1] != null && row[2] != null);
-        heatmap.setOption({ title: { text: '全肌肉角度熱圖｜每列僅比較自身訊號', left: 'center', top: 8 },
+        heatmap.setOption({ title: { show: false },
           toolbox: toolbox(heatmap, '全肌肉角度熱圖'),
           tooltip: { formatter: item => `${name(summary[item.value[1]])}<br>${bins[item.value[0]]}°：${item.value[2].toFixed(1)}%` },
           grid: { left: 260, right: 35, top: 66, bottom: 82, containLabel: true },
@@ -200,7 +200,7 @@
           const entry = summary.find(row => row.muscle === muscle && row.side === side);
           instance.setOption(entry ? line(`${entry.location_zh} ${entry.channel_label}  |  RMS ${signed(entry.rms_change_percent)}%`,
             [chartSeries(byChannel(entry.channel, 'start'), 'start', '前段'), chartSeries(byChannel(entry.channel, 'end'), 'end', '後段')], instance, '相對活化（%）') : {
-            title: { text: `${side === 'L' ? '左腳' : '右腳'}：無此肌肉資料`, left: 'center' }, series: [], xAxis: {}, yAxis: {},
+            title: { show: false }, series: [], xAxis: {}, yAxis: {},
           }, true);
         }
       });
@@ -218,8 +218,7 @@
             const polarTools = toolbox(polarChart, `${name(row)}圓形角度圖`);
             polarTools.top = 88;
             polarTools.right = 10;
-            polarChart?.setOption({ title: { text: name(row), left: 'center', top: 12, textStyle: { fontSize: 13, lineHeight: 17 },
-                width: '94%', overflow: 'break' },
+            polarChart?.setOption({ title: { show: false },
               toolbox: polarTools,
               legend: { top: 58, left: 'center', itemGap: 24 }, tooltip: { trigger: 'item' },
               polar: { center: ['50%', '63%'], radius: '48%' },
@@ -257,7 +256,7 @@
             ...(start ? [[{ xAxis: 1 }, { xAxis: start }]] : []),
             ...(end >= 0 ? [[{ xAxis: end + 1, itemStyle: { color: '#d1343818' } }, { xAxis: rows.length }]] : []),
           ] };
-          instance.setOption({ title: { text: entry ? `${entry.location_zh} ${entry.channel_label}\n${selected === '' ? '逐圈 8 角度活化' : `${selected}°逐圈活化`}（5 圈移動平均）` : `${side === 'L' ? '左腳' : '右腳'}：無此肌肉資料`, left: 'center', top: 8, textStyle: { fontSize: 14, lineHeight: 20 } },
+          instance.setOption({ title: { show: false },
             toolbox: toolbox(instance, entry ? `${entry.location_zh}逐圈角度活化` : `${side}逐圈角度活化`),
             tooltip: { trigger: 'axis' }, legend: { type: 'scroll', top: 62 }, grid: { left: 55, right: 25, top: 103, bottom: 65, containLabel: true },
             xAxis: { type: 'value', min: 1, name: '踩踏圈數', nameLocation: 'middle', nameGap: 32 },

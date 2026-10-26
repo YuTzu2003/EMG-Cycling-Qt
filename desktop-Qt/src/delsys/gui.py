@@ -600,6 +600,7 @@ class TrignoWindow(QMainWindow):
         self.lastEmgAnalysisAt = 0.0
         self.databaseWriter: DatabaseWriter | None = None
         self.databaseWriters: set[DatabaseWriter] = set()
+        self.patientListWorker: DatabaseWriter | None = None
         self.databaseAggregator: SecondAggregator | None = None
         self.databaseStartPayload: dict | None = None
         self.databaseBufferedRows: dict[str, list[dict]] = {"emg": [], "pedal": [], "trainer": []}
@@ -786,26 +787,45 @@ class TrignoWindow(QMainWindow):
         self.patientNameEdit.setPlaceholderText("必填")
         self.genderCombo = QComboBox()
         self.genderCombo.addItems(("未指定", "男性", "女性"))
+        self.patientIdEdit.setReadOnly(True)
+        self.patientNameEdit.setReadOnly(True)
+        self.genderCombo.setEnabled(False)
         subjectLayout.addWidget(QLabel("ID"), 1, 0)
         subjectLayout.addWidget(self.patientIdEdit, 1, 1)
         subjectLayout.addWidget(QLabel("姓名"), 1, 2)
         subjectLayout.addWidget(self.patientNameEdit, 1, 3)
         subjectLayout.addWidget(QLabel("性別"), 1, 4)
         subjectLayout.addWidget(self.genderCombo, 1, 5)
-        subjectLayout.addWidget(QLabel("\u8cc7\u6599\u8f38\u51fa"), 1, 6)
+        subjectLayout.addWidget(QLabel("輸出資料夾"), 2, 0)
         self.pathEdit = QLineEdit()
         self.pathEdit.setPlaceholderText("\u8acb\u9078\u64c7 CSV \u8207\u651d\u5f71\u6a5f\u5f71\u7247\u7684\u8f38\u51fa\u8cc7\u6599\u593e")
         self.pathEdit.setText(str(self.settings.value("output/directory", "")).strip())
         self.browseButton = QPushButton("\u9078\u64c7\u8cc7\u6599\u593e")
         self.browseButton.setToolTip("\u9078\u64c7 CSV \u8207\u651d\u5f71\u6a5f\u5f71\u7247\u5171\u7528\u7684\u8f38\u51fa\u8cc7\u6599\u593e")
-        subjectLayout.addWidget(self.pathEdit, 1, 7)
-        subjectLayout.addWidget(self.browseButton, 1, 8)
+        subjectLayout.addWidget(self.pathEdit, 2, 1, 1, 7)
+        subjectLayout.addWidget(self.browseButton, 2, 8)
         self.patientIdEdit.setFixedWidth(160)
         self.patientNameEdit.setFixedWidth(180)
         self.genderCombo.setFixedWidth(100)
         subjectLayout.setColumnStretch(7, 1)
         self.browseButton.clicked.connect(self.chooseOutput)
         self.pathEdit.editingFinished.connect(self.saveOutputDirectory)
+        self.patientSelectCombo = QComboBox()
+        self.patientSelectCombo.addItem("請先連線資料庫，再選擇受測者", None)
+        self.patientSelectCombo.setEnabled(False)
+        self.patientSelectCombo.currentIndexChanged.connect(self.selectDatabasePatient)
+        self.reloadPatientsButton = QPushButton("重新載入受測者")
+        self.reloadPatientsButton.setEnabled(False)
+        self.reloadPatientsButton.clicked.connect(self.loadDatabasePatients)
+        subjectLayout.addWidget(QLabel("選擇受測者"), 1, 6)
+        subjectLayout.addWidget(self.patientSelectCombo, 1, 7)
+        subjectLayout.addWidget(self.reloadPatientsButton, 1, 8)
+        subjectHint = QLabel("請在網頁新增或修改受測者，再重新載入。", objectName="muted")
+        subjectHint.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        subjectLayout.addWidget(subjectHint, 0, 6, 1, 3)
+        self.patientSelectCombo.setMinimumWidth(240)
+        self.reloadPatientsButton.setMinimumWidth(140)
+        self.browseButton.setMinimumWidth(140)
         layout.addWidget(subject)
 
         connectionColumns = QHBoxLayout()
@@ -826,7 +846,7 @@ class TrignoWindow(QMainWindow):
         usageGuideLayout.setSpacing(8)
         usageGuideLayout.addWidget(QLabel("\u64cd\u4f5c\u8aaa\u660e", objectName="sectionTitle"))
         usageGuideText = QLabel(
-            "1. \u586b\u5beb\u53d7\u8a66\u8005\u8cc7\u6599\u8207\u8cc7\u6599\u8f38\u51fa\u8cc7\u6599\u593e\n"
+            "1. 在網頁建立受測者，連線資料庫後於上方選取，並設定資料輸出資料夾\n"
             "2. \u6307\u5b9a\u963b\u529b\u8a08\u3001\u8e0f\u677f\u8207\u651d\u5f71\u6a5f\u88dd\u7f6e\n"
             "3. \u6e2c\u8a66 EMG \u3001\u651d\u5f71\u6a5f\u8207\u8cc7\u6599\u5eab\u9023\u7dda\n"
             "4. \u78ba\u8a8d\u5404\u88dd\u7f6e\u8207\u8cc7\u6599\u5eab\u7684\u9023\u7dda\u72c0\u614b\n"
@@ -1082,6 +1102,10 @@ class TrignoWindow(QMainWindow):
 
     def databaseConnectionEdited(self, *_args) -> None:
         self.activeDatabaseConfig = None
+        self.patientSelectCombo.clear()
+        self.patientSelectCombo.addItem("請先連線資料庫，再選擇受測者", None)
+        self.patientSelectCombo.setEnabled(False)
+        self.reloadPatientsButton.setEnabled(False)
         self.databaseStatusLabel.setText("連線資料已變更，請重新測試連線")
         self.setDatabaseConnectionState(False)
 
@@ -1112,11 +1136,69 @@ class TrignoWindow(QMainWindow):
             self.setDatabaseConnectionState(False)
             return
         self.activeDatabaseConfig = config
-        self.databaseStatusLabel.setText(f"已連線：{name}；五張資料表可用")
+        self.databaseStatusLabel.setText(f"已連線：{name}；受測者與測試資料表可用")
         self.setDatabaseConnectionState(True)
         self.saveDatabaseButton.setEnabled(self.databasePendingSave is not None)
+        self.loadDatabasePatients()
         if hasattr(self, "databaseComparePatientCombo"):
             self.loadDatabaseComparisonPatients()
+
+    def loadDatabasePatients(self) -> None:
+        if self.patientListWorker is not None:
+            return
+        config = self.activeDatabaseConfig
+        if config is None:
+            return
+        writer = DatabaseWriter(config)
+        self.patientListWorker = writer
+        self.databaseWriters.add(writer)
+        self.reloadPatientsButton.setEnabled(False)
+        writer.failed.connect(self.patientListFailed)
+        writer.patients_loaded.connect(self.databasePatientsLoaded)
+        writer.finished.connect(self.patientListFinished)
+        writer.enqueue("patients")
+        writer.enqueue("stop")
+        writer.start()
+
+    def patientListFailed(self, message: str) -> None:
+        self.appendLog(f"受測者載入失敗：{message}")
+        QMessageBox.warning(self, "受測者載入失敗", message)
+
+    def databasePatientsLoaded(self, patients: list) -> None:
+        if self.patientListWorker is None or self.patientListWorker.config != self.activeDatabaseConfig:
+            return
+        selected_id = self.patientIdEdit.text()
+        self.patientSelectCombo.blockSignals(True)
+        self.patientSelectCombo.clear()
+        self.patientSelectCombo.addItem("請選擇受測者" if patients else "尚無受測者，請先在網頁新增", None)
+        selected_index = 0
+        for patient in patients:
+            self.patientSelectCombo.addItem(f"{patient['name']} · {patient['patient_id']}", patient)
+            if patient["patient_id"] == selected_id:
+                selected_index = self.patientSelectCombo.count() - 1
+        self.patientSelectCombo.setCurrentIndex(selected_index)
+        self.patientSelectCombo.blockSignals(False)
+        self.patientSelectCombo.setEnabled(True)
+        self.selectDatabasePatient()
+
+    def selectDatabasePatient(self, *_args) -> None:
+        patient = self.patientSelectCombo.currentData() or {}
+        self.patientIdEdit.setText(patient.get("patient_id", ""))
+        self.patientNameEdit.setText(patient.get("name", ""))
+        sex = patient.get("sex", "未指定")
+        if self.genderCombo.findText(sex) < 0:
+            self.genderCombo.addItem(sex)
+        self.genderCombo.setCurrentText(sex)
+
+    def patientListFinished(self) -> None:
+        writer = self.patientListWorker
+        self.patientListWorker = None
+        if writer is not None:
+            self.databaseWriters.discard(writer)
+            writer.deleteLater()
+        self.reloadPatientsButton.setEnabled(self.activeDatabaseConfig is not None)
+        if self.activeDatabaseConfig is not None and writer is not None and writer.config != self.activeDatabaseConfig:
+            self.loadDatabasePatients()
 
     def onMainTabChanged(self, index: int) -> None:
         if (self.tabs.widget(index) is self.comparisonTab
@@ -2868,9 +2950,9 @@ class TrignoWindow(QMainWindow):
         if not subject.name:
             missing.append("姓名")
         if missing:
-            QMessageBox.warning(self,"缺少病人資訊","開始收集前請填寫：" + "、".join(missing),)
+            QMessageBox.warning(self,"缺少受測者資訊","請先連線資料庫並選擇受測者；新受測者請在網頁建立。",)
             self.tabs.setCurrentWidget(self.settingsTab)
-            (self.patientIdEdit if not subject.patientId else self.patientNameEdit).setFocus()
+            self.patientSelectCombo.setFocus()
             return False
 
         duplicates = duplicateMappingSlots(self.mappings)

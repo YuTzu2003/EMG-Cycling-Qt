@@ -22,7 +22,6 @@
 <div class="tab-content analysis-content" id="analysis-content">
   {% if selected_view == 'pedal' %}
 <section class="tab-pane analysis-pane is-active" id="pedal-tab">
-    <div class="qt-tab-intro"><h2>踏板分析</h2></div>
     <form class="angle-chart-controls pedal-ftp-controls" method="get" action="{{ url_for('analysis.session_detail', session_id=record.session_id) }}">
       <input type="hidden" name="view" value="pedal">
       {% for key, value in angle_query if key != 'ftp_w' %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
@@ -77,12 +76,17 @@
 {% endif %}
   {% if selected_view == 'emg' %}
 <section class="tab-pane analysis-pane is-active" id="emg-tab">
-    <div class="qt-tab-intro"><h2>肌電分析</h2></div>
-    <div class="qt-metric-grid emg-metric-grid mb-4"><div class="qt-metric"><span>收集時間</span><strong>{{ '%.0f'|format(analysis.duration_s) if analysis.duration_s is not none else '--' }} <small class="d-inline">s</small></strong></div><div class="qt-metric"><span>肌肉</span><strong>{{ emg_bars|length }} <small class="d-inline">部位</small></strong></div></div>
+    <div class="qt-metric-grid emg-metric-grid mb-4"><div class="qt-metric"><span>收集時間</span><strong>{{ test_duration_label }}</strong></div><div class="qt-metric"><span>肌肉</span><strong>{{ baseline_records|length if not emg_bars and baseline_records else emg_bars|length }} <small class="d-inline">部位</small></strong></div></div>
     {% if emg_bars %}
     <div class="row g-3 mb-4 emg-chart-row"><div class="col-xl-6"><div class="surface analysis-chart-card"><div id="emg-average-chart" class="qt-chart"></div></div></div><div class="col-xl-6"><div class="surface analysis-chart-card"><div id="emg-peak-chart" class="qt-chart"></div></div></div></div>
     <div class="surface analysis-chart-card mb-4"><div class="chart-card-header envelope-header"><div class="d-flex align-items-center gap-2"><label class="form-label mb-0" for="envelope-muscle">肌肉</label><select id="envelope-muscle" class="form-select form-select-sm envelope-select">{% for item in emg_envelopes %}<option value="{{ item.slot }}">{{ item.label }}</option>{% endfor %}</select></div></div><div id="emg-envelope-chart" class="qt-chart qt-chart-large"></div></div>
+    {% elif baseline_records %}
+    <div class="alert alert-info">此筆為基準測試，已保存 {{ baseline_records|length }} 個肌肉基準值。基準測試保存的是 RMS 結果，沒有騎乘 EMG 時間序列圖。</div>
+    <div class="surface table-responsive mb-4"><table class="table data-table mb-0"><thead><tr><th>肌肉／側別</th><th>基準 RMS</th><th>測試內容</th><th>資料狀態</th></tr></thead><tbody>
+      {% for slot, baseline in baseline_records.items() %}<tr><td>{{ emg_channel_names.get(slot|string, baseline.mapping_name) }}</td><td>{{ '%.4f mV'|format(baseline.rms_mv) }}</td><td>{{ baseline.protocol or '基準測試' }}</td><td>{{ '有效' if baseline.quality == 'VALID' else baseline.quality or '未標示' }}</td></tr>{% endfor %}
+    </tbody></table></div>
     {% else %}<div class="surface empty mb-4">此測試沒有可分析的 EMG RMS 資料。</div>{% endif %}
+    {% if analysis.emg or not baseline_records %}
     <p class="text-secondary small mb-2">基準比較只使用本次訊號已套用的基準值；其他測試保存的基準會另外標示，須確認感測器與分析設定相容後才能比較。</p>
     <div class="surface table-responsive emg-qt-table">
       <table class="table data-table">
@@ -101,11 +105,11 @@
         </tbody>
       </table>
     </div>
+    {% endif %}
   </section>
 {% endif %}
   {% if selected_view == 'angle' %}
 <section class="tab-pane analysis-pane is-active" id="angle-tab">
-    <div class="qt-tab-intro"><h2>踩踏角度分析</h2></div>
     <nav class="angle-view-nav mb-3" aria-label="踩踏角度分析項目">
       {% for key, title in angle_sections %}<a class="angle-view-link {{ 'active' if angle_section == key else '' }}" href="{{ url_for('analysis.session_detail', session_id=record.session_id, view='angle', angle_section=key) }}{{ angle_query_suffix }}">{{ title }}</a>{% endfor %}
     </nav>

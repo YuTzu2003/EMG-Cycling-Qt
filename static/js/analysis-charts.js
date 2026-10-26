@@ -66,7 +66,7 @@
     requestAnimationFrame(() => chart.resize());
   };
   const base = (title, chart) => ({
-    title: { text: title, left: 'center', top: 8 },
+    title: { show: false },
     tooltip: { trigger: 'axis' },
     legend: { type: 'scroll', top: 42 },
     toolbox: chartToolbox(chart, title),
@@ -114,8 +114,7 @@
       const chart = echarts.init(element, null, { renderer: 'canvas' });
       const title = scatter ? '左右平衡 Left / Right Balance' : unit === 'W' ? '功率 Power' : '踏頻 Cadence';
       const option = base(title, chart);
-      option.title = { text: title, left: 'center', top: 8,
-        subtext: scatter ? '左、右平衡（%）' : `平均 ${average == null ? '—' : Math.round(average)} ${unit} ｜ 最大 ${maximum == null ? '—' : Math.round(maximum)} ${unit}` };
+      option.title = { show: false };
       option.legend = { show: scatter, top: 58, left: 'center' };
       option.grid = { left: 64, right: 28, top: scatter ? 102 : 82, bottom: 68, containLabel: true };
       option.xAxis = { type: 'value', name: '時間（s）', nameLocation: 'middle', nameGap: 32 };
@@ -167,8 +166,7 @@
       const draw = () => {
         const item = envelopes.find(value => value.slot === select.value) || envelopes[0];
         const option = base(item.label, chart);
-        option.title = { text: `EMG RMS Peak 包絡線（每 1 秒最高值）— ${item.label}`, left: 'center', top: 8,
-          textStyle: { fontSize: 14 } };
+        option.title = { show: false };
         delete option.legend;
         option.toolbox = chartToolbox(chart, `EMG RMS Peak ${item.label}`);
         option.grid = { left: 55, right: 26, top: 55, bottom: 68, containLabel: true };
@@ -192,7 +190,7 @@
       const draw = () => {
         const item = profiles.find(value => value.slot === select.value) || profiles[0];
         const option = base(item.label, chart);
-        option.title = { text: `肌肉踩踏角度曲線 — ${item.label}`, left: 'center', top: 8 };
+        option.title = { show: false };
         option.legend = { show: true, top: 48, left: 'center' };
         option.grid = { left: 56, right: 24, top: 84, bottom: 78 };
         option.xAxis = { type: 'value', name: '踩踏角度（°）', min: 0, max: 360, nameLocation: 'middle', nameGap: 30 };
@@ -245,14 +243,14 @@
       const profile = (channel, phase) => profiles.filter(row => row.channel === channel && row.phase === phase)
         .sort((a, b) => a.angle_bin_center - b.angle_bin_center).map(row => [row.angle_bin_center, row.mean_percent]);
       const lineOption = (title, series, yName = '%') => ({
-        title: { text: title, left: 'center', top: 8 }, tooltip: { trigger: 'axis' }, legend: { top: 40 },
+        title: { show: false }, tooltip: { trigger: 'axis' }, legend: { top: 40 },
         grid: { left: 55, right: 25, top: 76, bottom: 42 },
         xAxis: { type: 'value', name: '角度（°）', min: 0, max: 360 }, yAxis: { type: 'value', name: yName, min: 0, max: yName === '%' ? 105 : undefined },
         series,
       });
       const fatigue = chart('angle-fatigue-chart');
       if (fatigue) {
-        fatigue.setOption({ title: { text: '前後段 RMS 變化', left: 'center' }, tooltip: { trigger: 'axis' }, legend: { top: 34 }, grid: { left: 55, right: 24, top: 72, bottom: 95 },
+        fatigue.setOption({ title: { show: false }, tooltip: { trigger: 'axis' }, legend: { top: 34 }, grid: { left: 55, right: 24, top: 72, bottom: 95 },
           xAxis: { type: 'category', data: summary.map(label), axisLabel: { rotate: 35 } }, yAxis: { type: 'value', name: '%' },
           series: ['L', 'R'].map((side, index) => ({ name: side === 'L' ? '左側' : '右側', type: 'bar', data: summary.map(row => row.side === side ? row.rms_change_percent : null), itemStyle: { color: index ? '#d97706' : '#1684d7' } })) });
       }
@@ -268,7 +266,7 @@
             });
             return { name: side === 'L' ? '左側（9 圈平滑）' : '右側（9 圈平滑）', type: 'line', showSymbol: false, smooth: true, itemStyle: { color: index ? '#d97706' : '#1684d7' }, data: smoothed.map((value, i) => [i + 1, value]) };
           });
-          instance.setOption({ title: { text: title, left: 'center' }, tooltip: { trigger: 'axis' }, legend: { top: 32 }, grid: { left: 55, right: 24, top: 70, bottom: 42 }, xAxis: { type: 'value', name: '踩踏圈數' }, yAxis: { type: 'value', name: field === 'rms_uv' ? 'µV' : 'Hz' }, series }, true);
+          instance.setOption({ title: { show: false }, tooltip: { trigger: 'axis' }, legend: { top: 32 }, grid: { left: 55, right: 24, top: 70, bottom: 42 }, xAxis: { type: 'value', name: '踩踏圈數' }, yAxis: { type: 'value', name: field === 'rms_uv' ? 'µV' : 'Hz' }, series }, true);
         });
       });
       const phaseChart = chart('angle-phase-chart');
@@ -283,7 +281,7 @@
           };
           return { ...row, start: interpolate('start'), end: interpolate('end') };
         }).sort((a, b) => (b.end || 0) - (a.end || 0));
-        if (phaseChart) phaseChart.setOption({ title: { text: `${angle}° 相位肌肉活化`, left: 'center' }, tooltip: { trigger: 'axis' }, legend: { top: 34 }, grid: { left: 165, right: 28, top: 72, bottom: 36 }, xAxis: { type: 'value', name: '%' }, yAxis: { type: 'category', data: values.map(label) }, series: [{ name: '前段', type: 'bar', data: values.map(row => row.start), itemStyle: { color: '#1684d7' } }, { name: '後段', type: 'bar', data: values.map(row => row.end), itemStyle: { color: '#d13438' } }] }, true);
+        if (phaseChart) phaseChart.setOption({ title: { show: false }, tooltip: { trigger: 'axis' }, legend: { top: 34 }, grid: { left: 165, right: 28, top: 72, bottom: 36 }, xAxis: { type: 'value', name: '%' }, yAxis: { type: 'category', data: values.map(label) }, series: [{ name: '前段', type: 'bar', data: values.map(row => row.start), itemStyle: { color: '#1684d7' } }, { name: '後段', type: 'bar', data: values.map(row => row.end), itemStyle: { color: '#d13438' } }] }, true);
         if (phaseTable) phaseTable.innerHTML = `<table class="table table-sm data-table mb-0"><thead><tr><th>肌肉</th><th>前段</th><th>後段</th><th>變化</th></tr></thead><tbody>${values.map(row => `<tr><td>${label(row)}</td><td>${row.start?.toFixed(1) ?? '—'}%</td><td>${row.end?.toFixed(1) ?? '—'}%</td><td>${row.start != null && row.end != null ? (row.end - row.start).toFixed(1) : '—'}%</td></tr>`).join('')}</tbody></table>`;
       };
       const input = document.getElementById('angle-phase-input');
@@ -301,7 +299,7 @@
           indexByBin.get(row.angle_bin_center), indexByChannel.get(row.channel), row.mean_percent,
         ]).filter(row => row[0] !== undefined && row[1] !== undefined);
         heatmap.setOption({
-          title: { text: '全肌肉角度熱圖｜每列僅比較自身訊號', left: 'center', top: 8 },
+          title: { show: false },
           tooltip: { formatter: item => `${names[item.value[1]]}<br>${Number(item.value[0]).toFixed(1)}°：${Number(item.value[2]).toFixed(1)}%` },
           grid: { left: 255, right: 82, top: 65, bottom: 96 },
           xAxis: { type: 'category', data: bins, name: '相對踩踏相位（°）', nameLocation: 'middle', nameGap: 34,
@@ -313,9 +311,9 @@
             markLine: { silent: true, symbol: 'none', lineStyle: { color: '#555', type: 'dashed' }, data: [{ xAxis: bins[Math.floor(90 / (360 / bins.length))] }] } }],
         });
       }
-      addMuscles('angle-polar-muscle', (muscle) => { const instance = chart('angle-polar-chart'); if (!instance) return; const entries = summary.filter(row => row.muscle === muscle); instance.setOption({ title: { text: `${muscle} 前後段極座標曲線`, left: 'center' }, legend: { top: 35 }, polar: {}, angleAxis: { type: 'value', min: 0, max: 360, startAngle: 90 }, radiusAxis: { min: 0, max: 105 }, series: entries.flatMap((row, index) => ['start', 'end'].map(phase => ({ name: `${label(row)} ${phase === 'start' ? '前段' : '後段'}`, type: 'line', coordinateSystem: 'polar', data: profile(row.channel, phase), lineStyle: { color: palette[(index * 2 + (phase === 'end')) % palette.length] } }))) }, true); });
-      addMuscles('angle-cycle-muscle', (muscle) => ['L', 'R'].forEach(side => { const instance = chart(`angle-cycle-${side === 'L' ? 'left' : 'right'}`); if (!instance) return; const entry = summary.find(row => row.muscle === muscle && row.side === side); const rows = entry ? cycles.filter(row => row.channel === entry.channel).sort((a,b) => a.cycle - b.cycle) : []; const angles = [0,45,90,135,180,225,270,315]; instance.setOption({ title: { text: `${side === 'L' ? '左側' : '右側'}：8 個固定角度逐圈趨勢`, left: 'center' }, tooltip: { trigger: 'axis' }, legend: { type: 'scroll', top: 34 }, grid: { left: 52, right: 20, top: 72, bottom: 42 }, xAxis: { type: 'value', name: '圈數' }, yAxis: { type: 'value', name: '%' }, series: angles.map(angle => ({ name: `${angle}°`, type: 'line', showSymbol: false, data: rows.map((row, index) => [index + 1, row[`bin_${Math.floor(angle / (360 / data.bins))}`]]) })) }, true); }));
-      [['angle-rms-change', 'rms_change_percent', 'RMS 變化（%）'], ['angle-mdf-change', 'mdf_change_hz', 'MDF 變化（Hz）']].forEach(([id, field, title]) => { const instance = chart(id); if (!instance) return; instance.setOption({ title: { text: title, left: 'center' }, tooltip: { trigger: 'axis' }, grid: { left: 54, right: 20, top: 56, bottom: 95 }, xAxis: { type: 'category', data: summary.map(label), axisLabel: { rotate: 35 } }, yAxis: { type: 'value' }, series: [{ type: 'bar', data: summary.map(row => row[field]), itemStyle: { color: '#5470c6' } }] }); });
+      addMuscles('angle-polar-muscle', (muscle) => { const instance = chart('angle-polar-chart'); if (!instance) return; const entries = summary.filter(row => row.muscle === muscle); instance.setOption({ title: { show: false }, legend: { top: 35 }, polar: {}, angleAxis: { type: 'value', min: 0, max: 360, startAngle: 90 }, radiusAxis: { min: 0, max: 105 }, series: entries.flatMap((row, index) => ['start', 'end'].map(phase => ({ name: `${label(row)} ${phase === 'start' ? '前段' : '後段'}`, type: 'line', coordinateSystem: 'polar', data: profile(row.channel, phase), lineStyle: { color: palette[(index * 2 + (phase === 'end')) % palette.length] } }))) }, true); });
+      addMuscles('angle-cycle-muscle', (muscle) => ['L', 'R'].forEach(side => { const instance = chart(`angle-cycle-${side === 'L' ? 'left' : 'right'}`); if (!instance) return; const entry = summary.find(row => row.muscle === muscle && row.side === side); const rows = entry ? cycles.filter(row => row.channel === entry.channel).sort((a,b) => a.cycle - b.cycle) : []; const angles = [0,45,90,135,180,225,270,315]; instance.setOption({ title: { show: false }, tooltip: { trigger: 'axis' }, legend: { type: 'scroll', top: 34 }, grid: { left: 52, right: 20, top: 72, bottom: 42 }, xAxis: { type: 'value', name: '圈數' }, yAxis: { type: 'value', name: '%' }, series: angles.map(angle => ({ name: `${angle}°`, type: 'line', showSymbol: false, data: rows.map((row, index) => [index + 1, row[`bin_${Math.floor(angle / (360 / data.bins))}`]]) })) }, true); }));
+      [['angle-rms-change', 'rms_change_percent', 'RMS 變化（%）'], ['angle-mdf-change', 'mdf_change_hz', 'MDF 變化（Hz）']].forEach(([id, field, title]) => { const instance = chart(id); if (!instance) return; instance.setOption({ title: { show: false }, tooltip: { trigger: 'axis' }, grid: { left: 54, right: 20, top: 56, bottom: 95 }, xAxis: { type: 'category', data: summary.map(label), axisLabel: { rotate: 35 } }, yAxis: { type: 'value' }, series: [{ type: 'bar', data: summary.map(row => row[field]), itemStyle: { color: '#5470c6' } }] }); });
     },
   };
 })();
