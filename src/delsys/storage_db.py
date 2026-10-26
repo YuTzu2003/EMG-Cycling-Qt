@@ -94,7 +94,7 @@ class SqlServerStorage:
         rows = cursor.execute("SELECT name FROM sys.databases WHERE state_desc='ONLINE' AND HAS_DBACCESS(name)=1 ORDER BY name").fetchall()
         return [str(row[0]) for row in rows]
 
-    def start_session(self, payload: dict[str, Any]) -> None:
+    def start_session(self, payload: dict[str, Any], commit: bool = True) -> None:
         cursor = self._cursor()
         cursor.execute("""INSERT INTO dbo.Sessions(TestID, PatientID, Name, Sex, ActionType, TestTime, ResistanceLevel, HasBaseline, Status, Notes, CreatedAt)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -111,7 +111,8 @@ class SqlServerStorage:
                 item.get("action_type"), item.get("rms_mv"), item.get("yellow_pct"),
                 item.get("red_pct"), quality_code(item.get("quality_status"), "VALID"), payload["started_at"],
             )
-        self.connection.commit()
+        if commit:
+            self.connection.commit()
 
     def _upsert(self, table: str, key_fields: tuple[str, ...], values: dict[str, Any], prefix: str) -> None:
         cursor = self._cursor()
@@ -128,7 +129,7 @@ class SqlServerStorage:
             cursor.execute(f"INSERT INTO dbo.{table} ({', '.join(fields)}) VALUES ({', '.join('?' for _ in fields)})",
                            prefixed_id(prefix), *values.values())
 
-    def write_rows(self, kind: str, rows: list[dict[str, Any]]) -> None:
+    def write_rows(self, kind: str, rows: list[dict[str, Any]], commit: bool = True) -> None:
         if not rows:
             return
         if kind == "emg":
@@ -142,9 +143,10 @@ class SqlServerStorage:
                 self._upsert("TrainerData", ("TestID", "TimeOffsetSec"), row, "TRAINER")
         else:
             raise ValueError(f"Unsupported database row type: {kind}")
-        self.connection.commit()
+        if commit:
+            self.connection.commit()
 
-    def finish_session(self, payload: dict[str, Any]) -> None:
+    def finish_session(self, payload: dict[str, Any], commit: bool = True) -> None:
         cursor = self._cursor()
         cursor.execute(
             """UPDATE dbo.Sessions SET TestTime=?, Status=?, AvgPowerW=?, MaxPowerW=?,
@@ -155,7 +157,21 @@ class SqlServerStorage:
             payload.get("left_balance_pct"), payload.get("right_balance_pct"), payload.get("notes"),
             payload["test_id"],
         )
-        self.connection.commit()
+        if commit:
+            self.connection.commit()
+
+    def save_session_bundle(self, payload: tuple[dict, dict[str, list[dict]], dict]) -> None:
+        """Commit an approved test as one database transaction."""
+        start, rows_by_kind, finish = payload
+        try:
+            self.start_session(start, commit=False)
+            for kind, rows in rows_by_kind.items():
+                self.write_rows(kind, rows, commit=False)
+            self.finish_session(finish, commit=False)
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def discard_session(self, test_id: str) -> None:
         cursor = self._cursor()
@@ -314,6 +330,8 @@ class DatabaseWriter(QThread):
                 command, payload = self.queue.get()
                 if command == "start":
                     store.start_session(payload)
+                elif command == "save":
+                    store.save_session_bundle(payload)
                 elif command == "rows":
                     store.write_rows(payload[0], payload[1])
                 elif command == "finish":

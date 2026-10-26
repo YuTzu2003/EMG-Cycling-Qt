@@ -1,5 +1,6 @@
 from __future__ import annotations
 import csv
+import math
 import sys
 import time
 from dataclasses import asdict
@@ -17,7 +18,7 @@ from delsys.collection import CollectionInfoRecorder, SubjectInfo, analysisOutpu
 from delsys.emg.body_map import BodyMapPanel
 from delsys.emg.sensor_mapping import (SensorMapping, duplicateMappingSlots, loadMappings, saveMappings, matchesCsvColumn, recordingChannelSides)
 from delsys.emg.trigno import CHANNEL_COUNT, SAMPLE_RATE
-from delsys.emg.baseline import BaselineManager, CalibrationSession, EMGPreprocessor, FilterSettings, RMSFeatureExtractor, load_raw_emg_csv
+from delsys.emg.baseline import BaselineManager, BaselineRecord, CalibrationSession, EMGPreprocessor, FilterSettings, RMSFeatureExtractor, load_raw_emg_csv
 from delsys.emg.workers import ConnectionWorker, StreamWorker
 from delsys.resistance.recording import TrainerCsvRecorder, trainerOutputPath
 from delsys.resistance.trainer import BikeTelemetry, NumericRange, TrainerWorker
@@ -574,6 +575,7 @@ class TrignoWindow(QMainWindow):
         self.sensorIcons: list[QLabel] = []
         self.sensorRows: list[QFrame] = []
         self.sensorActive = [False] * CHANNEL_COUNT
+        self.sensorStatesKnown = False
         self.sensorSerials: dict[int, str] = {}
         self.curves: dict[int, tuple[pg.PlotItem, pg.PlotDataItem, pg.TextItem]] = {}
         self.collectionSummary: tuple[int, float, float] | None = None
@@ -599,8 +601,20 @@ class TrignoWindow(QMainWindow):
         self.databaseWriter: DatabaseWriter | None = None
         self.databaseWriters: set[DatabaseWriter] = set()
         self.databaseAggregator: SecondAggregator | None = None
+        self.databaseStartPayload: dict | None = None
+        self.databaseBufferedRows: dict[str, list[dict]] = {"emg": [], "pedal": [], "trainer": []}
+        self.databasePendingSave: tuple[dict, dict[str, list[dict]], dict] | None = None
+        self.pendingBaselineRecords: dict[int, BaselineRecord] | None = None
+        self.previousBaselineRecords: dict[int, BaselineRecord] | None = None
+        self.currentTestDecision: str | None = None
+        self.decisionBeforeCalibration: str | None = None
+        self.countdownStartedAt: float | None = None
+        self.countdownStoppedAt: float | None = None
+        self.countdownDeadline: float | None = None
         self.databaseTestId: str | None = None
         self.databaseLastTestId: str | None = None
+        self.databaseComparePendingPatient: str | None = None
+        self.databaseComparePendingTestId: str | None = None
         self.databaseDiscardAfterWriter: dict[DatabaseWriter, str] = {}
         self.databaseStartedAt: datetime | None = None
         self.activeDatabaseConfig: DatabaseConfig | None = None
@@ -877,6 +891,7 @@ class TrignoWindow(QMainWindow):
         inlineMappingLayout.setContentsMargins(0, 8, 0, 0)
         inlineMappingLayout.setSpacing(6)
         self.inlineMappingEdits: list[tuple[QLineEdit, QLineEdit, QLineEdit]] = []
+        self.inlineSensorStateLabels: list[QLabel] = []
         mappingContent = QWidget()
         mappingGrid = QGridLayout(mappingContent)
         mappingGrid.setContentsMargins(0, 0, 0, 0)
@@ -890,10 +905,11 @@ class TrignoWindow(QMainWindow):
             slot = QLabel(f"S{mapping.slot:02d}")
             slot.setAlignment(Qt.AlignmentFlag.AlignCenter)
             mappingGrid.addWidget(slot, row, 0)
-            state = QLabel("\u5df2\u555f\u7528" if self.sensorActive[mapping.slot - 1] else "\u5f85\u9023\u7dda")
+            state = QLabel("待測試")
             state.setAlignment(Qt.AlignmentFlag.AlignCenter)
             FluentThemeManager.set_property(state, "fluentSeverity", "success" if self.sensorActive[mapping.slot - 1] else "info")
             mappingGrid.addWidget(state, row, 1)
+            self.inlineSensorStateLabels.append(state)
             chinese = QLineEdit(mapping.chinese_name)
             english = QLineEdit(mapping.english_name)
             abbreviation = QLineEdit(mapping.abbreviation)
@@ -940,46 +956,6 @@ class TrignoWindow(QMainWindow):
         self.goproDownloadButton.clicked.connect(self.downloadLatestGoProVideo)
         self.goproChooseVideoButton.clicked.connect(self.chooseGoProVideoToDownload)
         rightConnectionColumn.addWidget(gopro)
-
-        gopro = QFrame()
-        FluentThemeManager.set_property(gopro, "fluentRole", "surface")
-        goproLayout = QGridLayout(gopro)
-        goproLayout.setContentsMargins(14, 12, 14, 12)
-        goproLayout.setHorizontalSpacing(12)
-        goproLayout.setVerticalSpacing(8)
-        goproLayout.addWidget(QLabel("GoPro 連線", objectName="sectionTitle"), 0, 0, 1, 4)
-        self.goproTestButton = QPushButton("配對並測試 GoPro")
-        self.goproTestButton.setFixedWidth(180)
-        FluentThemeManager.set_property(self.goproTestButton, "fluentAppearance", "dark")
-        self.goproDisconnectButton = QPushButton("中斷 GoPro")
-        self.goproDisconnectButton.setEnabled(False)
-        self.goproStatusLabel = QLabel("尚未測試；請先讓相機進入配對模式，測試不會開始錄影", objectName="muted")
-        self.goproStatusLabel.setWordWrap(True)
-        goproLayout.addWidget(self.goproTestButton, 1, 0)
-        goproLayout.addWidget(self.goproDisconnectButton, 1, 1)
-        goproLayout.addWidget(self.goproStatusLabel, 1, 2, 1, 2)
-        self.goproDownloadButton = QPushButton("下載最新影片")
-        self.goproDownloadButton.setToolTip("自動連上 GoPro Wi-Fi，下載最新 MP4")
-        FluentThemeManager.set_property(self.goproDownloadButton, "fluentAppearance", "primary")
-        self.goproChooseVideoButton = QPushButton("選擇影片下載")
-        self.goproDownloadStatusLabel = QLabel("配對成功後可自動連上 GoPro Wi-Fi 並下載", objectName="muted")
-        self.goproDownloadStatusLabel.setWordWrap(True)
-        goproLayout.addWidget(self.goproDownloadButton, 2, 0)
-        goproLayout.addWidget(self.goproChooseVideoButton, 2, 1)
-        goproLayout.addWidget(self.goproDownloadStatusLabel, 2, 2, 1, 2)
-        self.goproVideoOutputEdit = QLineEdit()
-        self.goproVideoOutputEdit.setReadOnly(True)
-        self.goproVideoOutputEdit.setToolTip("影片位置與「收集資料」頁的資料輸出資料夾相同。")
-        goproLayout.addWidget(QLabel("影片下載位置（跟隨資料輸出）"), 3, 0)
-        goproLayout.addWidget(self.goproVideoOutputEdit, 3, 1, 1, 3)
-        goproLayout.setColumnStretch(2, 1)
-        self.goproTestButton.clicked.connect(self.testGoProConnection)
-        self.goproDisconnectButton.clicked.connect(self.disconnectGoPro)
-        self.goproDownloadButton.clicked.connect(self.downloadLatestGoProVideo)
-        self.goproChooseVideoButton.clicked.connect(self.chooseGoProVideoToDownload)
-        self.pathEdit.textChanged.connect(self.updateGoProVideoOutputHint)
-        self.updateGoProVideoOutputHint()
-        layout.addWidget(gopro)
 
         # The scan list belongs to the device connection workflow.  Keep it in
         # the same panel so choosing a device and connecting it are adjacent.
@@ -1138,6 +1114,7 @@ class TrignoWindow(QMainWindow):
         self.activeDatabaseConfig = config
         self.databaseStatusLabel.setText(f"已連線：{name}；五張資料表可用")
         self.setDatabaseConnectionState(True)
+        self.saveDatabaseButton.setEnabled(self.databasePendingSave is not None)
         if hasattr(self, "databaseComparePatientCombo"):
             self.loadDatabaseComparisonPatients()
 
@@ -1167,32 +1144,26 @@ class TrignoWindow(QMainWindow):
             "sex": subject.gender, "action_type": "固定阻力騎乘", "test_time": None,
             "resistance_level": self.resistanceSpin.value(), "has_baseline": bool(baselines), "notes": "EMG Cycling Monitor",
             "started_at": self.databaseStartedAt, "baselines": baselines}
-        self.databaseWriter = DatabaseWriter(config)
-        writer = self.databaseWriter
-        self.databaseWriters.add(writer)
-        self.databaseWriter.connected.connect(lambda name: self.appendLog(f"資料庫已連線：{name}；TestID {self.databaseTestId}"))
-        self.databaseWriter.failed.connect(lambda message: self.appendLog(f"資料庫寫入失敗（CSV 收集未受影響）：{message}"))
-        self.databaseWriter.completed.connect(self.appendLog)
-        self.databaseWriter.finished.connect(lambda: self.databaseWriterFinished(writer))
-        self.databaseWriter.start()
-        self.databaseWriter.enqueue("start", payload)
+        self.databaseStartPayload = payload
+        self.databaseBufferedRows = {"emg": [], "pedal": [], "trainer": []}
+        self.databasePendingSave = None
 
     def databaseAddSample(self, kind: str, time_s: float, sample: dict) -> None:
-        if self.databaseAggregator is None or self.databaseWriter is None:
+        if self.databaseAggregator is None:
             return
         rows = self.databaseAggregator.add(kind, time_s, sample)
         if rows:
-            self.databaseWriter.enqueue("rows", (kind, rows))
+            self.databaseBufferedRows[kind].extend(rows)
 
     def finishDatabaseRecording(self, result: dict | None) -> None:
-        writer, aggregator, test_id = self.databaseWriter, self.databaseAggregator, self.databaseTestId
+        aggregator, test_id = self.databaseAggregator, self.databaseTestId
         self.databaseAggregator = None
         self.databaseTestId = None
-        if writer is None or aggregator is None or test_id is None:
+        if aggregator is None or test_id is None or self.databaseStartPayload is None:
             return
         for kind, rows in aggregator.flush_all().items():
             if rows:
-                writer.enqueue("rows", (kind, rows))
+                self.databaseBufferedRows[kind].extend(rows)
         pedal = (result or {}).get("pedal", {})
         trainer = (result or {}).get("trainer", {})
         def stat(group: dict, key: str, field: str = "mean"):
@@ -1202,16 +1173,61 @@ class TrignoWindow(QMainWindow):
         max_power = stat(pedal, "power_w", "max") if stat(pedal, "power_w", "max") is not None else stat(trainer, "power_watts", "max")
         avg_cadence = stat(pedal, "cadence_rpm") if stat(pedal, "cadence_rpm") is not None else stat(trainer, "cadence_rpm")
         distance_m = stat(trainer, "session_distance_meters", "max")
-        elapsed = int(round(self.rideTime()))
+        elapsed = int(round(
+            (self.countdownStoppedAt or time.monotonic()) - self.countdownStartedAt
+        )) if self.countdownStartedAt is not None else int(round(self.rideTime()))
         status = "失敗" if self.collectionError else ("中斷" if self.collectionStoppedEarly else "完成")
-        writer.enqueue("finish", {"test_id": test_id, "test_time": elapsed, "status": status,
+        finish_payload = {"test_id": test_id, "test_time": elapsed, "status": status,
             "avg_power_w": avg_power, "max_power_w": max_power,
             "avg_cadence_rpm": avg_cadence, "distance_km": None if distance_m is None else distance_m / 1000,
             "left_balance_pct": stat(pedal, "left_balance_percent"),
             "right_balance_pct": None if stat(pedal, "left_balance_percent") is None else 100 - stat(pedal, "left_balance_percent"),
-            "notes": self.collectionError or ""})
-        self.databaseLastTestId = test_id
+            "notes": self.collectionError or ""}
+        self.databasePendingSave = (self.databaseStartPayload, self.databaseBufferedRows, finish_payload)
+        self.databaseStartPayload = None
+        self.saveDatabaseButton.setEnabled(self.activeDatabaseConfig is not None)
+        self.appendLog("本次測試待確認；按「儲存進資料庫」或「捨棄本次測試」")
+
+    def saveCurrentTestToDatabase(self) -> None:
+        pending = self.databasePendingSave
+        config = self.activeDatabaseConfig
+        if pending is None or config is None or self.rideSession is not None or self.bikeOnlySession or self.currentTestDecision is not None:
+            return
+        if self.databaseWriter is not None and self.databaseWriter.isRunning():
+            return
+        start_payload, rows_by_kind, finish_payload = pending
+        writer = DatabaseWriter(config)
+        self.databaseWriter = writer
+        self.databaseWriters.add(writer)
+        self.currentTestDecision = "saving"
+        self.saveDatabaseButton.setEnabled(False)
+        self.discardButton.setEnabled(False)
+        writer.connected.connect(lambda name: self.appendLog(f"資料庫已連線：{name}；TestID {start_payload['test_id']}"))
+        writer.failed.connect(lambda message: self.databaseSaveFailed(message))
+        writer.completed.connect(lambda message: self.databaseSaveCompleted(start_payload, message))
+        writer.finished.connect(lambda: self.databaseWriterFinished(writer))
+        writer.start()
+        writer.enqueue("save", pending)
         writer.enqueue("stop")
+
+    def databaseSaveFailed(self, message: str) -> None:
+        self.currentTestDecision = None
+        self.appendLog(f"資料庫儲存失敗：{message}")
+        self.saveDatabaseButton.setEnabled(True)
+        self.discardButton.setEnabled(True)
+        QMessageBox.warning(self, "資料庫儲存失敗", f"{message}\n本次測試仍可重試儲存或捨棄。")
+
+    def databaseSaveCompleted(self, start_payload: dict, message: str) -> None:
+        self.appendLog(message)
+        self.currentTestDecision = "saved"
+        self.databasePendingSave = None
+        self.pendingBaselineRecords = None
+        self.previousBaselineRecords = None
+        self.decisionBeforeCalibration = None
+        self.databaseLastTestId = start_payload["test_id"]
+        if start_payload.get("action_type") != "EMG 20 秒基準":
+            self.databaseComparePendingPatient = start_payload["patient_id"]
+            self.databaseComparePendingTestId = start_payload["test_id"]
 
     def databaseWriterFinished(self, writer: DatabaseWriter) -> None:
         """Retain every writer until its QThread has actually exited."""
@@ -1220,6 +1236,16 @@ class TrignoWindow(QMainWindow):
         if self.databaseWriter is writer:
             self.databaseWriter = None
         writer.deleteLater()
+        self.saveDatabaseButton.setEnabled(
+            self.currentTestDecision is None and self.databasePendingSave is not None
+            and self.activeDatabaseConfig is not None
+        )
+        self.discardButton.setEnabled(
+            self.currentTestDecision is None
+            and (self.collectedRideSession is not None or self.pendingBaselineRecords is not None)
+        )
+        if self.databaseComparePendingTestId:
+            self.loadDatabaseComparisonPatients()
         if discard_test_id:
             self.startDatabaseDiscardWorker(discard_test_id)
 
@@ -1243,8 +1269,12 @@ class TrignoWindow(QMainWindow):
         test_id = self.databaseTestId or self.databaseLastTestId
         writer = self.databaseWriter
         self.databaseAggregator = None
+        self.databaseStartPayload = None
+        self.databaseBufferedRows = {"emg": [], "pedal": [], "trainer": []}
+        self.databasePendingSave = None
         self.databaseTestId = None
         self.databaseLastTestId = None
+        self.saveDatabaseButton.setEnabled(False)
         if not test_id:
             return
         if active_writer and writer is not None and writer.isRunning():
@@ -1956,6 +1986,8 @@ class TrignoWindow(QMainWindow):
         self.hostEdit.setMinimumWidth(160)
         self.testButton, self.startButton, self.stopButton = QPushButton("測試連線"), QPushButton("開始串流", objectName="record"), QPushButton("停止")
         self.discardButton = QPushButton("捨棄本次測試")
+        self.saveDatabaseButton = QPushButton("儲存進資料庫")
+        self.saveDatabaseButton.setEnabled(False)
         self.calibrateButton = QPushButton("測量 20 秒基準")
         FluentThemeManager.set_property(self.calibrateButton, "fluentAppearance", "danger")
         self.calibrationLabel = QLabel(objectName="muted")
@@ -1963,8 +1995,9 @@ class TrignoWindow(QMainWindow):
         FluentThemeManager.set_property(self.startButton, "fluentAppearance", "success")
         FluentThemeManager.set_property(self.stopButton, "fluentAppearance", "danger")
         FluentThemeManager.set_property(self.discardButton, "fluentAppearance", "danger")
+        FluentThemeManager.set_property(self.saveDatabaseButton, "fluentAppearance", "success")
         self.discardButton.setToolTip("刪除剛完成或正在收集的測試檔案與資料庫資料")
-        for widget in (self.hostEdit, self.testButton, self.startButton, self.calibrateButton, self.stopButton, self.discardButton):
+        for widget in (self.hostEdit, self.testButton, self.startButton, self.calibrateButton, self.stopButton, self.saveDatabaseButton, self.discardButton):
             controls.addWidget(widget)
         controls.addWidget(self.calibrationLabel)
         controls.addSpacing(10)
@@ -2063,6 +2096,7 @@ class TrignoWindow(QMainWindow):
         self.startButton.clicked.connect(self.startStream)
         self.stopButton.clicked.connect(self.stopStream)
         self.discardButton.clicked.connect(self.requestDiscardCurrentTest)
+        self.saveDatabaseButton.clicked.connect(self.saveCurrentTestToDatabase)
         self.plotTimer = QTimer(self)
         self.plotTimer.setInterval(80)
         self.plotTimer.timeout.connect(self.refreshPlots)
@@ -2653,6 +2687,10 @@ class TrignoWindow(QMainWindow):
             side = mapping.abbreviation.rsplit("-", 1)[-1] if "-" in mapping.abbreviation else ""
             title = f"{side} {mapping.english_name.upper()}" if side in {"R", "L"} else mapping.english_name.upper()
             detected = self.sensorActive[index]
+            if hasattr(self, "inlineSensorStateLabels"):
+                state_label = self.inlineSensorStateLabels[index]
+                state_label.setText("已啟用" if detected else "未啟用" if self.sensorStatesKnown else "待測試")
+                FluentThemeManager.set_property(state_label, "fluentSeverity", "success" if detected else "info")
             self.sensorChecks[index].setLabels(f"S{mapping.slot:02d} · {mapping.chinese_name}", mapping.english_name)
             serial = self.sensorSerials.get(mapping.slot, "未取得 SID")
             tooltip = f"S{mapping.slot:02d} · {title}\nSID：{serial}"
@@ -2690,16 +2728,28 @@ class TrignoWindow(QMainWindow):
             self.syncMuscleMap()
 
     def startBaselineCalibration(self) -> None:
+        if self.databasePendingSave is not None:
+            QMessageBox.information(self, "基準測量", "請先儲存或捨棄上一筆測試。")
+            return
+        if self.databaseWriter is not None and self.databaseWriter.isRunning():
+            QMessageBox.information(self, "基準測量", "請等待上一筆測試儲存完成。")
+            return
         if self.streamWorker and self.streamWorker.isRunning():
             QMessageBox.information(self, "基準測量", "請先停止目前的串流，再開始基準測量。")
             return
         if not self.useEmgCheck.isChecked() or not any(self.sensorActive):
             QMessageBox.warning(self, "基準測量", "請先連線測試，確認至少一個 EMG 感測器啟用。")
             return
+        if not self.collectionSetupIsValid():
+            return
         protocol, accepted = QInputDialog.getText(self, "基準測量說明", "動作/姿勢/阻力/踏頻（待臨床確認）：", text=self.baselineManager.protocol)
         if not accepted:
             return
         self.baselineManager.protocol = protocol.strip()
+        self.previousBaselineRecords = dict(self.baselineManager.records)
+        self.pendingBaselineRecords = None
+        self.decisionBeforeCalibration = self.currentTestDecision
+        self.currentTestDecision = None
         self.calibrationOnly = True
         self.calibrationSession = None
         self.startStream()
@@ -3087,7 +3137,16 @@ class TrignoWindow(QMainWindow):
         self.startButton.setEnabled(not streaming and not testing)
         self.calibrateButton.setEnabled(not streaming and not testing)
         self.stopButton.setEnabled(streaming)
-        self.discardButton.setEnabled(streaming or self.collectedRideSession is not None)
+        self.discardButton.setEnabled(
+            not self.calibrationOnly and self.currentTestDecision is None
+            and (streaming or self.collectedRideSession is not None or self.pendingBaselineRecords is not None)
+        )
+        self.saveDatabaseButton.setEnabled(
+            not streaming and self.databasePendingSave is not None
+            and self.activeDatabaseConfig is not None
+            and not (self.databaseWriter and self.databaseWriter.isRunning())
+            and self.currentTestDecision is None
+        )
         self.hostEdit.setEnabled(not streaming and not testing)
         self.testButton.setEnabled(not streaming and not testing)
         self.durationMinutesSpin.setEnabled(not streaming)
@@ -3118,16 +3177,6 @@ class TrignoWindow(QMainWindow):
         if not host:
             QMessageBox.warning(self, "缺少位址", "請輸入 SDK Server IP 位址。")
             return
-        if not self.patientIdEdit.text().strip():
-            QMessageBox.warning(self, "缺少病人 ID", "請先在設定頁填寫病人 ID，再開始收集。")
-            self.tabs.setCurrentWidget(self.settingsTab)
-            self.patientIdEdit.setFocus()
-            return
-        if not self.patientIdEdit.text().strip():
-            QMessageBox.warning(self, "缺少病人 ID", "請先在設定頁填寫病人 ID，再開始收集。")
-            self.tabs.setCurrentWidget(self.settingsTab)
-            self.patientIdEdit.setFocus()
-            return
         self.setEmgStatus("正在測試連線…", "working")
         self.testWorker = ConnectionWorker(host)
         self.testWorker.connected.connect(lambda banner: self.emgStatus.setToolTip(banner))
@@ -3143,15 +3192,21 @@ class TrignoWindow(QMainWindow):
         if worker:
             worker.deleteLater()
         if not self.emgStatus.text().startswith("連線失敗"):
-            self.setEmgStatus("已連線；啟用感測器已更新", "connected")
+            status = "已連線；啟用感測器已更新" if any(self.sensorActive) else "SDK 已連線；沒有啟用的 EMG 感測器"
+            self.setEmgStatus(status, "connected")
             self.setEmgConnectionState(True)
         self.setStreaming(False)
 
     def emgConnectionFailed(self, message: str) -> None:
         self.setEmgStatus(f"連線失敗：{message}", "error")
         self.setEmgConnectionState(False)
+        self.sensorStatesKnown = False
+        self.sensorActive = [False] * CHANNEL_COUNT
+        self.sensorSerials = {}
+        self.updateSensorRows()
 
     def updateSensorStates(self, paired: list[int], active: list[int], serials: dict[int, str]) -> None:
+        self.sensorStatesKnown = True
         self.sensorActive = [index + 1 in active for index in range(CHANNEL_COUNT)]
         self.sensorSerials = serials
         if self.rideSession is not None:
@@ -3170,6 +3225,15 @@ class TrignoWindow(QMainWindow):
         return max(0.0, time.monotonic() - self.rideStartedAt)
 
     def beginRideAnalysis(self) -> None:
+        self.saveDatabaseButton.setText("儲存進資料庫")
+        self.discardButton.setText("捨棄本次測試")
+        self.summaryRecords = []
+        self.latestPedalRecords = []
+        self.refreshSummaryAnalysis()
+        for history in self.histories:
+            history.clear()
+        self.rebuildPlots()
+        self.sampleLabel.setText("0 samples")
         self.pendingAutoAngleAnalysis = False
         self.angleEmgPath = None
         self.anglePedalPath = None
@@ -3181,6 +3245,14 @@ class TrignoWindow(QMainWindow):
         self.clearAngleReportTables()
         self.discardCurrentCollection = False
         self.databaseLastTestId = None
+        self.databasePendingSave = None
+        self.pendingBaselineRecords = None
+        self.previousBaselineRecords = None
+        self.currentTestDecision = None
+        self.countdownStartedAt = None
+        self.countdownStoppedAt = None
+        self.countdownDeadline = None
+        self.saveDatabaseButton.setEnabled(False)
         self.angleExportButton.setEnabled(False)
         baselines = {str(slot): asdict(record) for slot, record in self.baselineManager.records.items()}
         self.rideSession = new_session(asdict(self.collectionSubject), baselines)
@@ -3210,8 +3282,6 @@ class TrignoWindow(QMainWindow):
             return
         self.pendingAutoAngleAnalysis = False
         self.updateAngleFileStatus()
-        self.tabs.setCurrentWidget(self.summaryTab)
-        self.summaryTabs.setCurrentIndex(2)
         self.angleViews.setCurrentIndex(0)
         self.angleOverviewLabel.setText("正在分析 EMG 與踏板角度…")
         self.runAngleAnalysis()
@@ -3255,9 +3325,34 @@ class TrignoWindow(QMainWindow):
 
     def requestDiscardCurrentTest(self) -> None:
         """Ask before permanently deleting the current collection and its database rows."""
+        if self.currentTestDecision in {"saving", "saved", "discarded"}:
+            return
+        if self.pendingBaselineRecords is not None and self.streamWorker is None:
+            choice = QMessageBox.question(
+                self, "捨棄基準測量", "捨棄本次 20 秒基準，恢復測量前的基準值？",
+                QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if choice != QMessageBox.StandardButton.Discard:
+                return
+            self.baselineManager.records = dict(self.previousBaselineRecords or {})
+            self.pendingBaselineRecords = None
+            self.previousBaselineRecords = None
+            self.decisionBeforeCalibration = None
+            self.databasePendingSave = None
+            self.currentTestDecision = "discarded"
+            self.saveDatabaseButton.setEnabled(False)
+            self.discardButton.setEnabled(False)
+            self.removeCurrentCollectionFiles()
+            self.calibrationLabel.setText("本次基準測量已捨棄")
+            self.updateSensorRows()
+            return
         has_current_test = self.rideSession is not None or self.collectedRideSession is not None
         if not has_current_test:
             QMessageBox.information(self, "捨棄本次測試", "目前沒有可捨棄的本次測試。")
+            return
+        if self.databaseWriter is not None and self.databaseWriter.isRunning():
+            QMessageBox.information(self, "資料庫儲存中", "請等待儲存完成，再決定是否捨棄。")
             return
         choice = QMessageBox.question(
             self, "捨棄本次測試",
@@ -3267,6 +3362,7 @@ class TrignoWindow(QMainWindow):
         )
         if choice != QMessageBox.StandardButton.Discard:
             return
+        self.currentTestDecision = "discarded"
         if self.rideSession is not None:
             self.discardCurrentCollection = True
             self.discardButton.setEnabled(False)
@@ -3279,6 +3375,7 @@ class TrignoWindow(QMainWindow):
         self.discardDatabaseRecording(active_database_writer)
         removed, failures = self.removeCurrentCollectionFiles()
         self.discardCurrentCollection = False
+        self.currentTestDecision = "discarded"
         self.rideSession = None
         self.latestRideSession = None
         self.collectedRideSession = None
@@ -3298,6 +3395,7 @@ class TrignoWindow(QMainWindow):
         self.summarySourceLabel.setText("本次測試已捨棄，未保留分析資料")
         self.refreshSummaryAnalysis()
         self.refreshComparison()
+        self.saveDatabaseButton.setEnabled(False)
         self.discardButton.setEnabled(False)
         detail = f"已刪除 {removed} 個檔案" if removed else "沒有需要刪除的檔案"
         if failures:
@@ -3466,6 +3564,7 @@ class TrignoWindow(QMainWindow):
         return SqlServerStorage(self.activeDatabaseConfig)
 
     def loadDatabaseComparisonPatients(self) -> None:
+        selected_patient = self.databaseComparePendingPatient or self.databaseComparePatientCombo.currentData()
         store = self._comparisonStore()
         if store is None:
             return
@@ -3481,6 +3580,9 @@ class TrignoWindow(QMainWindow):
         for patient in patients:
             name = str(patient["name"] or "未填姓名")
             self.databaseComparePatientCombo.addItem(f'{patient["patient_id"]} · {name}（{patient["test_count"]} 次）', patient["patient_id"])
+        selected_index = self.databaseComparePatientCombo.findData(selected_patient)
+        if selected_index >= 0:
+            self.databaseComparePatientCombo.setCurrentIndex(selected_index)
         self.databaseComparePatientCombo.blockSignals(False)
         if not patients:
             self.clearDatabaseComparisonCards()
@@ -3496,7 +3598,8 @@ class TrignoWindow(QMainWindow):
         duration_text = f"{int(duration)} 秒" if duration is not None else "時間未記錄"
         resistance = session.get("resistance_level")
         resistance_text = f"阻力 {float(resistance):g}" if resistance is not None else "阻力未記錄"
-        return f"{timestamp} ｜ {duration_text} ｜ {resistance_text}"
+        test_id = str(session.get("test_id") or "")
+        return f"{timestamp} ｜ {duration_text} ｜ {resistance_text} ｜ {test_id[-8:]}"
 
     def loadDatabaseComparisonSessions(self, *_args) -> None:
         patient_id = self.databaseComparePatientCombo.currentData()
@@ -3522,8 +3625,13 @@ class TrignoWindow(QMainWindow):
             self.clearDatabaseComparisonCards()
             self.comparisonStatusLabel.setText("此病人需要至少兩次含 RMS 資料的量測，才能比較。")
             return
-        self.databaseCompareACombo.setCurrentIndex(0)
-        self.databaseCompareBCombo.setCurrentIndex(1)
+        current_index = self.databaseCompareACombo.findData(
+            next((session for session in sessions if session["test_id"] == self.databaseComparePendingTestId), None)
+        )
+        self.databaseCompareACombo.setCurrentIndex(current_index if current_index >= 0 else 0)
+        self.databaseCompareBCombo.setCurrentIndex(1 if self.databaseCompareACombo.currentIndex() == 0 else 0)
+        self.databaseComparePendingPatient = None
+        self.databaseComparePendingTestId = None
         self.clearDatabaseComparisonCards()
         self.comparisonStatusLabel.setText("已載入兩次量測選項，請確認 A、B 與前後段秒數，再按「比較 RMS」顯示結果。")
 
@@ -4601,6 +4709,12 @@ class TrignoWindow(QMainWindow):
         self.appendLog(f"HTML 報表已匯出：{output.name}")
 
     def startStream(self) -> None:
+        if self.databasePendingSave is not None:
+            QMessageBox.information(self, "本次測試待確認", "請先按「儲存進資料庫」或「捨棄本次測試」，再開始下一次測試。")
+            return
+        if self.databaseWriter is not None and self.databaseWriter.isRunning():
+            QMessageBox.information(self, "資料庫儲存中", "請等待本次測試儲存完成。")
+            return
         if self.calibrationOnly:
             self.startCalibrationStream()
             return
@@ -4666,8 +4780,6 @@ class TrignoWindow(QMainWindow):
         self.collectionStoppedEarly = False
         self.startDatabaseRecording()
         self.emgRateLabel.setText("EMG 頻率：正在向 SDK 查詢…")
-        for history in self.histories:
-            history.clear()
         self.streamWorker = StreamWorker(host, output, self.mappings)
         self.streamWorker.status_changed.connect(self.streamStatusChanged)
         self.streamWorker.connected.connect(lambda banner: self.emgStatus.setToolTip(banner))
@@ -4681,10 +4793,6 @@ class TrignoWindow(QMainWindow):
         self.streamWorker.finished.connect(self.streamFinished)
         self.setStreaming(True)
         self.streamWorker.start()
-        # Start the camera as collection begins.  Waiting for a later EMG
-        # status callback made the GoPro appear unresponsive after this button
-        # was pressed; beginGoProRecording guards against duplicate requests.
-        self.beginGoProRecording()
 
     def startCalibrationStream(self) -> None:
         host = self.hostEdit.text().strip()
@@ -4694,6 +4802,12 @@ class TrignoWindow(QMainWindow):
             return
         self.collectionError = None
         self.collectionSummary = None
+        self.countdownStartedAt = None
+        self.countdownStoppedAt = None
+        self.countdownDeadline = None
+        self.collectionOutput = None
+        self.infoOutput = None
+        self.collectionSubject = self.subjectInfo()
         self.calibrationRecording = self.trainerIsConnected or self.pedalIsConnected
         output = None
         self.trainerRecorder = None
@@ -4727,6 +4841,10 @@ class TrignoWindow(QMainWindow):
                 return
         self.preprocessor = None
         self.rmsExtractor = None
+        for history in self.histories:
+            history.clear()
+        self.rebuildPlots()
+        self.sampleLabel.setText("0 samples")
         self.streamWorker = StreamWorker(host, output, self.mappings)
         self.streamWorker.status_changed.connect(self.streamStatusChanged)
         self.streamWorker.sensor_states_ready.connect(self.updateSensorStates)
@@ -4785,6 +4903,8 @@ class TrignoWindow(QMainWindow):
         self.startCountdown()
 
     def stopStream(self) -> None:
+        if self.countdownMode == "collection" and self.countdownStartedAt is not None and self.countdownStoppedAt is None:
+            self.countdownStoppedAt = time.monotonic()
         if self.remainingSeconds > 0:
             self.collectionStoppedEarly = True
         self.stopGoProRecording()
@@ -4849,6 +4969,8 @@ class TrignoWindow(QMainWindow):
         # A start worker now owns one persistent BLE session.  Do not open a
         # competing second connection: ask that same worker to send Stop.
         if self.goproWorker and self.goproWorker.isRunning() and self.goproWorker.action == "connect":
+            if not self.goproRecordingStarted and not self.goproAwaitingStartConfirmation:
+                return
             if self.goproStopRequested:
                 return
             self.goproStopRequested = True
@@ -5240,7 +5362,17 @@ class TrignoWindow(QMainWindow):
     def startCountdown(self) -> None:
         self.countdownMode = "collection"
         self.countdownStopsStream = True
+        self.countdownStartedAt = time.monotonic()
+        self.countdownStoppedAt = None
+        self.rideStartedAt = self.countdownStartedAt
+        if self.databaseAggregator is not None and self.databaseStartPayload is not None:
+            self.databaseStartedAt = datetime.now()
+            self.databaseAggregator.started_at = self.databaseStartedAt
+            self.databaseStartPayload["started_at"] = self.databaseStartedAt
         self.remainingSeconds = self.configuredDurationSeconds()
+        self.countdownDeadline = (
+            self.countdownStartedAt + self.remainingSeconds if self.remainingSeconds > 0 else None
+        )
         self.updateCountdownLabel()
         if self.remainingSeconds > 0:
             self.countdownTimer.start()
@@ -5250,11 +5382,12 @@ class TrignoWindow(QMainWindow):
         self.countdownMode = "calibration"
         self.countdownStopsStream = False
         self.remainingSeconds = 20
+        self.countdownDeadline = time.monotonic() + 20
         self.updateCountdownLabel()
         self.countdownTimer.start()
 
     def updateCountdown(self) -> None:
-        self.remainingSeconds -= 1
+        self.remainingSeconds = max(0, math.ceil(self.countdownDeadline - time.monotonic())) if self.countdownDeadline is not None else max(0, self.remainingSeconds - 1)
         self.updateCountdownLabel()
         if self.remainingSeconds <= 0:
             self.countdownTimer.stop()
@@ -5330,7 +5463,7 @@ class TrignoWindow(QMainWindow):
         session = self.calibrationSession
         if session is None:
             return
-        saved, invalid = [], []
+        saved, invalid, saved_slots = [], [], []
         for channel in session.channels:
             rms = session.rms_mv(channel)
             if rms is None or rms <= 1e-9:
@@ -5338,12 +5471,43 @@ class TrignoWindow(QMainWindow):
                 continue
             self.baselineManager.set_measured(channel + 1, rms, self.mappingIdentity(channel), self.sensorSerials.get(channel + 1, "Unknown SID"), self.currentSampleRate, self.filterSettings)
             saved.append(f"S{channel + 1:02d}")
+            saved_slots.append(channel + 1)
         try:
             self.baselineManager.save()
         except OSError as exc:
             QMessageBox.warning(self, "無法保存基準", str(exc))
         self.calibrationLabel.setText(f"基準完成：{', '.join(saved) or '無有效通道'}" + (f"；無效：{', '.join(invalid)}" if invalid else ""))
+        if saved_slots:
+            self.saveDatabaseButton.setText("儲存基準進資料庫")
+            self.discardButton.setText("捨棄本次基準")
+            self.pendingBaselineRecords = {slot: self.baselineManager.records[slot] for slot in saved_slots}
+            started_at = datetime.now()
+            test_id = prefixed_id("TEST")
+            self.databasePendingSave = ({
+                "test_id": test_id, "patient_id": self.collectionSubject.patientId,
+                "name": self.collectionSubject.name, "sex": self.collectionSubject.gender,
+                "action_type": "EMG 20 秒基準", "test_time": None,
+                "resistance_level": self.resistanceSpin.value(), "has_baseline": True,
+                "notes": self.baselineManager.protocol, "started_at": started_at,
+                "baselines": [{
+                    "muscle_name": f"{self.mappings[slot - 1].chinese_name} ({self.mappings[slot - 1].abbreviation})",
+                    "rms_mv": self.baselineManager.records[slot].rms_mv,
+                    "base_time": 10, "action_type": self.baselineManager.protocol or "基準測試",
+                    "yellow_pct": self.baselineManager.warning_percent,
+                    "red_pct": self.baselineManager.focus_percent,
+                    "quality_status": "VALID",
+                } for slot in saved_slots],
+            }, {"emg": [], "pedal": [], "trainer": []}, {
+                "test_id": test_id, "test_time": 20, "status": "完成",
+                "notes": self.baselineManager.protocol,
+            })
+            next_step = ("請選擇儲存進資料庫或捨棄" if self.activeDatabaseConfig is not None
+                         else "請先在設定頁測試資料庫連線，再儲存；也可捨棄")
+            self.calibrationLabel.setText(self.calibrationLabel.text() + "；" + next_step)
         self.calibrationSession = None
+        self.remainingSeconds = 0
+        self.countdownTimer.stop()
+        self.updateCountdownLabel()
         self.updateSensorRows()
         self.stopStream()
 
@@ -5388,15 +5552,28 @@ class TrignoWindow(QMainWindow):
         self.stopGoProRecording()
         self.closeTrainerRecording()
         self.closePedalRecording()
-        if not self.calibrationOnly:
+        was_calibration = self.calibrationOnly
+        if not was_calibration:
             self.finishRideAnalysis()
-        self.setStreaming(False)
-        if self.calibrationOnly:
+        if was_calibration:
             self.calibrationOnly = False
             self.calibrationRecording = False
+            if self.collectionError and self.pendingBaselineRecords is not None:
+                self.baselineManager.records = dict(self.previousBaselineRecords or {})
+                self.pendingBaselineRecords = None
+                self.databasePendingSave = None
+                self.updateSensorRows()
+            if self.pendingBaselineRecords is None:
+                self.currentTestDecision = self.decisionBeforeCalibration
+                self.previousBaselineRecords = None
+                self.saveDatabaseButton.setText("儲存進資料庫")
+                self.discardButton.setText("捨棄本次測試")
+            self.decisionBeforeCalibration = None
+            self.setStreaming(False)
             if self.collectionError:
                 self.calibrationLabel.setText("基準測量失敗；既有基準未變更")
             return
+        self.setStreaming(False)
         if self.collectionError:
             return
         if self.collectionSummary:
