@@ -34,7 +34,7 @@ def _text(value) -> str:
     return str(value if value is not None else '—')
 
 
-def _page(title: str, font: FontProperties, *, landscape: bool = False) -> Figure:
+def _page(title: str, font: FontProperties, *, landscape: bool = True) -> Figure:
     figure = Figure(figsize=(11.69, 8.27) if landscape else (8.27, 11.69), facecolor='white')
     figure.text(.055, .945, '復健騎乘分析', fontproperties=font, fontsize=9, color='#626268')
     figure.text(.055, .902, title, fontproperties=font, fontsize=17, color='#1d1d1f')

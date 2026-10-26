@@ -19,12 +19,19 @@
       <a class="nav-link {{ 'active' if request.endpoint == 'analysis.compare' else '' }}" href="{{ url_for('analysis.compare') }}" {% if request.endpoint == 'analysis.compare' %}aria-current="page"{% endif %}>測試比較</a>
     </div></div>
   </div></nav>
-  <main class="app-container page-shell" id="main-content" tabindex="-1">{% for category, message in get_flashed_messages(with_categories=true) %}<div class="alert alert-{{ category }} app-alert alert-dismissible fade show" role="alert" aria-live="polite"><span class="app-alert-icon" aria-hidden="true">{% if category == 'success' %}✓{% elif category == 'danger' %}!{% elif category == 'warning' %}!{% else %}i{% endif %}</span><div><strong>{% if category == 'success' %}操作完成{% elif category == 'danger' %}操作失敗{% elif category == 'warning' %}請注意{% else %}系統通知{% endif %}</strong><span>{{ message }}</span></div><button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="關閉通知"></button></div>{% endfor %}{% block content %}{% endblock %}</main>
+  <main class="app-container page-shell" id="main-content" tabindex="-1">{% block content %}{% endblock %}</main>
+  <script id="app-notifications" type="application/json">{{ get_flashed_messages(with_categories=true)|tojson }}</script>
   <footer class="app-container site-footer">© 2026 人工智慧暨巨量資料實驗室・斗六台大醫院復健科</footer>
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.all.min.js"></script>
+  <script src="{{ url_for('static', filename='js/app-notifications.js') }}"></script>
   <script src="{{ url_for('static', filename='js/analysis-charts.js') }}"></script>
   {% if request.blueprint == 'analysis' %}<script src="{{ url_for('static', filename='js/analysis-page.js') }}"></script>{% endif %}
   {% block scripts %}{% endblock %}
+  {% if request.blueprint == 'analysis' and record is defined and request.endpoint != 'analysis.print_report' %}
+  {% include 'pdf_export_modal.html' %}
+  <script src="{{ url_for('static', filename='js/pdf-export.js') }}"></script>
+  {% endif %}
 </body>
 </html>

@@ -1,0 +1,12 @@
+{% extends 'base.html' %}
+{% block title %}分析報告－{{ record.patient_name or record.patient_id }}{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/analysis-print.css') }}">
+<div class="report-controls surface p-3 mb-3">
+  <div class="d-flex justify-content-between align-items-center gap-3"><div><h1 class="fs-5 mb-1">橫式分析報告</h1><p id="report-progress" role="status" class="text-secondary mb-0">正在載入分析內容…</p></div><button class="btn btn-dark" id="report-print" disabled>列印／另存 PDF</button></div>
+  <p class="small text-secondary mt-2 mb-0">請在列印視窗選擇「另存為 PDF」、A4 橫式，關閉瀏覽器頁首與頁尾。內容以目前網頁樣式呈現，依紙張大小分頁。</p>
+</div>
+<div id="report-pages"></div>
+<script id="report-config" type="application/json">{{ report_pages|tojson }}</script>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='js/analysis-print.js') }}"></script>{% endblock %}

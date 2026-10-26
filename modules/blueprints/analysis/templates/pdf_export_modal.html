@@ -1,0 +1,16 @@
+<div class="modal fade" id="pdf-export-modal" tabindex="-1" aria-labelledby="pdf-export-title" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable"><form id="pdf-export-form" class="modal-content" method="post" action="{{ url_for('analysis.download_web_pdf', session_id=record.session_id) }}">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selection" value="1">
+    <div class="modal-header"><h2 class="modal-title fs-5" id="pdf-export-title">匯出分析 PDF</h2><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="關閉"></button></div>
+    <div class="modal-body">
+      <p class="text-secondary">A4 橫式，沿用網頁圖表、數值與分析設定。多張肌肉圖會分頁列出，測試概況固定包含。</p>
+      <div class="d-flex gap-2 mb-3"><button class="btn btn-secondary btn-sm" type="button" data-report-check="all">全部選取</button><button class="btn btn-outline-secondary btn-sm" type="button" data-report-check="none">清除選取</button></div>
+      <div class="row g-3">{% for key, label in report_sections %}<div class="col-md-6"><div class="form-check"><input class="form-check-input" id="report-{{ key }}" type="checkbox" name="section" value="{{ key }}" checked><label class="form-check-label" for="report-{{ key }}">{{ label }}</label></div></div>{% endfor %}</div>
+      <p class="text-secondary small mt-3 mb-0">確認後直接下載 PDF，不會開啟列印視窗，也不會附上瀏覽器網址、頁首或頁尾。缺少資料的項目會保留網頁的說明。</p>
+      <p id="pdf-export-status" class="small mt-3 mb-0" role="status" hidden></p>
+      <div id="pdf-export-settings"></div>
+    </div>
+    <div class="modal-footer"><button class="btn btn-secondary" type="button" data-bs-dismiss="modal">關閉</button><button class="btn btn-dark" type="submit">下載 PDF</button></div>
+  </form></div>
+</div>

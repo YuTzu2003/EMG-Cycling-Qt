@@ -54,6 +54,7 @@
       {% if person.notes %}<p class="subject-card-notes">{{ person.notes }}</p>{% endif %}
       <a class="subject-card-link" href="{{ url_for('patients.sessions', patient_id=person.patient_id) }}">查看測試紀錄 <span
           aria-hidden="true">↗</span></a>
+      <div class="d-flex justify-content-end gap-2 mt-3"><button class="btn btn-dark btn-sm" type="button" data-bs-toggle="modal" data-bs-target="#edit-patient-modal" data-edit-url="{{ url_for('patients.edit_patient', patient_id=person.patient_id) }}" data-patient-id="{{ person.patient_id }}" data-patient-name="{{ person.name }}" data-patient-gender="{{ person.gender or '未指定' }}" data-patient-notes="{{ person.notes or '' }}">修改資料</button><button class="btn btn-outline-danger btn-sm" type="button" data-bs-toggle="modal" data-bs-target="#delete-patient-modal" data-delete-url="{{ url_for('patients.delete_patient', patient_id=person.patient_id) }}" data-patient-id="{{ person.patient_id }}" data-patient-name="{{ person.name }}">刪除受測者</button></div>
     </article>
   </div>
   {% else %}
@@ -62,4 +63,49 @@
   </div>
   {% endfor %}
 </div>
+<div class="modal fade" id="edit-patient-modal" tabindex="-1" aria-labelledby="edit-patient-title" aria-hidden="true">
+  <div class="modal-dialog"><form method="post" class="modal-content" id="edit-patient-form">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="modal-header"><h2 class="modal-title fs-5" id="edit-patient-title">修改受測者資料</h2><button class="btn-close" type="button" data-bs-dismiss="modal" aria-label="關閉"></button></div>
+    <div class="modal-body">
+      <div class="mb-3"><label class="form-label" for="edit-patient-id">受測者編號</label><input class="form-control" id="edit-patient-id" readonly><div class="form-text">編號用於對應測試紀錄，無法在此變更。</div></div>
+      <div class="row g-3"><div class="col-sm-7"><label class="form-label" for="edit-patient-name">姓名</label><input class="form-control" id="edit-patient-name" name="name" maxlength="100" required></div><div class="col-sm-5"><label class="form-label" for="edit-patient-gender">性別</label><select class="form-select" id="edit-patient-gender" name="gender"><option>未指定</option><option>男性</option><option>女性</option><option>其他</option></select></div><div class="col-12"><label class="form-label" for="edit-patient-notes">備註</label><textarea class="form-control" id="edit-patient-notes" name="notes" rows="3" maxlength="1000"></textarea></div></div>
+    </div>
+    <div class="modal-footer"><button class="btn btn-secondary" type="button" data-bs-dismiss="modal">取消</button><button class="btn btn-dark" type="submit">儲存修改</button></div>
+  </form></div>
+</div>
+<div class="modal fade" id="delete-patient-modal" tabindex="-1" aria-labelledby="delete-patient-title" aria-hidden="true">
+  <div class="modal-dialog"><form method="post" class="modal-content" id="delete-patient-form">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <div class="modal-header"><h2 class="modal-title fs-5" id="delete-patient-title">永久刪除受測者</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="關閉"></button></div>
+    <div class="modal-body">
+      <p>將刪除 <strong id="delete-patient-name"></strong> 及其所有測試、EMG、踏板、訓練器、基準值與網站保存的原始檔及分析快取。此操作無法復原。</p>
+      <p class="text-secondary small">Qt 另存於其他資料夾或電腦的 CSV、影片，以及已下載的報告副本，不在網站管理範圍內，需要另行刪除。</p>
+      <label class="form-label" for="confirm-patient-id">請輸入受測者編號 <strong id="delete-patient-id"></strong> 確認刪除</label>
+      <input class="form-control" name="confirm_patient_id" id="confirm-patient-id" autocomplete="off" required>
+    </div>
+    <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button><button type="submit" class="btn btn-danger">永久刪除所有資料</button></div>
+  </form></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+  document.getElementById('edit-patient-modal').addEventListener('show.bs.modal', event => {
+    const button = event.relatedTarget;
+    if (!button) return;
+    document.getElementById('edit-patient-form').action = button.dataset.editUrl;
+    document.getElementById('edit-patient-id').value = button.dataset.patientId;
+    document.getElementById('edit-patient-name').value = button.dataset.patientName;
+    document.getElementById('edit-patient-gender').value = button.dataset.patientGender;
+    document.getElementById('edit-patient-notes').value = button.dataset.patientNotes;
+  });
+  document.getElementById('delete-patient-modal').addEventListener('show.bs.modal', event => {
+    const button = event.relatedTarget;
+    if (!button) return;
+    document.getElementById('delete-patient-form').action = button.dataset.deleteUrl;
+    document.getElementById('delete-patient-name').textContent = button.dataset.patientName;
+    document.getElementById('delete-patient-id').textContent = button.dataset.patientId;
+    document.getElementById('confirm-patient-id').value = '';
+  });
+</script>
 {% endblock %}

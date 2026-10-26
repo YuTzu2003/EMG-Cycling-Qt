@@ -1,0 +1,41 @@
+@page { size: A4 landscape; margin: 10mm; }
+body { background: #e9ecef; }
+body > .site-nav, body > .site-footer, .skip-link { display: none !important; }
+#main-content { max-width: 1120px; padding: 20px 0; }
+.report-section { background: white; padding: 22px; margin-bottom: 18px; }
+.report-section > h2 { font-size: 20px; margin: 0 0 18px; }
+.report-part { margin-bottom: 22px; }
+.report-part > h3 { font-size: 16px; margin: 14px 0; }
+.report-section .analysis-pane { display: block !important; }
+.report-section .table-responsive, .report-section .angle-table,
+.report-section .angle-chart-scroll { max-height: none; overflow: visible; }
+.report-section table { min-width: 0; width: 100%; }
+.report-section .data-table td { white-space: normal; overflow-wrap: anywhere; }
+.report-section .data-table thead th { white-space: normal; }
+.report-section .surface { box-shadow: none; }
+.report-chart { width: 100%; height: auto; display: block; }
+.report-chart-figure { margin: 0 0 16px; break-inside: avoid; }
+.report-chart-figure figcaption { color: #495057; font-size: 13px; margin-bottom: 5px; }
+.report-section .angle-polar-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.report-section .angle-polar-grid .report-chart { max-height: 105mm; object-fit: contain; }
+.report-section .pedal-workspace { grid-template-columns: minmax(250px, .36fr) minmax(0, 1fr); }
+.report-section .pedal-sidebar { grid-template-columns: 1fr; }
+.report-section .row > .col-lg-6, .report-section .emg-chart-row > .col-xl-6 { width: 50%; }
+.report-section thead { display: table-header-group; }
+.report-section tr { break-inside: avoid; }
+.report-section h3, .report-section h4 { break-after: avoid; }
+.report-section .report-part + .report-part { break-before: page; }
+.report-source-frame { position: fixed; left: -20000px; top: 0; width: 1100px; height: 900px; border: 0; }
+@media print {
+  html, body { background: white; margin: 0; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  #main-content { max-width: none; width: auto; padding: 0; margin: 0; }
+  .report-controls, .report-source-frame { display: none !important; }
+  .report-section { padding: 0; margin: 0; break-before: page; }
+  .report-section:first-child { break-before: auto; }
+  .report-section .surface, .report-section .analysis-chart-card { break-inside: avoid; }
+  .report-section .form-panel.angle-view-content { break-inside: auto; }
+  .report-section .report-chart { max-height: 155mm; object-fit: contain; }
+  .report-section .pedal-workspace, .report-section .pedal-chart-stack { display: block; }
+  .report-section .pedal-sidebar { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+  .report-section .analysis-chart-card { margin-bottom: 14px; height: auto; }
+}

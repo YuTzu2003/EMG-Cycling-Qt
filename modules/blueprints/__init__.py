@@ -42,6 +42,8 @@ def dashboard():
 
 def create_app(test_config: dict | None = None) -> Flask:
     load_dotenv(ROOT / ".env", override=False)
+    from modules.services.file_storage import cleanup_temporary_files
+    cleanup_temporary_files()
     app = Flask(
         __name__,
         template_folder=str(Path(__file__).resolve().parent / "templates"),

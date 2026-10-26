@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode
 from uuid import uuid4
-from flask import Blueprint, abort, flash, redirect, render_template, request, send_file, url_for
+from flask import Blueprint, abort, current_app, flash, redirect, render_template, request, send_file, url_for
 from markupsafe import Markup
 from werkzeug.utils import secure_filename
 from modules.services.database import connect as _connection
@@ -35,9 +35,75 @@ from modules.blueprints.analysis.emg.session_analysis import add_point, analyze,
 from modules.blueprints.analysis.emg.session_compare import compare_sessions, comparison_charts
 from modules.blueprints.analysis.emg.visuals import angle_profile_charts
 from modules.blueprints.analysis.pdf_report import build_session_pdf
+from modules.services.browser_pdf import render_pdf as _render_browser_pdf
 
 ROOT = Path(__file__).resolve().parents[3]
 analysis_bp = Blueprint("analysis", __name__, template_folder="templates")
+
+REPORT_SECTIONS = (
+    ("pedal", "踏板分析"), ("emg", "肌電分析"),
+    ("angle_overview", "角度：分析重點"), ("angle_fatigue", "角度：疲勞摘要"),
+    ("angle_fatigue_trend", "角度：逐圈疲勞趨勢"), ("angle_muscle", "角度：肌肉曲線"),
+    ("angle_phase", "角度：指定角度"), ("angle_heatmap", "角度：全肌肉熱圖"),
+    ("angle_profiles", "角度：肌肉角度曲線"), ("angle_polar", "角度：圓形角度圖"),
+    ("angle_cycle8", "角度：逐圈 8 角度"), ("angle_comparison", "角度：前後段數值"),
+    ("angle_values", "角度：前後段表格"), ("angle_interpretation", "角度：數值與判讀"),
+)
+
+
+@analysis_bp.context_processor
+def report_options():
+    return {"report_sections": REPORT_SECTIONS}
+
+
+@analysis_bp.get("/sessions/<session_id>/report/print")
+def print_report(session_id: str):
+    found = _get_session(session_id)
+    if found is None:
+        abort(404)
+    requested = request.args.getlist("section") if "selection" in request.args else [key for key, _ in REPORT_SECTIONS]
+    if not requested or set(requested) - {key for key, _ in REPORT_SECTIONS}:
+        abort(400, "請至少選擇一個有效的分析項目。")
+    settings = {key: value for key, value in request.args.items()
+                if key == "ftp_w" or key == "angle_settings" or key.startswith("angle_")}
+    pages = []
+    for key, label in REPORT_SECTIONS:
+        if key not in requested:
+            continue
+        params = {**settings, "view": "angle" if key.startswith("angle_") else key}
+        if key.startswith("angle_"):
+            params["angle_section"] = key.removeprefix("angle_")
+        pages.append({"key": key, "label": label,
+                      "url": url_for("analysis.session_detail", session_id=session_id, **params)})
+    response = render_template("print_report.html", record=found[0], report_pages=pages)
+    return response, 200, {"Cache-Control": "no-store"}
+
+
+@analysis_bp.post("/sessions/<session_id>/report/download")
+def download_web_pdf(session_id: str):
+    found = _get_session(session_id)
+    if found is None:
+        abort(404)
+    sections = request.form.getlist("section")
+    if not sections or set(sections) - {key for key, _ in REPORT_SECTIONS}:
+        return {"error": "請至少選擇一個有效的分析項目。"}, 400
+    settings = {key: value for key, value in request.form.items()
+                if key == "ftp_w" or key.startswith("angle_")}
+    report_path = url_for("analysis.print_report", session_id=session_id, selection=1, section=sections, **settings)
+    try:
+        phase = max(0, min(359, int(request.form.get("report_phase", 0))))
+    except (TypeError, ValueError):
+        return {"error": "踩踏相位設定不正確。"}, 400
+    try:
+        pdf = _render_browser_pdf(current_app._get_current_object(), report_path,
+                                  session_cookie=request.cookies.get(current_app.config["SESSION_COOKIE_NAME"]), phase=phase)
+    except RuntimeError as exc:
+        current_app.logger.warning("Web PDF export failed: %s", exc)
+        return {"error": str(exc)}, 503
+    filename = secure_filename(f"rehab-analysis-{found[0]['patient_id']}-{session_id}.pdf") or "analysis.pdf"
+    response = send_file(io.BytesIO(pdf), mimetype="application/pdf", as_attachment=True, download_name=filename)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 def _rows(cursor, values):
     return [dict(zip([column[0] for column in cursor.description], row)) for row in values]

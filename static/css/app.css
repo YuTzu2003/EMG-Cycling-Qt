@@ -433,6 +433,13 @@ body {
     font-weight: 650
 }
 
+.swal2-popup.app-notification-toast {
+    border: 1px solid #d9dee3;
+    border-radius: 6px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, .08);
+    font-family: inherit;
+}
+
 .file-list {
     padding: 5px 25px
 }
